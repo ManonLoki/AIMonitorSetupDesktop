@@ -11,6 +11,7 @@ import {
 import { useDisclosure } from "@mantine/hooks";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useSetAtom } from "jotai";
+import appIconUrl from "../../../src-tauri/icons/ai-monitor/128x128.png";
 import { colorSchemeAtom } from "../state/ui";
 import { LineIcon } from "./LineIcon";
 import { useQuery } from "@tanstack/react-query";
@@ -42,12 +43,13 @@ export function AppShellLayout() {
       <AppShell.Navbar p="md" className="app-navbar">
         <Group justify="space-between" mb={28} px={4}>
           <Group gap="sm">
-            <div className="brand-mark">
-              <span />
-              <span />
-              <span />
+            <img className="brand-mark" src={appIconUrl} alt="" />
+            <div className="brand-copy">
+              <Text fw={700}>AI Monitor</Text>
+              <Text size="xs" c="dimmed">
+                {overview.data ? `v${overview.data.version}` : "版本加载中"}
+              </Text>
             </div>
-            <Text fw={700}>AI Monitor</Text>
           </Group>
         </Group>
         <nav>
@@ -72,9 +74,6 @@ export function AppShellLayout() {
                 本地控制台
               </Text>
             </Group>
-            <Text size="xs" c="dimmed" mt={5} ml={20}>
-              {overview.data ? `v${overview.data.version}` : "版本加载中"}
-            </Text>
           </div>
           <Tooltip label={colorScheme === "dark" ? "浅色模式" : "深色模式"}>
             <ActionIcon

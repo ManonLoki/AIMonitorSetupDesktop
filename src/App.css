@@ -24,32 +24,14 @@ body {
 .brand-mark {
   width: 32px;
   height: 32px;
-  border-radius: 10px;
-  background: linear-gradient(145deg, #7950f2, #5f3dc4);
-  display: grid;
-  grid-template-columns: repeat(3, 4px);
-  align-content: center;
-  justify-content: center;
-  gap: 3px;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  object-fit: cover;
   box-shadow: 0 6px 16px rgba(121, 80, 242, 0.22);
 }
 
-.brand-mark span {
-  width: 4px;
-  border-radius: 4px;
-  background: white;
-}
-
-.brand-mark span:nth-child(1) {
-  height: 9px;
-}
-
-.brand-mark span:nth-child(2) {
-  height: 15px;
-}
-
-.brand-mark span:nth-child(3) {
-  height: 11px;
+.brand-copy {
+  line-height: 1.2;
 }
 
 .app-navbar {
