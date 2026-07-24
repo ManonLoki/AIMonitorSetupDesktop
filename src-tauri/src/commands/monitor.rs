@@ -27,10 +27,24 @@ pub fn save_monitor_settings(
 }
 
 #[tauri::command]
-pub async fn discover_monitor_devices() -> Result<Vec<DiscoveredMonitorDevice>, String> {
-    tauri::async_runtime::spawn_blocking(MonitorService::discover_devices)
-        .await
-        .map_err(|error| format!("设备发现任务失败：{error}"))?
+pub async fn discover_monitor_devices(
+    service: State<'_, MonitorService>,
+) -> Result<Vec<DiscoveredMonitorDevice>, String> {
+    let candidates =
+        tauri::async_runtime::spawn_blocking(MonitorService::discover_device_candidates)
+            .await
+            .map_err(|error| format!("设备发现任务失败：{error}"))??;
+    service.finish_device_discovery(candidates).await
+}
+
+#[tauri::command]
+pub fn save_manual_monitor_settings(
+    service: State<'_, MonitorService>,
+    name: String,
+    base_url: String,
+    username: String,
+) -> Result<MonitorSettings, String> {
+    service.save_manual_settings(&name, &base_url, &username)
 }
 
 #[tauri::command]

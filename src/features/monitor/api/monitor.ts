@@ -13,6 +13,11 @@ export interface DiscoveredMonitorDevice {
   apiVersion: string;
   baseUrl: string;
   path: string;
+  discoverySource:
+    | "mdns"
+    | "udpBroadcast"
+    | "savedAddress"
+    | "manualAddress";
 }
 
 export interface ConnectionStatus {
@@ -83,6 +88,18 @@ export function saveMonitorSettings(
 
 export function discoverMonitorDevices(): Promise<DiscoveredMonitorDevice[]> {
   return invokeCommand<DiscoveredMonitorDevice[]>("discover_monitor_devices");
+}
+
+export function saveManualMonitorSettings(
+  name: string,
+  baseUrl: string,
+  username: string,
+): Promise<MonitorSettings> {
+  return invokeCommand<MonitorSettings>("save_manual_monitor_settings", {
+    name,
+    baseUrl,
+    username,
+  });
 }
 
 export function checkMonitorConnection(

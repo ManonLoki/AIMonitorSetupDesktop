@@ -74,6 +74,18 @@ pub struct DiscoveredMonitorDevice {
     pub api_version: String,
     pub base_url: String,
     pub path: String,
+    #[serde(default)]
+    pub discovery_source: DiscoverySource,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DiscoverySource {
+    #[default]
+    Mdns,
+    UdpBroadcast,
+    SavedAddress,
+    ManualAddress,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -210,6 +222,23 @@ pub fn validate_settings(
         username: username.to_owned(),
         device_id: device_id.to_owned(),
         device_name: device_name.to_owned(),
+    })
+}
+
+pub fn manual_device(name: &str, base_url: &str) -> Result<DiscoveredMonitorDevice, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("设备名称不能为空".to_owned());
+    }
+    let base_url = normalize_base_url(base_url)?;
+
+    Ok(DiscoveredMonitorDevice {
+        id: format!("manual:{base_url}"),
+        name: name.to_owned(),
+        api_version: "1".to_owned(),
+        base_url,
+        path: "/api/device".to_owned(),
+        discovery_source: DiscoverySource::ManualAddress,
     })
 }
 
@@ -1030,12 +1059,12 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        AiProfile, AiTool, DEFAULT_BASE_URL, DiscoveredMonitorDevice, HookBehavior,
-        HookConfigPreview, HookContent, HookRunnerPaths, LEGACY_MANAGED_HOOK_PREFIX,
+        AiProfile, AiTool, DEFAULT_BASE_URL, DiscoveredMonitorDevice, DiscoverySource,
+        HookBehavior, HookConfigPreview, HookContent, HookRunnerPaths, LEGACY_MANAGED_HOOK_PREFIX,
         MANAGED_HOOK_PREFIX, MonitorSettings, command_has_marker, decoded_hook_command,
         generate_hook_config, generate_hook_runner_scripts, inspect_local_hook_config,
-        managed_hook_marker, merge_hook_config, migrate_legacy_profile, normalize_base_url,
-        validate_profile, validate_settings,
+        managed_hook_marker, manual_device, merge_hook_config, migrate_legacy_profile,
+        normalize_base_url, validate_profile, validate_settings,
     };
 
     fn profile(tool: AiTool) -> AiProfile {
@@ -1092,11 +1121,27 @@ mod tests {
                     api_version: "1".to_owned(),
                     base_url: DEFAULT_BASE_URL.to_owned(),
                     path: "/api/device".to_owned(),
+                    discovery_source: DiscoverySource::Mdns,
                 },
                 " "
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn manual_device_trims_fields_and_does_not_require_reachability() {
+        let device = manual_device("  Office Monitor  ", " http://192.168.50.20:8080/ ").unwrap();
+
+        assert_eq!(device.name, "Office Monitor");
+        assert_eq!(device.base_url, "http://192.168.50.20:8080");
+        assert_eq!(device.id, "manual:http://192.168.50.20:8080");
+        assert_eq!(device.discovery_source, DiscoverySource::ManualAddress);
+    }
+
+    #[test]
+    fn manual_device_requires_a_name() {
+        assert!(manual_device(" ", DEFAULT_BASE_URL).is_err());
     }
 
     #[test]

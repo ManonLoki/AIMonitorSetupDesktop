@@ -9,6 +9,7 @@ TAURI_CONFIG="${TAURI_DIR}/tauri.conf.json"
 PUBLISH_DIR="${REPO_ROOT}/publish"
 MAC_TARGET="aarch64-apple-darwin"
 WINDOWS_TARGET="x86_64-pc-windows-msvc"
+EXPECTED_WINDOWS_ICON="icons/ai-monitor/icon.ico"
 
 fail() {
   printf 'error: %s\n' "$*" >&2
@@ -51,6 +52,51 @@ VERSION="$(read_config_field version)" ||
   fail "could not read version from ${TAURI_CONFIG}"
 MAIN_BINARY_NAME="$(read_config_field mainBinaryName)" ||
   fail "could not read mainBinaryName from ${TAURI_CONFIG}"
+NSIS_INSTALLER_ICON="$(read_config_field bundle.windows.nsis.installerIcon)" ||
+  fail "could not read bundle.windows.nsis.installerIcon from ${TAURI_CONFIG}"
+NSIS_UNINSTALLER_ICON="$(read_config_field bundle.windows.nsis.uninstallerIcon)" ||
+  fail "could not read bundle.windows.nsis.uninstallerIcon from ${TAURI_CONFIG}"
+
+[[ "${NSIS_INSTALLER_ICON}" == "${EXPECTED_WINDOWS_ICON}" ]] ||
+  fail "NSIS installer must use ${EXPECTED_WINDOWS_ICON}, got: ${NSIS_INSTALLER_ICON}"
+[[ "${NSIS_UNINSTALLER_ICON}" == "${EXPECTED_WINDOWS_ICON}" ]] ||
+  fail "NSIS uninstaller must use ${EXPECTED_WINDOWS_ICON}, got: ${NSIS_UNINSTALLER_ICON}"
+
+WINDOWS_ICON="${TAURI_DIR}/${EXPECTED_WINDOWS_ICON}"
+[[ -f "${WINDOWS_ICON}" ]] ||
+  fail "missing Windows installer icon: ${WINDOWS_ICON}"
+file "${WINDOWS_ICON}" | grep -Fq "MS Windows icon resource" ||
+  fail "invalid Windows installer icon: ${WINDOWS_ICON}"
+
+node - "${TAURI_CONFIG}" "${TAURI_DIR}" <<'NODE' ||
+const fs = require("node:fs");
+const path = require("node:path");
+
+const [configPath, tauriDir] = process.argv.slice(2);
+const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+const languageFiles = config.bundle?.windows?.nsis?.customLanguageFiles;
+
+if (!languageFiles || typeof languageFiles !== "object") {
+  throw new Error("bundle.windows.nsis.customLanguageFiles must be configured");
+}
+
+for (const [language, relativePath] of Object.entries(languageFiles)) {
+  if (typeof relativePath !== "string" || relativePath.length === 0) {
+    throw new Error(`invalid NSIS language file for ${language}`);
+  }
+
+  const absolutePath = path.resolve(tauriDir, relativePath);
+  const relativeToTauri = path.relative(tauriDir, absolutePath);
+  if (relativeToTauri.startsWith("..") || path.isAbsolute(relativeToTauri)) {
+    throw new Error(`NSIS language file must stay inside src-tauri: ${relativePath}`);
+  }
+  if (!fs.statSync(absolutePath).isFile()) {
+    throw new Error(`NSIS language file is not a file: ${relativePath}`);
+  }
+}
+NODE
+  fail "invalid NSIS language file configuration"
+
 TARGET_DIR="$(
   cargo metadata \
     --manifest-path "${TAURI_DIR}/Cargo.toml" \

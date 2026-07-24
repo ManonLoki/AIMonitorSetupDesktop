@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AIMonitor",
   "mainBinaryName": "AIMonitor",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "identifier": "com.manonloki.ai-monitor-setup",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -27,12 +27,33 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "Utility",
+    "publisher": "AIMonitor",
+    "copyright": "Copyright © 2026 AIMonitor. All rights reserved.",
+    "shortDescription": "配置并管理 AIMonitor 设备与 AI 工具联动。",
+    "longDescription": "发现局域网中的 AIMonitor 设备，管理设备状态、图片资源以及 AI 工具的 Hook 配置。",
     "icon": [
       "icons/ai-monitor/32x32.png",
       "icons/ai-monitor/128x128.png",
       "icons/ai-monitor/128x128@2x.png",
       "icons/ai-monitor/icon.icns",
       "icons/ai-monitor/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/ai-monitor/icon.ico",
+        "uninstallerIcon": "icons/ai-monitor/icon.ico",
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "customLanguageFiles": {
+          "SimpChinese": "windows/nsis/languages/SimpChinese.nsh",
+          "English": "windows/nsis/languages/English.nsh"
+        }
+      }
+    }
   }
 }

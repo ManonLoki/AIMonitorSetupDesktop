@@ -26,6 +26,7 @@ pub fn run() {
             commands::monitor::get_monitor_settings,
             commands::monitor::save_monitor_settings,
             commands::monitor::discover_monitor_devices,
+            commands::monitor::save_manual_monitor_settings,
             commands::monitor::check_monitor_connection,
             commands::monitor::list_remote_images,
             commands::monitor::upload_remote_images,

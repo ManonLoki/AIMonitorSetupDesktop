@@ -1,27 +1,256 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
+    io::ErrorKind,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
     path::{Path, PathBuf},
     sync::RwLock,
+    thread,
     time::{Duration, Instant},
 };
 
-use mdns_sd::{ServiceDaemon, ServiceEvent};
+use if_addrs::{IfAddr, IfOperStatus};
+use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent};
 use reqwest::{Client, StatusCode, multipart};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::monitor::{
-    AiProfile, AiTool, DiscoveredMonitorDevice, HookConfigPreview, HookConfigWriteResult,
-    HookRunnerPaths, LocalHookConfig, MonitorSettings, SavedMonitorData, generate_hook_config,
-    generate_hook_runner_scripts, inspect_local_hook_config, merge_hook_config,
-    migrate_legacy_profile, normalize_base_url, validate_profile, validate_settings,
+    AiProfile, AiTool, DiscoveredMonitorDevice, DiscoverySource, HookConfigPreview,
+    HookConfigWriteResult, HookRunnerPaths, LocalHookConfig, MonitorSettings, SavedMonitorData,
+    generate_hook_config, generate_hook_runner_scripts, inspect_local_hook_config, manual_device,
+    merge_hook_config, migrate_legacy_profile, normalize_base_url, validate_profile,
+    validate_settings,
 };
 
 const STORE_FILENAME: &str = "monitor-data.json";
 const POSIX_RUNNER_FILENAME: &str = "aimonitor-hook.sh";
 const WINDOWS_RUNNER_FILENAME: &str = "aimonitor-hook.ps1";
 const AIMONITOR_SERVICE_TYPE: &str = "_aimonitor._tcp.local.";
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(4);
+const DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
+const UDP_DISCOVERY_PORT: u16 = 8080;
+const UDP_DISCOVERY_REQUEST: &[u8] = b"AIMONITOR_DISCOVER_V1";
+const UDP_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1_200);
+const UDP_RESPONSE_MAX_BYTES: usize = 1_024;
+const DEFAULT_DEVICE_API_PATH: &str = "/api/device";
+
+#[derive(Clone, Debug)]
+pub(crate) struct DiscoveryCandidate {
+    device: DiscoveredMonitorDevice,
+    base_urls: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct UdpBroadcastTarget {
+    local_ip: Ipv4Addr,
+    broadcast_ip: Ipv4Addr,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UdpDiscoveryResponse {
+    id: String,
+    name: String,
+    port: u16,
+    api_version: String,
+}
+
+fn discovery_base_url(address: &ScopedIp, port: u16) -> Option<String> {
+    match address {
+        ScopedIp::V4(address) => Some(format!("http://{}:{port}", address.addr())),
+        ScopedIp::V6(address) if address.addr().is_unicast_link_local() => {
+            let scope_id = address.scope_id().index;
+            (scope_id != 0).then(|| format!("http://[{}%25{scope_id}]:{port}", address.addr()))
+        }
+        ScopedIp::V6(address) => Some(format!("http://[{}]:{port}", address.addr())),
+        _ => None,
+    }
+}
+
+fn candidate_url_priority(base_url: &str) -> u8 {
+    u8::from(base_url.as_bytes().get(7) == Some(&b'['))
+}
+
+fn discover_udp_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
+    let targets = udp_broadcast_targets()?;
+    discover_udp_on_targets(&targets, UDP_DISCOVERY_PORT, UDP_DISCOVERY_TIMEOUT)
+}
+
+fn udp_broadcast_targets() -> Result<Vec<UdpBroadcastTarget>, String> {
+    let interfaces =
+        if_addrs::get_if_addrs().map_err(|error| format!("无法枚举本机网卡：{error}"))?;
+    let mut targets = interfaces
+        .into_iter()
+        .filter(|interface| {
+            matches!(
+                interface.oper_status,
+                IfOperStatus::Up | IfOperStatus::Unknown
+            ) && !interface.is_loopback()
+                && !interface.is_p2p()
+        })
+        .filter_map(|interface| match interface.addr {
+            IfAddr::V4(address) if !address.ip.is_unspecified() => {
+                let broadcast_ip = address
+                    .broadcast
+                    .unwrap_or_else(|| directed_broadcast(address.ip, address.netmask));
+                Some(UdpBroadcastTarget {
+                    local_ip: address.ip,
+                    broadcast_ip,
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|target| (target.local_ip, target.broadcast_ip));
+    targets.dedup();
+
+    if targets.is_empty() {
+        targets.push(UdpBroadcastTarget {
+            local_ip: Ipv4Addr::UNSPECIFIED,
+            broadcast_ip: Ipv4Addr::BROADCAST,
+        });
+    }
+    Ok(targets)
+}
+
+fn directed_broadcast(ip: Ipv4Addr, netmask: Ipv4Addr) -> Ipv4Addr {
+    Ipv4Addr::from(u32::from(ip) | !u32::from(netmask))
+}
+
+fn discover_udp_on_targets(
+    targets: &[UdpBroadcastTarget],
+    discovery_port: u16,
+    timeout: Duration,
+) -> Result<Vec<DiscoveryCandidate>, String> {
+    let mut sockets = Vec::with_capacity(targets.len());
+    let mut bind_errors = Vec::new();
+
+    for target in targets {
+        match UdpSocket::bind(SocketAddrV4::new(target.local_ip, 0)) {
+            Ok(socket) => {
+                if let Err(error) = socket.set_broadcast(true) {
+                    bind_errors.push(format!("{}：{error}", target.local_ip));
+                    continue;
+                }
+                if let Err(error) = socket.set_nonblocking(true) {
+                    bind_errors.push(format!("{}：{error}", target.local_ip));
+                    continue;
+                }
+                sockets.push((socket, *target));
+            }
+            Err(error) => bind_errors.push(format!("{}：{error}", target.local_ip)),
+        }
+    }
+
+    if sockets.is_empty() {
+        return Err(format!(
+            "无法在任何 IPv4 网卡上创建 UDP socket：{}",
+            bind_errors.join("；")
+        ));
+    }
+
+    for _ in 0..2 {
+        for (socket, target) in &sockets {
+            let destinations = [target.broadcast_ip, Ipv4Addr::BROADCAST]
+                .into_iter()
+                .collect::<HashSet<_>>();
+            for destination in destinations {
+                let _ = socket.send_to(
+                    UDP_DISCOVERY_REQUEST,
+                    SocketAddrV4::new(destination, discovery_port),
+                );
+            }
+        }
+        thread::sleep(Duration::from_millis(75));
+    }
+
+    let deadline = Instant::now() + timeout;
+    let mut candidates = HashMap::<String, DiscoveryCandidate>::new();
+    let mut response = [0_u8; UDP_RESPONSE_MAX_BYTES];
+
+    while Instant::now() < deadline {
+        let mut received_any = false;
+        for (socket, _) in &sockets {
+            loop {
+                match socket.recv_from(&mut response) {
+                    Ok((length, source)) => {
+                        received_any = true;
+                        if let Some(device) =
+                            parse_udp_discovery_response(&response[..length], source)
+                        {
+                            merge_udp_candidate(&mut candidates, device);
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                    Err(_) => break,
+                }
+            }
+        }
+        if !received_any {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let mut candidates = candidates.into_values().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.device.name.cmp(&right.device.name));
+    Ok(candidates)
+}
+
+fn parse_udp_discovery_response(
+    bytes: &[u8],
+    source: SocketAddr,
+) -> Option<DiscoveredMonitorDevice> {
+    let source_ip = match source {
+        SocketAddr::V4(source) => *source.ip(),
+        SocketAddr::V6(_) => return None,
+    };
+    if source_ip.is_unspecified() || source_ip.is_multicast() || source_ip.is_broadcast() {
+        return None;
+    }
+
+    let response = serde_json::from_slice::<UdpDiscoveryResponse>(bytes).ok()?;
+    let id = response.id.trim();
+    let name = response.name.trim();
+    let api_version = response.api_version.trim();
+    if id.is_empty()
+        || id.len() > 256
+        || name.is_empty()
+        || name.len() > 128
+        || api_version.is_empty()
+        || api_version.len() > 32
+        || response.port == 0
+    {
+        return None;
+    }
+
+    Some(DiscoveredMonitorDevice {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        api_version: api_version.to_owned(),
+        base_url: format!("http://{source_ip}:{}", response.port),
+        path: DEFAULT_DEVICE_API_PATH.to_owned(),
+        discovery_source: DiscoverySource::UdpBroadcast,
+    })
+}
+
+fn merge_udp_candidate(
+    candidates: &mut HashMap<String, DiscoveryCandidate>,
+    device: DiscoveredMonitorDevice,
+) {
+    let base_url = device.base_url.clone();
+    let candidate = candidates
+        .entry(device.id.clone())
+        .or_insert_with(|| DiscoveryCandidate {
+            device,
+            base_urls: Vec::new(),
+        });
+    if !candidate.base_urls.contains(&base_url) {
+        candidate.base_urls.push(base_url);
+    }
+    candidate
+        .base_urls
+        .sort_by_key(|url| candidate_url_priority(url));
+}
 
 pub struct MonitorService {
     client: Client,
@@ -127,13 +356,26 @@ impl MonitorService {
         Ok(settings)
     }
 
-    pub fn discover_devices() -> Result<Vec<DiscoveredMonitorDevice>, String> {
+    pub(crate) fn discover_device_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
+        match Self::discover_mdns_candidates() {
+            Ok(candidates) if !candidates.is_empty() => Ok(candidates),
+            Ok(_) => discover_udp_candidates(),
+            Err(mdns_error) => discover_udp_candidates().map_err(|udp_error| {
+                format!("mDNS 发现失败：{mdns_error}；UDP 广播发现失败：{udp_error}")
+            }),
+        }
+    }
+
+    fn discover_mdns_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
         let daemon = ServiceDaemon::new().map_err(|error| format!("无法启动设备发现：{error}"))?;
+        daemon
+            .set_ip_check_interval(1)
+            .map_err(|error| format!("无法启用网卡刷新：{error}"))?;
         let receiver = daemon
             .browse(AIMONITOR_SERVICE_TYPE)
             .map_err(|error| format!("无法扫描 AIMonitor 设备：{error}"))?;
         let deadline = Instant::now() + DISCOVERY_TIMEOUT;
-        let mut devices = HashMap::new();
+        let mut candidates: HashMap<String, DiscoveryCandidate> = HashMap::new();
 
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match receiver.recv_timeout(remaining) {
@@ -153,25 +395,47 @@ impl MonitorService {
                         .to_owned();
                     let path = properties
                         .get_property_val_str("path")
-                        .unwrap_or("/api/device")
+                        .unwrap_or(DEFAULT_DEVICE_API_PATH)
                         .to_owned();
-                    let mut addresses: Vec<_> = service.get_addresses_v4().into_iter().collect();
-                    addresses.sort_unstable();
-                    let host = addresses.first().map_or_else(
-                        || service.get_hostname().trim_end_matches('.').to_owned(),
-                        ToString::to_string,
-                    );
-                    let base_url = format!("http://{host}:{}", service.get_port());
-                    devices.insert(
-                        id.clone(),
-                        DiscoveredMonitorDevice {
-                            id,
-                            name,
-                            api_version,
-                            base_url,
-                            path,
-                        },
-                    );
+                    let mut base_urls = service
+                        .get_addresses()
+                        .iter()
+                        .filter_map(|address| discovery_base_url(address, service.get_port()))
+                        .collect::<Vec<_>>();
+                    if base_urls.is_empty() {
+                        let host = service.get_hostname().trim_end_matches('.');
+                        if !host.is_empty() {
+                            base_urls.push(format!("http://{host}:{}", service.get_port()));
+                        }
+                    }
+                    base_urls.sort_by_key(|url| candidate_url_priority(url));
+                    base_urls.dedup();
+
+                    let candidate =
+                        candidates
+                            .entry(id.clone())
+                            .or_insert_with(|| DiscoveryCandidate {
+                                device: DiscoveredMonitorDevice {
+                                    id,
+                                    name: name.clone(),
+                                    api_version: api_version.clone(),
+                                    base_url: base_urls.first().cloned().unwrap_or_default(),
+                                    path: path.clone(),
+                                    discovery_source: DiscoverySource::Mdns,
+                                },
+                                base_urls: Vec::new(),
+                            });
+                    candidate.device.name = name;
+                    candidate.device.api_version = api_version;
+                    candidate.device.path = path;
+                    candidate.base_urls.extend(base_urls);
+                    candidate
+                        .base_urls
+                        .sort_by_key(|url| candidate_url_priority(url));
+                    candidate.base_urls.dedup();
+                    if let Some(base_url) = candidate.base_urls.first() {
+                        candidate.device.base_url.clone_from(base_url);
+                    }
                 }
                 Ok(_) => {}
                 Err(_) => break,
@@ -180,9 +444,55 @@ impl MonitorService {
 
         let _ = daemon.stop_browse(AIMONITOR_SERVICE_TYPE);
         let _ = daemon.shutdown();
-        let mut devices: Vec<_> = devices.into_values().collect();
+        let mut candidates: Vec<_> = candidates.into_values().collect();
+        candidates.sort_by(|left, right| left.device.name.cmp(&right.device.name));
+        Ok(candidates)
+    }
+
+    pub(crate) async fn finish_device_discovery(
+        &self,
+        candidates: Vec<DiscoveryCandidate>,
+    ) -> Result<Vec<DiscoveredMonitorDevice>, String> {
+        let settings = self.settings()?;
+        let saved_is_reachable =
+            !settings.device_id.is_empty() && self.is_reachable(&settings.base_url).await;
+        let mut devices = Vec::with_capacity(candidates.len() + 1);
+        for mut candidate in candidates {
+            if let Some(base_url) = self.first_reachable_url(&candidate.base_urls).await {
+                candidate.device.base_url = base_url;
+            } else if saved_is_reachable && candidate.device.id == settings.device_id {
+                candidate.device.base_url.clone_from(&settings.base_url);
+                candidate.device.discovery_source = DiscoverySource::SavedAddress;
+            }
+            devices.push(candidate.device);
+        }
+
+        let saved_is_known = devices
+            .iter()
+            .any(|device| device.id == settings.device_id || device.base_url == settings.base_url);
+        if !saved_is_known && saved_is_reachable {
+            devices.push(DiscoveredMonitorDevice {
+                id: settings.device_id,
+                name: settings.device_name,
+                api_version: "1".to_owned(),
+                base_url: settings.base_url,
+                path: DEFAULT_DEVICE_API_PATH.to_owned(),
+                discovery_source: DiscoverySource::SavedAddress,
+            });
+        }
+
         devices.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(devices)
+    }
+
+    pub fn save_manual_settings(
+        &self,
+        name: &str,
+        base_url: &str,
+        username: &str,
+    ) -> Result<MonitorSettings, String> {
+        let device = manual_device(name, base_url)?;
+        self.save_settings(&device, username)
     }
 
     pub async fn check_connection(
@@ -217,6 +527,26 @@ impl MonitorService {
                 message: format!("无法连接设备：{error}"),
             },
         })
+    }
+
+    async fn first_reachable_url(&self, base_urls: &[String]) -> Option<String> {
+        for base_url in base_urls {
+            if self.is_reachable(base_url).await {
+                return Some(base_url.clone());
+            }
+        }
+        None
+    }
+
+    async fn is_reachable(&self, base_url: &str) -> bool {
+        matches!(
+            self.client
+                .get(format!("{base_url}/health"))
+                .timeout(DISCOVERY_PROBE_TIMEOUT)
+                .send()
+                .await,
+            Ok(response) if response.status().is_success()
+        )
     }
 
     pub async fn images(&self) -> Result<Vec<RemoteImage>, String> {
@@ -515,7 +845,10 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use mdns_sd::{InterfaceId, ScopedIpV4};
 
     use crate::domain::monitor::{HookBehavior, HookContent};
 
@@ -568,6 +901,123 @@ mod tests {
             validate_image_uploads(&[]),
             Err("请选择要上传的图片".to_owned())
         );
+    }
+
+    #[test]
+    fn discovery_prefers_ipv4_candidates_before_ipv6() {
+        let mut urls = [
+            "http://[fd00::20]:8080".to_owned(),
+            "http://192.168.50.20:8080".to_owned(),
+        ];
+
+        urls.sort_by_key(|url| candidate_url_priority(url));
+
+        assert_eq!(urls[0], "http://192.168.50.20:8080");
+    }
+
+    #[test]
+    fn discovery_formats_addresses_for_direct_health_probes() {
+        let ipv4 = ScopedIp::V4(ScopedIpV4::new(
+            Ipv4Addr::new(192, 168, 50, 20),
+            InterfaceId {
+                name: "Ethernet".to_owned(),
+                index: 12,
+            },
+        ));
+        let ipv6 = ScopedIp::from(IpAddr::V6("fd00::20".parse::<Ipv6Addr>().unwrap()));
+
+        assert_eq!(
+            discovery_base_url(&ipv4, 8080).as_deref(),
+            Some("http://192.168.50.20:8080")
+        );
+        assert_eq!(
+            discovery_base_url(&ipv6, 8080).as_deref(),
+            Some("http://[fd00::20]:8080")
+        );
+    }
+
+    #[test]
+    fn directed_broadcast_uses_the_interface_netmask() {
+        assert_eq!(
+            directed_broadcast(
+                Ipv4Addr::new(192, 168, 50, 20),
+                Ipv4Addr::new(255, 255, 255, 0)
+            ),
+            Ipv4Addr::new(192, 168, 50, 255)
+        );
+        assert_eq!(
+            directed_broadcast(Ipv4Addr::new(10, 23, 45, 67), Ipv4Addr::new(255, 255, 0, 0)),
+            Ipv4Addr::new(10, 23, 255, 255)
+        );
+    }
+
+    #[test]
+    fn udp_response_uses_the_datagram_source_ip_and_advertised_port() {
+        let device = parse_udp_discovery_response(
+            r#"{"id":"device-17","name":"客厅监控屏","port":8080,"apiVersion":"1"}"#.as_bytes(),
+            "192.168.50.23:49152".parse().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(device.id, "device-17");
+        assert_eq!(device.name, "客厅监控屏");
+        assert_eq!(device.base_url, "http://192.168.50.23:8080");
+        assert_eq!(device.api_version, "1");
+        assert_eq!(device.discovery_source, DiscoverySource::UdpBroadcast);
+    }
+
+    #[test]
+    fn udp_response_rejects_invalid_metadata() {
+        assert!(
+            parse_udp_discovery_response(
+                br#"{"id":"","name":"Monitor","port":8080,"apiVersion":"1"}"#,
+                "192.168.50.23:49152".parse().unwrap(),
+            )
+            .is_none()
+        );
+        assert!(
+            parse_udp_discovery_response(
+                br#"{"id":"device","name":"Monitor","port":0,"apiVersion":"1"}"#,
+                "192.168.50.23:49152".parse().unwrap(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn udp_discovery_round_trip_matches_the_android_protocol() {
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let port = server.local_addr().unwrap().port();
+        let responder = thread::spawn(move || {
+            let mut request = [0_u8; 256];
+            let (length, source) = server.recv_from(&mut request).unwrap();
+            assert_eq!(&request[..length], UDP_DISCOVERY_REQUEST);
+            server
+                .send_to(
+                    r#"{"id":"device-loopback","name":"测试设备","port":8080,"apiVersion":"1"}"#
+                        .as_bytes(),
+                    source,
+                )
+                .unwrap();
+        });
+
+        let candidates = discover_udp_on_targets(
+            &[UdpBroadcastTarget {
+                local_ip: Ipv4Addr::LOCALHOST,
+                broadcast_ip: Ipv4Addr::LOCALHOST,
+            }],
+            port,
+            Duration::from_millis(250),
+        )
+        .unwrap();
+        responder.join().unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].device.id, "device-loopback");
+        assert_eq!(candidates[0].device.base_url, "http://127.0.0.1:8080");
     }
 
     #[test]
