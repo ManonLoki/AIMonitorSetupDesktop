@@ -11,15 +11,16 @@ use std::{
 
 use if_addrs::{IfAddr, IfOperStatus};
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent};
-use reqwest::{Client, StatusCode, multipart};
+use reqwest::{Client, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::monitor::{
     AiProfile, AiTool, DiscoveredMonitorDevice, DiscoverySource, HookConfigDirectories,
     HookConfigLocation, HookConfigPreview, HookConfigWriteResult, HookRunnerPaths, LocalHookConfig,
-    MonitorSettings, SavedMonitorData, generate_hook_config, generate_hook_runner_scripts,
-    hook_config_filename, inspect_local_hook_config, manual_device, merge_hook_config,
-    migrate_legacy_profile, normalize_base_url, validate_profile, validate_settings,
+    MonitorSettings, SavedMonitorData, encode_base64, generate_hook_config,
+    generate_hook_runner_scripts, hook_config_filename, inspect_local_hook_config, manual_device,
+    merge_hook_config, migrate_legacy_profile, normalize_base_url, validate_profile,
+    validate_settings,
 };
 
 const STORE_FILENAME: &str = "monitor-data.json";
@@ -33,6 +34,7 @@ const UDP_DISCOVERY_REQUEST: &[u8] = b"AIMONITOR_DISCOVER_V1";
 const UDP_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1_200);
 const UDP_RESPONSE_MAX_BYTES: usize = 1_024;
 const DEFAULT_DEVICE_API_PATH: &str = "/api/device";
+const MAX_REMOTE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
 fn detect_hook_config_directories(config_home: &Path) -> HookConfigDirectories {
     HookConfigDirectories {
@@ -285,7 +287,7 @@ pub struct ConnectionStatus {
     pub message: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteImage {
     pub filename: String,
@@ -295,7 +297,14 @@ pub struct RemoteImage {
 
 #[derive(Deserialize)]
 struct ImageListResponse {
-    images: Vec<RemoteImage>,
+    images: Vec<RemoteImageMetadata>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteImageMetadata {
+    filename: String,
+    mime_type: String,
 }
 
 #[derive(Deserialize)]
@@ -575,11 +584,66 @@ impl MonitorService {
             .await
             .map_err(|error| format!("无法读取远端图片：{error}"))?;
         let response = ensure_success(response).await?;
-        response
+        let metadata = response
             .json::<ImageListResponse>()
             .await
             .map(|body| body.images)
-            .map_err(|error| format!("图片列表响应格式错误：{error}"))
+            .map_err(|error| format!("图片列表响应格式错误：{error}"))?;
+        let mut images = Vec::with_capacity(metadata.len());
+
+        // AIMonitor serves image bytes through GET /api/images/{filename}.
+        // Fetch sequentially because the embedded device handles only a small
+        // number of concurrent connections reliably.
+        for item in metadata {
+            images.push(self.remote_image(&base_url, item).await?);
+        }
+
+        Ok(images)
+    }
+
+    async fn remote_image(
+        &self,
+        base_url: &str,
+        metadata: RemoteImageMetadata,
+    ) -> Result<RemoteImage, String> {
+        let filename = metadata.filename.trim();
+        let url = remote_image_url(base_url, filename)?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| format!("{filename} 读取失败：{error}"))?;
+        let response = ensure_success(response).await?;
+        if let Some(length) = response.content_length() {
+            ensure_image_size(length, filename)?;
+        }
+
+        let header_mime = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim);
+        let mime_type = [header_mime, Some(metadata.mime_type.trim())]
+            .into_iter()
+            .flatten()
+            .find(|value| is_supported_image_mime(value))
+            .ok_or_else(|| format!("{filename} 返回了不支持的图片类型"))?
+            .to_owned();
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| format!("{filename} 读取失败：{error}"))?;
+        ensure_image_size(bytes.len() as u64, filename)?;
+
+        let image = format!("data:{mime_type};base64,{}", encode_base64(&bytes));
+        Ok(RemoteImage {
+            filename: filename.to_owned(),
+            mime_type,
+            image,
+        })
     }
 
     pub async fn upload_images(&self, images: Vec<ImageUpload>) -> Result<Vec<String>, String> {
@@ -823,20 +887,43 @@ impl MonitorService {
     }
 }
 
+fn remote_image_url(base_url: &str, filename: &str) -> Result<Url, String> {
+    if filename.is_empty() || filename == "." || filename == ".." || filename.contains(['/', '\\'])
+    {
+        return Err("远端图片文件名无效".to_owned());
+    }
+
+    let mut url = Url::parse(&format!("{base_url}/api/images/"))
+        .map_err(|error| format!("设备图片地址无效：{error}"))?;
+    url.path_segments_mut()
+        .map_err(|()| "设备图片地址不能包含路径段".to_owned())?
+        .pop_if_empty()
+        .push(filename);
+    Ok(url)
+}
+
+fn is_supported_image_mime(mime_type: &str) -> bool {
+    matches!(mime_type, "image/jpeg" | "image/png" | "image/gif")
+}
+
+fn ensure_image_size(len: u64, filename: &str) -> Result<(), String> {
+    if len > MAX_REMOTE_IMAGE_BYTES as u64 {
+        return Err(format!("{filename} 不能超过 8 MiB"));
+    }
+    Ok(())
+}
+
 fn validate_image_uploads(images: &[ImageUpload]) -> Result<(), String> {
     if images.is_empty() {
         return Err("请选择要上传的图片".to_owned());
     }
 
-    let allowed = ["image/jpeg", "image/png", "image/gif"];
     for image in images {
         if image.filename.trim().is_empty() || image.bytes.is_empty() {
             return Err("所选图片中包含空文件".to_owned());
         }
-        if image.bytes.len() > 8 * 1024 * 1024 {
-            return Err(format!("{} 不能超过 8 MiB", image.filename));
-        }
-        if !allowed.contains(&image.mime_type.as_str()) {
+        ensure_image_size(image.bytes.len() as u64, &image.filename)?;
+        if !is_supported_image_mime(&image.mime_type) {
             return Err(format!(
                 "{} 不是支持的 JPEG、PNG 或 GIF 图片",
                 image.filename
@@ -987,6 +1074,17 @@ mod tests {
             validate_image_uploads(&[]),
             Err("请选择要上传的图片".to_owned())
         );
+    }
+
+    #[test]
+    fn remote_image_url_encodes_one_filename_path_segment() {
+        let url = remote_image_url("http://192.168.50.20:8080", "状态 图片 #1.gif").unwrap();
+
+        assert_eq!(
+            url.as_str(),
+            "http://192.168.50.20:8080/api/images/%E7%8A%B6%E6%80%81%20%E5%9B%BE%E7%89%87%20%231.gif"
+        );
+        assert!(remote_image_url("http://192.168.50.20:8080", "../secret").is_err());
     }
 
     #[test]
