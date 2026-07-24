@@ -24,6 +24,7 @@
 | 异步状态 | TanStack Query | 5.101.4 | Rust command 的生命周期、缓存和失效 |
 | 客户端状态 | Jotai | 2.20.2 | 主题、面板开关等纯 UI 状态 |
 | 原生通信 | `@tauri-apps/api` | 2.11.1 | 类型化 `invoke` 调用 |
+| 原生目录选择 | `@tauri-apps/plugin-dialog` | 2.7.2 | 仅用于选择 Hooks 配置目录，路径保存与校验仍由 Rust 完成 |
 
 ## Rust 后端库
 
@@ -33,6 +34,7 @@
 | 局域网服务发现 | mdns-sd | 0.20.2 | 仅由 Rust application 层发现 `_aimonitor._tcp.local.` 设备 |
 | 网卡与广播地址 | if-addrs | 0.15.0 | 仅由 Rust application 层枚举可用 IPv4 网卡并发送 UDP 定向广播 |
 | JSON 持久化 | serde_json | 1.0.151 | 保存设备设置与 AI 实例配置 |
+| 原生目录选择 | tauri-plugin-dialog | 2.7.2 | 为前端提供系统目录选择器 |
 
 ## 为什么不使用 Axios
 

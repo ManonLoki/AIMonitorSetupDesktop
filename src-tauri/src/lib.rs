@@ -13,6 +13,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let config_home = app.path().home_dir()?;
@@ -32,6 +33,8 @@ pub fn run() {
             commands::monitor::upload_remote_images,
             commands::monitor::delete_remote_image,
             commands::monitor::list_ai_profiles,
+            commands::monitor::list_hook_config_locations,
+            commands::monitor::save_hook_config_directory,
             commands::monitor::write_ai_profile,
             commands::monitor::preview_hook_config,
             commands::monitor::list_local_hook_configs,

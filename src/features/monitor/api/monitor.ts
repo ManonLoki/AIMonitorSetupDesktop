@@ -1,3 +1,4 @@
+import { open } from "@tauri-apps/plugin-dialog";
 import { invokeCommand } from "../../../shared/tauri/invoke-command";
 
 export interface MonitorSettings {
@@ -72,6 +73,13 @@ export interface LocalHookConfig {
   content: string;
 }
 
+export interface HookConfigLocation {
+  tool: AiTool;
+  directory: string;
+  configPath: string;
+  isCustom: boolean;
+}
+
 export function getMonitorSettings(): Promise<MonitorSettings> {
   return invokeCommand<MonitorSettings>("get_monitor_settings");
 }
@@ -132,6 +140,31 @@ export function deleteRemoteImage(filename: string): Promise<void> {
 
 export function listAiProfiles(): Promise<AiProfile[]> {
   return invokeCommand<AiProfile[]>("list_ai_profiles");
+}
+
+export function listHookConfigLocations(): Promise<HookConfigLocation[]> {
+  return invokeCommand<HookConfigLocation[]>("list_hook_config_locations");
+}
+
+export function saveHookConfigDirectory(
+  tool: AiTool,
+  directory: string,
+): Promise<HookConfigLocation> {
+  return invokeCommand<HookConfigLocation>("save_hook_config_directory", {
+    tool,
+    directory,
+  });
+}
+
+export async function chooseHookConfigDirectory(
+  defaultPath: string,
+): Promise<string | null> {
+  return open({
+    title: "选择 Hooks 配置目录",
+    directory: true,
+    multiple: false,
+    defaultPath,
+  });
 }
 
 export function writeAiProfile(

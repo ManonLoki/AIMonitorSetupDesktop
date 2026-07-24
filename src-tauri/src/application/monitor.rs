@@ -15,11 +15,11 @@ use reqwest::{Client, StatusCode, multipart};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::monitor::{
-    AiProfile, AiTool, DiscoveredMonitorDevice, DiscoverySource, HookConfigPreview,
-    HookConfigWriteResult, HookRunnerPaths, LocalHookConfig, MonitorSettings, SavedMonitorData,
-    generate_hook_config, generate_hook_runner_scripts, inspect_local_hook_config, manual_device,
-    merge_hook_config, migrate_legacy_profile, normalize_base_url, validate_profile,
-    validate_settings,
+    AiProfile, AiTool, DiscoveredMonitorDevice, DiscoverySource, HookConfigDirectories,
+    HookConfigLocation, HookConfigPreview, HookConfigWriteResult, HookRunnerPaths, LocalHookConfig,
+    MonitorSettings, SavedMonitorData, generate_hook_config, generate_hook_runner_scripts,
+    hook_config_filename, inspect_local_hook_config, manual_device, merge_hook_config,
+    migrate_legacy_profile, normalize_base_url, validate_profile, validate_settings,
 };
 
 const STORE_FILENAME: &str = "monitor-data.json";
@@ -33,6 +33,23 @@ const UDP_DISCOVERY_REQUEST: &[u8] = b"AIMONITOR_DISCOVER_V1";
 const UDP_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1_200);
 const UDP_RESPONSE_MAX_BYTES: usize = 1_024;
 const DEFAULT_DEVICE_API_PATH: &str = "/api/device";
+
+fn detect_hook_config_directories(config_home: &Path) -> HookConfigDirectories {
+    HookConfigDirectories {
+        codex: detected_config_directory("CODEX_HOME", &config_home.join(".codex")),
+        claude_code: detected_config_directory("CLAUDE_CONFIG_DIR", &config_home.join(".claude")),
+        cursor: config_home.join(".cursor").to_string_lossy().into_owned(),
+    }
+}
+
+fn detected_config_directory(variable: &str, fallback: &Path) -> String {
+    std::env::var_os(variable)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| fallback.to_owned())
+        .to_string_lossy()
+        .into_owned()
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct DiscoveryCandidate {
@@ -255,7 +272,7 @@ fn merge_udp_candidate(
 pub struct MonitorService {
     client: Client,
     data_path: PathBuf,
-    config_home: PathBuf,
+    default_hook_config_directories: HookConfigDirectories,
     runner_paths: HookRunnerPaths,
     data: RwLock<SavedMonitorData>,
 }
@@ -317,7 +334,7 @@ impl MonitorService {
         Ok(Self {
             client: Client::new(),
             data_path,
-            config_home: config_home.to_owned(),
+            default_hook_config_directories: detect_hook_config_directories(config_home),
             runner_paths: HookRunnerPaths {
                 posix: app_data_dir
                     .join(POSIX_RUNNER_FILENAME)
@@ -614,6 +631,47 @@ impl MonitorService {
             .map_err(|_| "AI 配置读取锁已损坏".to_owned())
     }
 
+    pub fn hook_config_locations(&self) -> Result<Vec<HookConfigLocation>, String> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| "Hooks 路径读取锁已损坏".to_owned())?;
+        Ok(AiTool::ALL
+            .into_iter()
+            .map(|tool| self.hook_config_location(&data, tool))
+            .collect())
+    }
+
+    pub fn save_hook_config_directory(
+        &self,
+        tool: AiTool,
+        directory: &str,
+    ) -> Result<HookConfigLocation, String> {
+        let directory = directory.trim();
+        if !directory.is_empty() {
+            let path = Path::new(directory);
+            if !path.is_absolute() {
+                return Err("Hooks 配置目录必须使用绝对路径".to_owned());
+            }
+            if path.exists() && !path.is_dir() {
+                return Err(format!("Hooks 配置目录不是文件夹：{}", path.display()));
+            }
+        }
+
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| "Hooks 路径写入锁已损坏".to_owned())?;
+        let mut next_data = data.clone();
+        next_data
+            .hook_config_directories
+            .set(tool, directory.to_owned());
+        self.persist(&next_data)?;
+        let location = self.hook_config_location(&next_data, tool);
+        *data = next_data;
+        Ok(location)
+    }
+
     pub fn write_profile(&self, profile: AiProfile) -> Result<HookConfigWriteResult, String> {
         let profile = validate_profile(profile)?;
         let mut data = self
@@ -621,9 +679,10 @@ impl MonitorService {
             .write()
             .map_err(|_| "AI 配置写入锁已损坏".to_owned())?;
         let generated = generate_hook_config(profile.clone(), &self.runner_paths)?;
-        let config_path = self.config_home.join(&generated.filename);
+        let config_path = self.hook_config_path(&data, profile.tool);
         let existing = read_optional_config(&config_path)?;
-        let merged = merge_hook_config(existing.as_deref(), &generated, profile.tool)?;
+        let mut merged = merge_hook_config(existing.as_deref(), &generated, profile.tool)?;
+        merged.filename = config_path.to_string_lossy().into_owned();
         let config_changed = existing.as_deref() != Some(merged.content.as_str());
 
         let mut next_data = data.clone();
@@ -653,27 +712,54 @@ impl MonitorService {
     pub fn hook_config_preview(&self, profile: AiProfile) -> Result<HookConfigPreview, String> {
         let tool = profile.tool;
         let generated = generate_hook_config(profile, &self.runner_paths)?;
-        let config_path = self.config_home.join(&generated.filename);
+        let data = self
+            .data
+            .read()
+            .map_err(|_| "Hooks 路径读取锁已损坏".to_owned())?;
+        let config_path = self.hook_config_path(&data, tool);
         let existing = read_optional_config(&config_path)?;
-        merge_hook_config(existing.as_deref(), &generated, tool)
+        let mut merged = merge_hook_config(existing.as_deref(), &generated, tool)?;
+        merged.filename = config_path.to_string_lossy().into_owned();
+        Ok(merged)
     }
 
     pub fn local_hook_configs(&self) -> Result<Vec<LocalHookConfig>, String> {
-        [
-            (AiTool::Codex, ".codex/hooks.json"),
-            (AiTool::ClaudeCode, ".claude/settings.json"),
-            (AiTool::Cursor, ".cursor/hooks.json"),
-        ]
-        .into_iter()
-        .map(|(tool, filename)| {
-            let content = read_optional_config(&self.config_home.join(filename))?;
-            Ok(inspect_local_hook_config(
-                tool,
-                filename.to_owned(),
-                content,
-            ))
-        })
-        .collect()
+        let data = self
+            .data
+            .read()
+            .map_err(|_| "Hooks 路径读取锁已损坏".to_owned())?;
+        AiTool::ALL
+            .into_iter()
+            .map(|tool| {
+                let config_path = self.hook_config_path(&data, tool);
+                let content = read_optional_config(&config_path)?;
+                Ok(inspect_local_hook_config(
+                    tool,
+                    config_path.to_string_lossy().into_owned(),
+                    content,
+                ))
+            })
+            .collect()
+    }
+
+    fn hook_config_location(&self, data: &SavedMonitorData, tool: AiTool) -> HookConfigLocation {
+        let custom_directory = data.hook_config_directories.get(tool);
+        let directory = if custom_directory.is_empty() {
+            self.default_hook_config_directories.get(tool)
+        } else {
+            custom_directory
+        };
+        let config_path = Path::new(directory).join(hook_config_filename(tool));
+        HookConfigLocation {
+            tool,
+            directory: directory.to_owned(),
+            config_path: config_path.to_string_lossy().into_owned(),
+            is_custom: !custom_directory.is_empty(),
+        }
+    }
+
+    fn hook_config_path(&self, data: &SavedMonitorData, tool: AiTool) -> PathBuf {
+        PathBuf::from(self.hook_config_location(data, tool).config_path)
     }
 
     fn persist(&self, data: &SavedMonitorData) -> Result<(), String> {
@@ -1037,7 +1123,11 @@ mod tests {
         let service = MonitorService {
             client: Client::new(),
             data_path: invalid_data_path,
-            config_home: config_home.clone(),
+            default_hook_config_directories: HookConfigDirectories {
+                codex: config_home.join(".codex").to_string_lossy().into_owned(),
+                claude_code: config_home.join(".claude").to_string_lossy().into_owned(),
+                cursor: config_home.join(".cursor").to_string_lossy().into_owned(),
+            },
             runner_paths: HookRunnerPaths {
                 posix: root
                     .join(POSIX_RUNNER_FILENAME)
@@ -1056,6 +1146,7 @@ mod tests {
                     device_name: "monitor".to_owned(),
                 },
                 profiles: Vec::new(),
+                hook_config_directories: HookConfigDirectories::default(),
             }),
         };
 
@@ -1064,6 +1155,90 @@ mod tests {
         assert!(result.is_err());
         assert!(!config_home.join(".codex/hooks.json").exists());
         assert!(service.profiles().unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_hook_directory_is_persisted_and_used_for_profile_writes() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-hook-directory-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("home");
+        fs::create_dir_all(&app_data).unwrap();
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+        let custom_directory = root.join("custom-codex");
+        let detected_directory = service
+            .hook_config_locations()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.tool == AiTool::Codex)
+            .unwrap()
+            .directory;
+
+        let location = service
+            .save_hook_config_directory(AiTool::Codex, &custom_directory.to_string_lossy())
+            .unwrap();
+
+        assert!(location.is_custom);
+        assert_eq!(
+            PathBuf::from(&location.config_path),
+            custom_directory.join("hooks.json")
+        );
+        service.write_profile(test_profile()).unwrap();
+        assert!(custom_directory.join("hooks.json").exists());
+        assert!(!config_home.join(".codex/hooks.json").exists());
+
+        let reloaded = MonitorService::load(&app_data, &config_home).unwrap();
+        let reloaded_location = reloaded
+            .hook_config_locations()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.tool == AiTool::Codex)
+            .unwrap();
+        assert_eq!(reloaded_location.directory, location.directory);
+        assert!(reloaded_location.is_custom);
+
+        let default_location = reloaded
+            .save_hook_config_directory(AiTool::Codex, "")
+            .unwrap();
+        assert!(!default_location.is_custom);
+        assert_eq!(default_location.directory, detected_directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hook_directory_rejects_relative_and_file_paths() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-hook-directory-validation-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("home");
+        fs::create_dir_all(&app_data).unwrap();
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+        let file_path = root.join("not-a-directory");
+        fs::write(&file_path, "content").unwrap();
+
+        assert!(
+            service
+                .save_hook_config_directory(AiTool::Cursor, "relative/path")
+                .is_err()
+        );
+        assert!(
+            service
+                .save_hook_config_directory(AiTool::ClaudeCode, &file_path.to_string_lossy())
+                .is_err()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

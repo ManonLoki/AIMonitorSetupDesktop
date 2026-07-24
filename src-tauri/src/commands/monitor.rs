@@ -7,8 +7,8 @@ use tauri::State;
 use crate::{
     application::monitor::{ConnectionStatus, ImageUpload, MonitorService, RemoteImage},
     domain::monitor::{
-        AiProfile, DiscoveredMonitorDevice, HookConfigPreview, HookConfigWriteResult,
-        LocalHookConfig, MonitorSettings,
+        AiProfile, AiTool, DiscoveredMonitorDevice, HookConfigLocation, HookConfigPreview,
+        HookConfigWriteResult, LocalHookConfig, MonitorSettings,
     },
 };
 
@@ -81,6 +81,22 @@ pub async fn delete_remote_image(
 #[tauri::command]
 pub fn list_ai_profiles(service: State<'_, MonitorService>) -> Result<Vec<AiProfile>, String> {
     service.profiles()
+}
+
+#[tauri::command]
+pub fn list_hook_config_locations(
+    service: State<'_, MonitorService>,
+) -> Result<Vec<HookConfigLocation>, String> {
+    service.hook_config_locations()
+}
+
+#[tauri::command]
+pub fn save_hook_config_directory(
+    service: State<'_, MonitorService>,
+    tool: AiTool,
+    directory: String,
+) -> Result<HookConfigLocation, String> {
+    service.save_hook_config_directory(tool, &directory)
 }
 
 #[tauri::command]

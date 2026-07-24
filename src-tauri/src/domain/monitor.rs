@@ -96,6 +96,10 @@ pub enum AiTool {
     Cursor,
 }
 
+impl AiTool {
+    pub const ALL: [Self; 3] = [Self::Codex, Self::ClaudeCode, Self::Cursor];
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub enum HookBehavior {
@@ -178,10 +182,57 @@ pub struct LocalHookConfig {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct HookConfigDirectories {
+    #[serde(default)]
+    pub codex: String,
+    #[serde(default)]
+    pub claude_code: String,
+    #[serde(default)]
+    pub cursor: String,
+}
+
+impl HookConfigDirectories {
+    pub fn get(&self, tool: AiTool) -> &str {
+        match tool {
+            AiTool::Codex => &self.codex,
+            AiTool::ClaudeCode => &self.claude_code,
+            AiTool::Cursor => &self.cursor,
+        }
+    }
+
+    pub fn set(&mut self, tool: AiTool, directory: String) {
+        match tool {
+            AiTool::Codex => self.codex = directory,
+            AiTool::ClaudeCode => self.claude_code = directory,
+            AiTool::Cursor => self.cursor = directory,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookConfigLocation {
+    pub tool: AiTool,
+    pub directory: String,
+    pub config_path: String,
+    pub is_custom: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SavedMonitorData {
     pub settings: MonitorSettings,
     #[serde(default)]
     pub profiles: Vec<AiProfile>,
+    #[serde(default)]
+    pub hook_config_directories: HookConfigDirectories,
+}
+
+pub fn hook_config_filename(tool: AiTool) -> &'static str {
+    match tool {
+        AiTool::Codex | AiTool::Cursor => "hooks.json",
+        AiTool::ClaudeCode => "settings.json",
+    }
 }
 
 pub fn normalize_base_url(value: &str) -> Result<String, String> {

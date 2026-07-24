@@ -38,6 +38,7 @@ export function SettingsPage() {
   const [username, setUsername] = useState("");
   const [manualName, setManualName] = useState("");
   const [manualBaseUrl, setManualBaseUrl] = useState("");
+  const [saveAttempted, setSaveAttempted] = useState(false);
 
   useEffect(() => {
     if (settings.data) {
@@ -129,7 +130,17 @@ export function SettingsPage() {
             label="显示用户名"
             placeholder="输入设备上显示的名称"
             value={username}
-            onChange={(event) => setUsername(event.currentTarget.value)}
+            onChange={(event) => {
+              save.reset();
+              manualSave.reset();
+              setUsername(event.currentTarget.value);
+            }}
+            error={
+              saveAttempted && !username.trim()
+                ? "保存设置前请输入显示用户名"
+                : undefined
+            }
+            required
             size="md"
           />
         </Stack>
@@ -291,10 +302,15 @@ export function SettingsPage() {
                   测试连接
                 </Button>
                 <Button
-                  onClick={() => selectedDevice && save.mutate(selectedDevice)}
+                  onClick={() => {
+                    setSaveAttempted(true);
+                    if (selectedDevice && username.trim()) {
+                      save.mutate(selectedDevice);
+                    }
+                  }}
                   loading={save.isPending}
                   leftSection={<LineIcon name="check" size={17} />}
-                  disabled={!selectedDevice || !username.trim()}
+                  disabled={!selectedDevice}
                 >
                   保存设置
                 </Button>
@@ -352,14 +368,15 @@ export function SettingsPage() {
                   测试连接
                 </Button>
                 <Button
-                  onClick={() => manualSave.mutate()}
+                  onClick={() => {
+                    setSaveAttempted(true);
+                    if (username.trim()) {
+                      manualSave.mutate();
+                    }
+                  }}
                   loading={manualSave.isPending}
                   leftSection={<LineIcon name="check" size={17} />}
-                  disabled={
-                    !manualName.trim() ||
-                    !manualBaseUrl.trim() ||
-                    !username.trim()
-                  }
+                  disabled={!manualName.trim() || !manualBaseUrl.trim()}
                 >
                   保存手动设置
                 </Button>

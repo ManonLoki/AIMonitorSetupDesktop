@@ -12,6 +12,7 @@ import {
   Stack,
   Tabs,
   Text,
+  TextInput,
   Textarea,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -20,11 +21,17 @@ import type {
   AiProfile,
   AiTool,
   HookBehavior,
+  HookConfigLocation,
 } from "../api/monitor";
-import { writeAiProfile } from "../api/monitor";
+import {
+  chooseHookConfigDirectory,
+  saveHookConfigDirectory,
+  writeAiProfile,
+} from "../api/monitor";
 import {
   aiProfilesQuery,
   hookPreviewQuery,
+  hookConfigLocationsQuery,
   localHookConfigsQuery,
   monitorKeys,
   remoteImagesQuery,
@@ -91,15 +98,33 @@ function initialDrafts(): Record<AiTool, AiProfile> {
   };
 }
 
+function initialDirectoryDrafts(): Record<AiTool, string> {
+  return {
+    codex: "",
+    claudeCode: "",
+    cursor: "",
+  };
+}
+
 export function AiManagementPage() {
   const queryClient = useQueryClient();
   const profiles = useQuery(aiProfilesQuery);
   const images = useQuery(remoteImagesQuery);
   const localConfigs = useQuery(localHookConfigsQuery);
+  const hookConfigLocations = useQuery(hookConfigLocationsQuery);
   const initialized = useRef(false);
+  const locationsInitialized = useRef(false);
   const [activeTool, setActiveTool] = useState<AiTool>("codex");
   const [drafts, setDrafts] =
     useState<Record<AiTool, AiProfile>>(initialDrafts);
+  const [directoryDrafts, setDirectoryDrafts] = useState<
+    Record<AiTool, string>
+  >(initialDirectoryDrafts);
+  const [selectingDirectory, setSelectingDirectory] =
+    useState<AiTool | null>(null);
+  const [directoryPickerError, setDirectoryPickerError] = useState<
+    string | null
+  >(null);
   const draft = drafts[activeTool];
   const isComplete =
     draft.hooks.length === behaviors.length &&
@@ -118,6 +143,50 @@ export function AiManagementPage() {
     });
     initialized.current = true;
   }, [profiles.data]);
+
+  useEffect(() => {
+    if (!hookConfigLocations.data || locationsInitialized.current) return;
+    setDirectoryDrafts((current) => {
+      const next = { ...current };
+      for (const location of hookConfigLocations.data) {
+        next[location.tool] = location.directory;
+      }
+      return next;
+    });
+    locationsInitialized.current = true;
+  }, [hookConfigLocations.data]);
+
+  const saveDirectory = useMutation({
+    mutationFn: ({
+      tool,
+      directory,
+    }: {
+      tool: AiTool;
+      directory: string;
+    }) => saveHookConfigDirectory(tool, directory),
+    onSuccess: (savedLocation) => {
+      queryClient.setQueryData<HookConfigLocation[]>(
+        monitorKeys.hookConfigLocations(),
+        (current = []) => [
+          ...current.filter(
+            (location) => location.tool !== savedLocation.tool,
+          ),
+          savedLocation,
+        ],
+      );
+      setDirectoryDrafts((current) => ({
+        ...current,
+        [savedLocation.tool]: savedLocation.directory,
+      }));
+      write.reset();
+      void queryClient.invalidateQueries({
+        queryKey: monitorKeys.localHookConfigs(),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: monitorKeys.hookPreviews(),
+      });
+    },
+  });
 
   const write = useMutation({
     mutationFn: writeAiProfile,
@@ -147,7 +216,9 @@ export function AiManagementPage() {
   const error =
     profiles.error ??
     images.error ??
+    hookConfigLocations.error ??
     localConfigs.error ??
+    saveDirectory.error ??
     write.error ??
     preview.error;
   const availableImages = images.data ?? [];
@@ -155,12 +226,17 @@ export function AiManagementPage() {
   return (
     <Stack gap="lg">
       {error && <Alert color="red">{error.message}</Alert>}
+      {directoryPickerError && (
+        <Alert color="red">{directoryPickerError}</Alert>
+      )}
 
       <Tabs
         value={activeTool}
         onChange={(value) => {
           if (!value) return;
           write.reset();
+          saveDirectory.reset();
+          setDirectoryPickerError(null);
           setActiveTool(value as AiTool);
         }}
         className="ai-tool-tabs"
@@ -173,9 +249,135 @@ export function AiManagementPage() {
           ))}
         </Tabs.List>
 
-        {tools.map((tool) => (
+        {tools.map((tool) => {
+          const location = hookConfigLocations.data?.find(
+            (item) => item.tool === tool.value,
+          );
+          const directoryDraft = directoryDrafts[tool.value];
+          const pathDirty =
+            Boolean(location) &&
+            directoryDraft.trim() !== location?.directory;
+
+          return (
           <Tabs.Panel key={tool.value} value={tool.value} pt="lg">
             <Stack gap="lg">
+              <Card withBorder className="surface-card" p="lg">
+                <Stack gap="md">
+                  <Group justify="space-between" align="flex-start">
+                    <div>
+                      <Text fw={650}>Hooks 写入位置</Text>
+                      <Text size="sm" c="dimmed" mt={3}>
+                        每个工具独立保存。未自定义时使用探测到的目录或标准保底目录。
+                      </Text>
+                    </div>
+                    {location && (
+                      <Badge
+                        variant="light"
+                        color={location.isCustom ? "violet" : "gray"}
+                      >
+                        {location.isCustom ? "自定义" : "默认"}
+                      </Badge>
+                    )}
+                  </Group>
+
+                  <TextInput
+                    label="配置目录"
+                    description={
+                      location
+                        ? `当前配置文件：${location.configPath}`
+                        : "正在探测默认路径"
+                    }
+                    placeholder="选择或输入绝对目录"
+                    value={directoryDraft}
+                    disabled={hookConfigLocations.isPending}
+                    onChange={(event) => {
+                      saveDirectory.reset();
+                      setDirectoryPickerError(null);
+                      setDirectoryDrafts((current) => ({
+                        ...current,
+                        [tool.value]: event.currentTarget.value,
+                      }));
+                    }}
+                  />
+
+                  {pathDirty && (
+                    <Alert color="yellow" variant="light">
+                      路径尚未保存。保存后，预览、状态检查和写入都会切换到新目录；旧文件不会被移动或删除。
+                    </Alert>
+                  )}
+
+                  <Group justify="space-between">
+                    <Button
+                      variant="subtle"
+                      color="gray"
+                      onClick={() =>
+                        saveDirectory.mutate({
+                          tool: tool.value,
+                          directory: "",
+                        })
+                      }
+                      loading={
+                        saveDirectory.isPending &&
+                        saveDirectory.variables?.tool === tool.value &&
+                        saveDirectory.variables.directory === ""
+                      }
+                      disabled={!location?.isCustom}
+                    >
+                      恢复默认
+                    </Button>
+                    <Group>
+                      <Button
+                        variant="default"
+                        leftSection={<LineIcon name="edit" size={17} />}
+                        loading={selectingDirectory === tool.value}
+                        onClick={async () => {
+                          setSelectingDirectory(tool.value);
+                          setDirectoryPickerError(null);
+                          try {
+                            const selected =
+                              await chooseHookConfigDirectory(
+                                directoryDraft || location?.directory || "",
+                              );
+                            if (selected) {
+                              setDirectoryDrafts((current) => ({
+                                ...current,
+                                [tool.value]: selected,
+                              }));
+                            }
+                          } catch (error) {
+                            setDirectoryPickerError(
+                              error instanceof Error
+                                ? error.message
+                                : String(error),
+                            );
+                          } finally {
+                            setSelectingDirectory(null);
+                          }
+                        }}
+                      >
+                        选择目录
+                      </Button>
+                      <Button
+                        onClick={() =>
+                          saveDirectory.mutate({
+                            tool: tool.value,
+                            directory: directoryDraft,
+                          })
+                        }
+                        loading={
+                          saveDirectory.isPending &&
+                          saveDirectory.variables?.tool === tool.value &&
+                          saveDirectory.variables.directory !== ""
+                        }
+                        disabled={!directoryDraft.trim() || !pathDirty}
+                      >
+                        保存路径
+                      </Button>
+                    </Group>
+                  </Group>
+                </Stack>
+              </Card>
+
               <Card withBorder className="surface-card" p="lg">
                 <Stack gap="lg">
                   <SlotPicker
@@ -282,7 +484,7 @@ export function AiManagementPage() {
                       leftSection={<LineIcon name="check" size={17} />}
                       onClick={() => write.mutate(draft)}
                       loading={write.isPending}
-                      disabled={!isComplete}
+                      disabled={!isComplete || pathDirty}
                     >
                       写入 Hooks 配置
                     </Button>
@@ -335,7 +537,8 @@ export function AiManagementPage() {
               </Card>
             </Stack>
           </Tabs.Panel>
-        ))}
+          );
+        })}
       </Tabs>
 
       <Card withBorder className="surface-card" p="lg">
