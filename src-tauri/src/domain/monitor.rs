@@ -1,10 +1,11 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::Write as _};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 const DEFAULT_BASE_URL: &str = "http://192.168.1.100:8080";
-const MANAGED_HOOK_PREFIX: &str = "aimonitor-managed-hook:v1|target=";
+const LEGACY_MANAGED_HOOK_PREFIX: &str = "aimonitor-managed-hook:v1|target=";
+const MANAGED_HOOK_PREFIX: &str = "aimonitor-managed-hook:v2|tool=";
 const CODEX_HOOK_EVENTS: [&str; 11] = [
     "SessionStart",
     "SessionEnd",
@@ -128,6 +129,18 @@ pub struct HookConfigPreview {
     pub content: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct HookRunnerPaths {
+    pub posix: String,
+    pub windows: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct HookRunnerScripts {
+    pub posix: String,
+    pub windows: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookConfigWriteResult {
@@ -145,6 +158,7 @@ pub struct LocalHookConfig {
     pub filename: String,
     pub exists: bool,
     pub valid: bool,
+    pub stable_runner: bool,
     pub error: String,
     pub managed_targets: Vec<String>,
     pub content: String,
@@ -232,50 +246,22 @@ pub fn validate_profile(mut profile: AiProfile) -> Result<AiProfile, String> {
 }
 
 pub fn generate_hook_config(
-    settings: &MonitorSettings,
     profile: AiProfile,
+    runner_paths: &HookRunnerPaths,
 ) -> Result<HookConfigPreview, String> {
     let profile = validate_profile(profile)?;
     let mut hooks = Map::new();
 
     for event in native_state_events(profile.tool) {
-        let state = profile
-            .hooks
-            .iter()
-            .find(|hook| hook.behavior == event.behavior)
-            .ok_or_else(|| "行为配置不完整".to_owned())?;
-        let commands = managed_commands(
-            settings,
-            profile.tool,
-            &update_slot_command(settings, profile.tool, profile.slot, state)?,
-            &update_slot_command_windows(settings, profile.tool, profile.slot, state)?,
-        );
+        let commands = managed_commands(profile.tool, event.name, runner_paths);
         insert_handler(&mut hooks, profile.tool, event.name, &commands);
     }
-    let session_end_commands = if profile.tool == AiTool::Codex {
-        let idle = profile
-            .hooks
-            .iter()
-            .find(|hook| hook.behavior == HookBehavior::Idle)
-            .ok_or_else(|| "空闲行为配置不完整".to_owned())?;
-        managed_commands(
-            settings,
-            profile.tool,
-            &update_slot_command(settings, profile.tool, profile.slot, idle)?,
-            &update_slot_command_windows(settings, profile.tool, profile.slot, idle)?,
-        )
-    } else {
-        managed_commands(
-            settings,
-            profile.tool,
-            &release_slot_command(settings, profile.slot),
-            &release_slot_command_windows(settings, profile.slot),
-        )
-    };
+    let session_end_event = native_session_end_event(profile.tool);
+    let session_end_commands = managed_commands(profile.tool, session_end_event, runner_paths);
     insert_handler(
         &mut hooks,
         profile.tool,
-        native_session_end_event(profile.tool),
+        session_end_event,
         &session_end_commands,
     );
 
@@ -301,7 +287,6 @@ pub fn merge_hook_config(
     existing_content: Option<&str>,
     generated: &HookConfigPreview,
     tool: AiTool,
-    settings: &MonitorSettings,
 ) -> Result<HookConfigPreview, String> {
     let mut existing = match existing_content {
         Some(content) => serde_json::from_str::<Value>(content)
@@ -334,14 +319,13 @@ pub fn merge_hook_config(
         .get("hooks")
         .and_then(Value::as_object)
         .ok_or_else(|| "生成的配置缺少 hooks 对象".to_owned())?;
-    let marker = managed_hook_marker(settings);
     let existing_events: Vec<_> = existing_hooks.keys().cloned().collect();
     for event in existing_events {
         let should_remove = existing_hooks.get_mut(&event).is_some_and(|entries| {
             let Some(entries) = entries.as_array_mut() else {
                 return false;
             };
-            remove_managed_entries(entries, tool, &marker);
+            remove_managed_entries(entries, tool);
             entries.is_empty()
         });
         if should_remove {
@@ -366,6 +350,69 @@ pub fn merge_hook_config(
         filename: generated.filename.clone(),
         content: serde_json::to_string_pretty(&existing)
             .map_err(|error| format!("无法生成合并后的 Hooks 配置：{error}"))?,
+    })
+}
+
+pub fn generate_hook_runner_scripts(
+    settings: &MonitorSettings,
+    profiles: &[AiProfile],
+) -> Result<HookRunnerScripts, String> {
+    let mut posix_cases = String::new();
+    let mut windows_cases = String::new();
+
+    for profile in profiles.iter().cloned().map(validate_profile) {
+        let profile = profile?;
+        for event in native_state_events(profile.tool) {
+            let state = profile
+                .hooks
+                .iter()
+                .find(|hook| hook.behavior == event.behavior)
+                .ok_or_else(|| "行为配置不完整".to_owned())?;
+            append_runner_case(
+                &mut posix_cases,
+                &mut windows_cases,
+                profile.tool,
+                event.name,
+                &update_slot_command(settings, profile.tool, profile.slot, state)?,
+                &update_slot_command_windows(settings, profile.tool, profile.slot, state)?,
+            );
+        }
+
+        let session_end_event = native_session_end_event(profile.tool);
+        let (posix, windows) = if profile.tool == AiTool::Codex {
+            let idle = profile
+                .hooks
+                .iter()
+                .find(|hook| hook.behavior == HookBehavior::Idle)
+                .ok_or_else(|| "空闲行为配置不完整".to_owned())?;
+            (
+                update_slot_command(settings, profile.tool, profile.slot, idle)?,
+                update_slot_command_windows(settings, profile.tool, profile.slot, idle)?,
+            )
+        } else {
+            (
+                release_slot_command(settings, profile.slot),
+                release_slot_command_windows(settings, profile.slot),
+            )
+        };
+        append_runner_case(
+            &mut posix_cases,
+            &mut windows_cases,
+            profile.tool,
+            session_end_event,
+            &posix,
+            &windows,
+        );
+    }
+
+    Ok(HookRunnerScripts {
+        posix: format!("#!/bin/sh\nset -eu\ncase \"$1:$2\" in\n{posix_cases}esac\n"),
+        windows: format!(
+            "param([string]$Tool, [string]$Event)\n\
+             $ErrorActionPreference = 'Stop'\n\
+             switch (\"${{Tool}}:${{Event}}\") {{\n\
+             {windows_cases}}}\n"
+        ),
     })
 }
 
@@ -500,9 +547,9 @@ fn platform_command(commands: &ManagedCommands) -> &str {
     &commands.posix
 }
 
-fn remove_managed_entries(entries: &mut Vec<Value>, tool: AiTool, marker: &str) {
+fn remove_managed_entries(entries: &mut Vec<Value>, tool: AiTool) {
     if tool == AiTool::Cursor {
-        entries.retain(|entry| !entry_has_marker(entry, marker));
+        entries.retain(|entry| !entry_is_managed(entry, tool));
         return;
     }
 
@@ -510,27 +557,30 @@ fn remove_managed_entries(entries: &mut Vec<Value>, tool: AiTool, marker: &str) 
         let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
             return true;
         };
-        handlers.retain(|handler| !entry_has_marker(handler, marker));
+        handlers.retain(|handler| !entry_is_managed(handler, tool));
         !handlers.is_empty()
     });
 }
 
-fn entry_has_marker(entry: &Value, marker: &str) -> bool {
+fn entry_is_managed(entry: &Value, tool: AiTool) -> bool {
     ["command", "commandWindows"]
         .into_iter()
         .filter_map(|key| entry.get(key).and_then(Value::as_str))
-        .any(|command| command_has_marker(command, marker))
+        .any(|command| {
+            command_has_marker(command, &managed_hook_marker(tool))
+                || decoded_hook_command(command)
+                    .is_some_and(|decoded| decoded.contains(LEGACY_MANAGED_HOOK_PREFIX))
+        })
 }
 
-fn managed_commands(
-    settings: &MonitorSettings,
-    tool: AiTool,
-    posix_command: &str,
-    windows_command: &str,
-) -> ManagedCommands {
+fn managed_commands(tool: AiTool, event: &str, runner_paths: &HookRunnerPaths) -> ManagedCommands {
+    let marker = managed_hook_marker(tool);
     let posix_marked = format!(
-        ": {}; {posix_command}",
-        shell_quote(&managed_hook_marker(settings))
+        ": {}; /bin/sh {} {} {}",
+        shell_quote(&marker),
+        shell_quote(&runner_paths.posix),
+        shell_quote(ai_tool_slug(tool)),
+        shell_quote(event),
     );
     let posix = match tool {
         AiTool::Cursor => format!("{posix_marked} >/dev/null && printf '{{}}'"),
@@ -538,8 +588,14 @@ fn managed_commands(
         // output. The monitor response is transport data, not hook feedback.
         AiTool::Codex | AiTool::ClaudeCode => format!("{posix_marked} >/dev/null"),
     };
-    let marker = powershell_quote(&managed_hook_marker(settings));
-    let mut windows_script = format!("$null = '{marker}'; {windows_command}");
+    let mut windows_script = format!(
+        "$null = '{}'; & '{}' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{}' '{}' '{}'",
+        powershell_quote(&marker),
+        powershell_quote("powershell.exe"),
+        powershell_quote(&runner_paths.windows),
+        powershell_quote(ai_tool_slug(tool)),
+        powershell_quote(event),
+    );
     if tool == AiTool::Cursor {
         windows_script.push_str("; Write-Output '{}'");
     }
@@ -550,8 +606,37 @@ fn managed_commands(
     ManagedCommands { posix, windows }
 }
 
-fn managed_hook_marker(settings: &MonitorSettings) -> String {
-    format!("{MANAGED_HOOK_PREFIX}{}", settings.base_url)
+fn managed_hook_marker(tool: AiTool) -> String {
+    format!("{MANAGED_HOOK_PREFIX}{}", ai_tool_slug(tool))
+}
+
+const fn ai_tool_slug(tool: AiTool) -> &'static str {
+    match tool {
+        AiTool::Codex => "codex",
+        AiTool::ClaudeCode => "claude-code",
+        AiTool::Cursor => "cursor",
+    }
+}
+
+fn append_runner_case(
+    posix_cases: &mut String,
+    windows_cases: &mut String,
+    tool: AiTool,
+    event: &str,
+    posix_command: &str,
+    windows_command: &str,
+) {
+    let key = format!("{}:{event}", ai_tool_slug(tool));
+    let _ = write!(
+        posix_cases,
+        "  {})\n    {posix_command} >/dev/null\n    ;;\n",
+        shell_quote(&key)
+    );
+    let _ = writeln!(
+        windows_cases,
+        "  '{}' {{ {windows_command}; break }}",
+        powershell_quote(&key)
+    );
 }
 
 pub fn inspect_local_hook_config(
@@ -565,6 +650,7 @@ pub fn inspect_local_hook_config(
             filename,
             exists: false,
             valid: true,
+            stable_runner: false,
             error: String::new(),
             managed_targets: Vec::new(),
             content: String::new(),
@@ -575,6 +661,7 @@ pub fn inspect_local_hook_config(
         Ok(value) => {
             let mut managed_targets = Vec::new();
             collect_managed_targets(&value, &mut managed_targets);
+            let stable_runner = contains_stable_runner(&value);
             managed_targets.sort();
             managed_targets.dedup();
             let error = validate_local_hook_shape(tool, &value)
@@ -585,6 +672,7 @@ pub fn inspect_local_hook_config(
                 filename,
                 exists: true,
                 valid: error.is_empty(),
+                stable_runner,
                 error,
                 managed_targets,
                 content,
@@ -595,10 +683,28 @@ pub fn inspect_local_hook_config(
             filename,
             exists: true,
             valid: false,
+            stable_runner: false,
             error: format!("JSON 格式错误：{error}"),
             managed_targets: Vec::new(),
             content,
         },
+    }
+}
+
+fn contains_stable_runner(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            ["command", "commandWindows"]
+                .into_iter()
+                .filter_map(|key| object.get(key).and_then(Value::as_str))
+                .any(|command| {
+                    decoded_hook_command(command)
+                        .is_some_and(|decoded| decoded.contains(MANAGED_HOOK_PREFIX))
+                })
+                || object.values().any(contains_stable_runner)
+        }
+        Value::Array(items) => items.iter().any(contains_stable_runner),
+        _ => false,
     }
 }
 
@@ -684,9 +790,9 @@ fn collect_managed_targets(value: &Value, targets: &mut Vec<String>) {
             for key in ["command", "commandWindows"] {
                 if let Some(command) = object.get(key).and_then(Value::as_str)
                     && let Some(decoded) = decoded_hook_command(command)
-                    && let Some(marker_start) = decoded.find(MANAGED_HOOK_PREFIX)
+                    && let Some(marker_start) = decoded.find(LEGACY_MANAGED_HOOK_PREFIX)
                 {
-                    let target_start = marker_start + MANAGED_HOOK_PREFIX.len();
+                    let target_start = marker_start + LEGACY_MANAGED_HOOK_PREFIX.len();
                     let target = decoded[target_start..]
                         .split_once('\'')
                         .map_or(&decoded[target_start..], |(target, _)| target);
@@ -835,7 +941,7 @@ fn command_has_marker(command: &str, marker: &str) -> bool {
 }
 
 fn decoded_hook_command(command: &str) -> Option<String> {
-    if command.contains(MANAGED_HOOK_PREFIX) {
+    if command.contains(MANAGED_HOOK_PREFIX) || command.contains(LEGACY_MANAGED_HOOK_PREFIX) {
         return Some(command.to_owned());
     }
     let encoded = command
@@ -925,10 +1031,11 @@ mod tests {
 
     use super::{
         AiProfile, AiTool, DEFAULT_BASE_URL, DiscoveredMonitorDevice, HookBehavior,
-        HookConfigPreview, HookContent, MANAGED_HOOK_PREFIX, MonitorSettings, command_has_marker,
-        decoded_hook_command, generate_hook_config, inspect_local_hook_config, managed_hook_marker,
-        merge_hook_config, migrate_legacy_profile, normalize_base_url, validate_profile,
-        validate_settings,
+        HookConfigPreview, HookContent, HookRunnerPaths, LEGACY_MANAGED_HOOK_PREFIX,
+        MANAGED_HOOK_PREFIX, MonitorSettings, command_has_marker, decoded_hook_command,
+        generate_hook_config, generate_hook_runner_scripts, inspect_local_hook_config,
+        managed_hook_marker, merge_hook_config, migrate_legacy_profile, normalize_base_url,
+        validate_profile, validate_settings,
     };
 
     fn profile(tool: AiTool) -> AiProfile {
@@ -957,6 +1064,13 @@ mod tests {
                     image: "error.png".to_owned(),
                 },
             ],
+        }
+    }
+
+    fn runner_paths() -> HookRunnerPaths {
+        HookRunnerPaths {
+            posix: "/tmp/ai monitor/aimonitor-hook.sh".to_owned(),
+            windows: r"C:\AIMonitor Data\aimonitor-hook.ps1".to_owned(),
         }
     }
 
@@ -998,16 +1112,7 @@ mod tests {
 
     #[test]
     fn cursor_preview_uses_cursor_event_names_and_shape() {
-        let preview = generate_hook_config(
-            &MonitorSettings {
-                base_url: DEFAULT_BASE_URL.to_owned(),
-                username: "Manon".to_owned(),
-                device_id: "device-1".to_owned(),
-                device_name: "Desk Monitor".to_owned(),
-            },
-            profile(AiTool::Cursor),
-        )
-        .unwrap();
+        let preview = generate_hook_config(profile(AiTool::Cursor), &runner_paths()).unwrap();
 
         assert_eq!(preview.filename, ".cursor/hooks.json");
         assert!(preview.content.contains("\"beforeSubmitPrompt\""));
@@ -1017,18 +1122,15 @@ mod tests {
         assert!(preview.content.contains("\"workspaceOpen\""));
         assert!(!preview.content.contains("\"postToolUse\""));
         assert!(preview.content.contains("\"sessionEnd\""));
-        assert!(preview.content.contains("/api/slots/4"));
-        assert!(preview.content.contains("--request POST"));
-        assert!(!preview.content.contains("--request PUT"));
-        assert!(preview.content.contains("\\\"aiName\\\":\\\"Cursor\\\""));
-        assert!(preview.content.contains("\\\"behavior\\\":\\\"asking\\\""));
-        assert!(preview.content.contains("--request DELETE"));
-        assert!(preview.content.contains("--connect-timeout 2"));
-        assert!(preview.content.contains("--max-time 5"));
         assert!(
             preview
                 .content
-                .contains("aimonitor-managed-hook:v1|target=http://192.168.1.100:8080")
+                .contains("/tmp/ai monitor/aimonitor-hook.sh")
+        );
+        assert!(
+            preview
+                .content
+                .contains("aimonitor-managed-hook:v2|tool=cursor")
         );
         assert!(preview.content.contains("printf '{}'"));
         assert!(!preview.content.contains("\"notification\""));
@@ -1037,16 +1139,7 @@ mod tests {
 
     #[test]
     fn claude_preview_covers_permission_and_lifecycle_events() {
-        let preview = generate_hook_config(
-            &MonitorSettings {
-                base_url: DEFAULT_BASE_URL.to_owned(),
-                username: "Manon".to_owned(),
-                device_id: "device-1".to_owned(),
-                device_name: "Desk Monitor".to_owned(),
-            },
-            profile(AiTool::ClaudeCode),
-        )
-        .unwrap();
+        let preview = generate_hook_config(profile(AiTool::ClaudeCode), &runner_paths()).unwrap();
 
         assert_eq!(preview.filename, ".claude/settings.json");
         assert!(preview.content.contains("\"SessionStart\""));
@@ -1057,28 +1150,17 @@ mod tests {
         assert!(preview.content.contains("\"StopFailure\""));
         assert!(preview.content.contains("\"SessionEnd\""));
         assert!(!preview.content.contains("\"Notification\""));
-        assert!(preview.content.contains("--connect-timeout 2"));
-        assert!(preview.content.contains("--max-time 5"));
         assert!(
             preview
                 .content
-                .contains("\\\"aiName\\\":\\\"Claude Code\\\"")
+                .contains("aimonitor-managed-hook:v2|tool=claude-code")
         );
         assert!(preview.content.contains(">/dev/null"));
     }
 
     #[test]
     fn codex_preview_uses_pascal_case_and_nested_handlers() {
-        let preview = generate_hook_config(
-            &MonitorSettings {
-                base_url: DEFAULT_BASE_URL.to_owned(),
-                username: "Manon".to_owned(),
-                device_id: "device-1".to_owned(),
-                device_name: "Desk Monitor".to_owned(),
-            },
-            profile(AiTool::Codex),
-        )
-        .unwrap();
+        let preview = generate_hook_config(profile(AiTool::Codex), &runner_paths()).unwrap();
 
         assert_eq!(preview.filename, ".codex/hooks.json");
         assert!(preview.content.contains("\"SessionStart\""));
@@ -1087,12 +1169,12 @@ mod tests {
         assert!(!preview.content.contains("\"Error\""));
         assert!(preview.content.contains("\"PostToolUse\""));
         assert!(preview.content.contains("\"SessionEnd\""));
-        assert!(preview.content.contains("--request POST"));
-        assert!(preview.content.contains("--connect-timeout 2"));
-        assert!(preview.content.contains("--max-time 5"));
         assert!(preview.content.contains(">/dev/null"));
-        assert!(preview.content.contains("\\\"aiName\\\":\\\"Codex\\\""));
-        assert!(preview.content.contains("\\\"behavior\\\":\\\"running\\\""));
+        assert!(
+            preview
+                .content
+                .contains("aimonitor-managed-hook:v2|tool=codex")
+        );
         assert!(preview.content.contains("\"type\": \"command\""));
         assert!(preview.content.contains("\"commandWindows\""));
         assert!(preview.content.contains("powershell.exe"));
@@ -1101,23 +1183,17 @@ mod tests {
         let session_end = value["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        assert!(session_end.contains("--request POST"));
-        assert!(session_end.contains("\"behavior\":\"idle\""));
-        assert!(!session_end.contains("--request DELETE"));
+        assert!(session_end.contains("aimonitor-hook.sh"));
+        assert!(session_end.contains("SessionEnd"));
         let windows = value["hooks"]["Stop"][0]["hooks"][0]["commandWindows"]
             .as_str()
             .unwrap();
         let decoded = decoded_hook_command(windows).unwrap();
-        assert!(decoded.contains("Invoke-RestMethod"));
+        assert!(decoded.contains("aimonitor-hook.ps1"));
         assert!(decoded.contains(MANAGED_HOOK_PREFIX));
         assert!(command_has_marker(
             windows,
-            &managed_hook_marker(&MonitorSettings {
-                base_url: DEFAULT_BASE_URL.to_owned(),
-                username: "Manon".to_owned(),
-                device_id: "device-1".to_owned(),
-                device_name: "Desk Monitor".to_owned(),
-            })
+            &managed_hook_marker(AiTool::Codex)
         ));
         assert!(!command_has_marker(
             windows,
@@ -1139,14 +1215,8 @@ mod tests {
     }
 
     #[test]
-    fn merge_replaces_only_entries_for_the_same_target_identifier() {
-        let settings = MonitorSettings {
-            base_url: DEFAULT_BASE_URL.to_owned(),
-            username: "Manon".to_owned(),
-            device_id: "device-1".to_owned(),
-            device_name: "Desk Monitor".to_owned(),
-        };
-        let generated = generate_hook_config(&settings, profile(AiTool::Codex)).unwrap();
+    fn merge_replaces_all_legacy_entries_for_the_same_tool() {
+        let generated = generate_hook_config(profile(AiTool::Codex), &runner_paths()).unwrap();
         let existing = r#"{
           "permissions": { "allow": ["Bash"] },
           "hooks": {
@@ -1162,23 +1232,17 @@ mod tests {
           }
         }"#;
 
-        let merged =
-            merge_hook_config(Some(existing), &generated, AiTool::Codex, &settings).unwrap();
+        let merged = merge_hook_config(Some(existing), &generated, AiTool::Codex).unwrap();
         let value: Value = serde_json::from_str(&merged.content).unwrap();
         let stop = value["hooks"]["Stop"].as_array().unwrap();
         let serialized = serde_json::to_string(stop).unwrap();
 
         assert_eq!(serialized.matches("other-app notify").count(), 1);
         assert_eq!(serialized.matches("curl old").count(), 0);
-        assert_eq!(serialized.matches("curl other-network").count(), 1);
-        assert_eq!(serialized.matches("curl prefix-network").count(), 1);
-        assert_eq!(serialized.matches(MANAGED_HOOK_PREFIX).count(), 3);
-        assert_eq!(
-            serialized
-                .matches("aimonitor-managed-hook:v1|target=http://192.168.1.100:8080'")
-                .count(),
-            1
-        );
+        assert_eq!(serialized.matches("curl other-network").count(), 0);
+        assert_eq!(serialized.matches("curl prefix-network").count(), 0);
+        assert_eq!(serialized.matches(MANAGED_HOOK_PREFIX).count(), 1);
+        assert_eq!(serialized.matches(LEGACY_MANAGED_HOOK_PREFIX).count(), 0);
         assert_eq!(value["permissions"]["allow"][0], "Bash");
         assert_eq!(
             value["hooks"]["CustomEvent"][0]["hooks"][0]["command"],
@@ -1188,13 +1252,7 @@ mod tests {
 
     #[test]
     fn cursor_merge_is_idempotent_and_preserves_other_commands() {
-        let settings = MonitorSettings {
-            base_url: DEFAULT_BASE_URL.to_owned(),
-            username: "Manon".to_owned(),
-            device_id: "device-1".to_owned(),
-            device_name: "Desk Monitor".to_owned(),
-        };
-        let generated = generate_hook_config(&settings, profile(AiTool::Cursor)).unwrap();
+        let generated = generate_hook_config(profile(AiTool::Cursor), &runner_paths()).unwrap();
         let existing = r#"{
           "version": 1,
           "hooks": {
@@ -1205,16 +1263,14 @@ mod tests {
           }
         }"#;
 
-        let first =
-            merge_hook_config(Some(existing), &generated, AiTool::Cursor, &settings).unwrap();
-        let second =
-            merge_hook_config(Some(&first.content), &generated, AiTool::Cursor, &settings).unwrap();
+        let first = merge_hook_config(Some(existing), &generated, AiTool::Cursor).unwrap();
+        let second = merge_hook_config(Some(&first.content), &generated, AiTool::Cursor).unwrap();
         let value: Value = serde_json::from_str(&second.content).unwrap();
         let stop = serde_json::to_string(&value["hooks"]["stop"]).unwrap();
 
         assert_eq!(stop.matches("other-app stop").count(), 1);
         assert_eq!(
-            stop.matches("aimonitor-managed-hook:v1|target=http://192.168.1.100:8080")
+            stop.matches("aimonitor-managed-hook:v2|tool=cursor")
                 .count(),
             1
         );
@@ -1223,26 +1279,31 @@ mod tests {
 
     #[test]
     fn merge_rejects_an_invalid_existing_config() {
+        let generated = HookConfigPreview {
+            filename: ".cursor/hooks.json".to_owned(),
+            content: r#"{"version":1,"hooks":{}}"#.to_owned(),
+        };
+
+        assert!(merge_hook_config(Some(r#"{"hooks":[]}"#), &generated, AiTool::Cursor).is_err());
+    }
+
+    #[test]
+    fn runner_script_contains_mutable_payload_while_hook_definition_stays_stable() {
         let settings = MonitorSettings {
             base_url: DEFAULT_BASE_URL.to_owned(),
             username: "Manon".to_owned(),
             device_id: "device-1".to_owned(),
             device_name: "Desk Monitor".to_owned(),
         };
-        let generated = HookConfigPreview {
-            filename: ".cursor/hooks.json".to_owned(),
-            content: r#"{"version":1,"hooks":{}}"#.to_owned(),
-        };
+        let scripts = generate_hook_runner_scripts(&settings, &[profile(AiTool::Codex)]).unwrap();
+        let preview = generate_hook_config(profile(AiTool::Codex), &runner_paths()).unwrap();
 
-        assert!(
-            merge_hook_config(
-                Some(r#"{"hooks":[]}"#),
-                &generated,
-                AiTool::Cursor,
-                &settings
-            )
-            .is_err()
-        );
+        assert!(scripts.posix.contains("/api/slots/4"));
+        assert!(scripts.posix.contains("\"behavior\":\"running\""));
+        assert!(scripts.posix.contains("codex:SessionEnd"));
+        assert!(scripts.windows.contains("Invoke-RestMethod"));
+        assert!(!preview.content.contains(DEFAULT_BASE_URL));
+        assert!(!preview.content.contains("\"behavior\":\"running\""));
     }
 
     #[test]

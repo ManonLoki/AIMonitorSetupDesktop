@@ -298,8 +298,8 @@ export function AiManagementPage() {
                       }
                     >
                       {write.data.requiresReview
-                        ? `配置已写入 ${write.data.filename}。请在 Codex CLI 中运行 /hooks，审核并信任包含 aimonitor-managed-hook 的新增规则，然后重启 ChatGPT App 或创建新任务。`
-                        : "如状态仍未生效，请在 Codex CLI 中运行 /hooks 确认规则已受信任，然后在 ChatGPT App 中创建新任务。"}
+                        ? `配置已写入 ${write.data.filename}。请在 Codex CLI 中运行 /hooks，审核并信任包含 aimonitor-managed-hook 的新增规则，然后重启 Codex App 或创建新任务。此后修改展示配置不需要再次信任。`
+                        : "如状态仍未生效，请在 Codex CLI 中运行 /hooks 确认规则已受信任，然后在 Codex App 中创建新任务。"}
                     </Alert>
                   )}
                 </Stack>
@@ -310,8 +310,9 @@ export function AiManagementPage() {
                   <div>
                     <Text fw={650}>合并后将写入的 Hooks 配置</Text>
                     <Text size="xs" c="dimmed" mt={2}>
-                      其他 APP 和其他目标地址的配置会保持不变；相同目标地址的
-                      AIMonitor 配置会先清理再重新写入
+                      其他 APP 的配置会保持不变；旧版 AIMonitor
+                      目标会清理并迁移为固定 Runner。后续修改设备、图片或文案
+                      不会再次改变 Hook 信任哈希
                     </Text>
                   </div>
                   {preview.data && (
@@ -382,6 +383,11 @@ export function AiManagementPage() {
                               {config.managedTargets.length} 个目标
                             </Badge>
                           )}
+                          {config.stableRunner && (
+                            <Badge variant="light" color="blue">
+                              稳定 Runner
+                            </Badge>
+                          )}
                         </Group>
                       </Group>
                     </Accordion.Control>
@@ -401,6 +407,12 @@ export function AiManagementPage() {
                               ))}
                             </Group>
                           </div>
+                        )}
+                        {config.stableRunner && (
+                          <Alert color="blue" variant="light">
+                            已使用稳定 Runner。以后修改 AIMonitor
+                            设备、槽位、图片或文案时，不需要重新信任这些 Hooks。
+                          </Alert>
                         )}
                         {config.exists ? (
                           <div className="hook-preview">

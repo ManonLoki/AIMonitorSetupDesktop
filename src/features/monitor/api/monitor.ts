@@ -61,6 +61,7 @@ export interface LocalHookConfig {
   filename: string;
   exists: boolean;
   valid: boolean;
+  stableRunner: boolean;
   error: string;
   managedTargets: string[];
   content: string;

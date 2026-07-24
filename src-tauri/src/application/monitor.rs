@@ -12,12 +12,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::monitor::{
     AiProfile, AiTool, DiscoveredMonitorDevice, HookConfigPreview, HookConfigWriteResult,
-    LocalHookConfig, MonitorSettings, SavedMonitorData, generate_hook_config,
-    inspect_local_hook_config, merge_hook_config, migrate_legacy_profile, normalize_base_url,
-    validate_profile, validate_settings,
+    HookRunnerPaths, LocalHookConfig, MonitorSettings, SavedMonitorData, generate_hook_config,
+    generate_hook_runner_scripts, inspect_local_hook_config, merge_hook_config,
+    migrate_legacy_profile, normalize_base_url, validate_profile, validate_settings,
 };
 
 const STORE_FILENAME: &str = "monitor-data.json";
+const POSIX_RUNNER_FILENAME: &str = "aimonitor-hook.sh";
+const WINDOWS_RUNNER_FILENAME: &str = "aimonitor-hook.ps1";
 const AIMONITOR_SERVICE_TYPE: &str = "_aimonitor._tcp.local.";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -25,6 +27,7 @@ pub struct MonitorService {
     client: Client,
     data_path: PathBuf,
     config_home: PathBuf,
+    runner_paths: HookRunnerPaths,
     data: RwLock<SavedMonitorData>,
 }
 
@@ -86,6 +89,16 @@ impl MonitorService {
             client: Client::new(),
             data_path,
             config_home: config_home.to_owned(),
+            runner_paths: HookRunnerPaths {
+                posix: app_data_dir
+                    .join(POSIX_RUNNER_FILENAME)
+                    .to_string_lossy()
+                    .into_owned(),
+                windows: app_data_dir
+                    .join(WINDOWS_RUNNER_FILENAME)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
             data: RwLock::new(data),
         })
     }
@@ -107,8 +120,10 @@ impl MonitorService {
             .data
             .write()
             .map_err(|_| "配置写入锁已损坏".to_owned())?;
-        data.settings = settings.clone();
-        self.persist(&data)?;
+        let mut next_data = data.clone();
+        next_data.settings = settings.clone();
+        self.persist_with_runners(&next_data)?;
+        *data = next_data;
         Ok(settings)
     }
 
@@ -275,11 +290,10 @@ impl MonitorService {
             .data
             .write()
             .map_err(|_| "AI 配置写入锁已损坏".to_owned())?;
-        let settings = data.settings.clone();
-        let generated = generate_hook_config(&settings, profile.clone())?;
+        let generated = generate_hook_config(profile.clone(), &self.runner_paths)?;
         let config_path = self.config_home.join(&generated.filename);
         let existing = read_optional_config(&config_path)?;
-        let merged = merge_hook_config(existing.as_deref(), &generated, profile.tool, &settings)?;
+        let merged = merge_hook_config(existing.as_deref(), &generated, profile.tool)?;
         let config_changed = existing.as_deref() != Some(merged.content.as_str());
 
         let mut next_data = data.clone();
@@ -289,20 +303,12 @@ impl MonitorService {
         next_data.profiles.push(profile.clone());
         next_data.profiles.sort_by_key(|item| item.slot);
 
-        if config_changed {
-            write_config(&config_path, &merged.content)?;
-        }
-        if let Err(error) = self.persist(&next_data) {
-            if config_changed
-                && let Err(rollback_error) =
-                    restore_optional_config(&config_path, existing.as_deref())
-            {
-                return Err(format!(
-                    "{error}；Hooks 配置回滚失败，当前文件可能已发生变化：{rollback_error}"
-                ));
-            }
-            return Err(error);
-        }
+        self.persist_profile_transaction(
+            &next_data,
+            &config_path,
+            existing.as_deref(),
+            config_changed.then_some(merged.content.as_str()),
+        )?;
         *data = next_data;
 
         Ok(HookConfigWriteResult {
@@ -315,12 +321,11 @@ impl MonitorService {
     }
 
     pub fn hook_config_preview(&self, profile: AiProfile) -> Result<HookConfigPreview, String> {
-        let settings = self.settings()?;
         let tool = profile.tool;
-        let generated = generate_hook_config(&settings, profile)?;
+        let generated = generate_hook_config(profile, &self.runner_paths)?;
         let config_path = self.config_home.join(&generated.filename);
         let existing = read_optional_config(&config_path)?;
-        merge_hook_config(existing.as_deref(), &generated, tool, &settings)
+        merge_hook_config(existing.as_deref(), &generated, tool)
     }
 
     pub fn local_hook_configs(&self) -> Result<Vec<LocalHookConfig>, String> {
@@ -345,6 +350,60 @@ impl MonitorService {
         let serialized = serde_json::to_string_pretty(data)
             .map_err(|error| format!("无法序列化配置：{error}"))?;
         write_atomic_file(&self.data_path, &serialized, "应用配置")
+    }
+
+    fn persist_with_runners(&self, data: &SavedMonitorData) -> Result<(), String> {
+        let scripts = generate_hook_runner_scripts(&data.settings, &data.profiles)?;
+        let posix_path = Path::new(&self.runner_paths.posix);
+        let windows_path = Path::new(&self.runner_paths.windows);
+        let previous_posix = read_optional_config(posix_path)?;
+        let previous_windows = read_optional_config(windows_path)?;
+
+        write_atomic_file(posix_path, &scripts.posix, "Hook 运行脚本")?;
+        if let Err(error) =
+            write_atomic_file(windows_path, &scripts.windows, "Windows Hook 运行脚本")
+        {
+            let _ = restore_optional_file(posix_path, previous_posix.as_deref(), "Hook 运行脚本");
+            return Err(error);
+        }
+        if let Err(error) = self.persist(data) {
+            let rollback = rollback_runner_files(
+                posix_path,
+                previous_posix.as_deref(),
+                windows_path,
+                previous_windows.as_deref(),
+            );
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => {
+                    Err(format!("{error}；Hook 运行脚本回滚失败：{rollback_error}"))
+                }
+            };
+        }
+        Ok(())
+    }
+
+    fn persist_profile_transaction(
+        &self,
+        data: &SavedMonitorData,
+        config_path: &Path,
+        previous_config: Option<&str>,
+        next_config: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(next_config) = next_config {
+            write_config(config_path, next_config)?;
+        }
+        if let Err(error) = self.persist_with_runners(data) {
+            if next_config.is_some()
+                && let Err(rollback_error) = restore_optional_config(config_path, previous_config)
+            {
+                return Err(format!(
+                    "{error}；Hooks 配置回滚失败，当前文件可能已发生变化：{rollback_error}"
+                ));
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -412,14 +471,30 @@ fn write_atomic_file(path: &Path, content: &str, label: &str) -> Result<(), Stri
 }
 
 fn restore_optional_config(path: &Path, content: Option<&str>) -> Result<(), String> {
+    restore_optional_file(path, content, "Hooks 配置")
+}
+
+fn restore_optional_file(path: &Path, content: Option<&str>, label: &str) -> Result<(), String> {
     if let Some(content) = content {
-        return write_config(path, content);
+        return write_atomic_file(path, content, label);
     }
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("无法删除新建配置 {}：{error}", path.display())),
     }
+}
+
+fn rollback_runner_files(
+    posix_path: &Path,
+    previous_posix: Option<&str>,
+    windows_path: &Path,
+    previous_windows: Option<&str>,
+) -> Result<(), String> {
+    let posix_result = restore_optional_file(posix_path, previous_posix, "Hook 运行脚本");
+    let windows_result =
+        restore_optional_file(windows_path, previous_windows, "Windows Hook 运行脚本");
+    posix_result.and(windows_result)
 }
 
 async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, String> {
@@ -513,6 +588,16 @@ mod tests {
             client: Client::new(),
             data_path: invalid_data_path,
             config_home: config_home.clone(),
+            runner_paths: HookRunnerPaths {
+                posix: root
+                    .join(POSIX_RUNNER_FILENAME)
+                    .to_string_lossy()
+                    .into_owned(),
+                windows: root
+                    .join(WINDOWS_RUNNER_FILENAME)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
             data: RwLock::new(SavedMonitorData {
                 settings: MonitorSettings {
                     base_url: "http://127.0.0.1:8080".to_owned(),
