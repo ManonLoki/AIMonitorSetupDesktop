@@ -1,0 +1,4 @@
+interface:
+  display_name: "Publish Desktop Builds"
+  short_description: "Publish AIMonitor installers for macOS ARM and Windows x64"
+  default_prompt: "Use $publish-desktop-builds to build and publish the AIMonitor desktop installers."
