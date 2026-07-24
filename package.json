@@ -1,0 +1,38 @@
+{
+  "name": "ai-monitor-setup",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.30.2",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "pnpm typecheck && vite build",
+    "preview": "vite preview",
+    "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "check": "pnpm typecheck && pnpm check:rust && pnpm test:rust",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@mantine/core": "^9.4.2",
+    "@mantine/hooks": "^9.4.2",
+    "@tanstack/react-query": "^5.101.4",
+    "@tanstack/react-router": "^1.170.18",
+    "@tauri-apps/api": "^2.11.1",
+    "jotai": "^2.20.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "typescript": "~7.0.2",
+    "vite": "^8.1.5"
+  }
+}

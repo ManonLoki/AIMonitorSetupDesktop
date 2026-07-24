@@ -1,0 +1,61 @@
+# 技术栈与版本
+
+最后核对：2026-07-24。JavaScript 版本来自 npm registry，Rust crate
+版本来自 crates.io；`pnpm-lock.yaml` 和 `src-tauri/Cargo.lock` 是可复现构建的
+最终依据。
+
+## 基础运行时
+
+| 层 | 技术 | 当前版本 |
+| --- | --- | --- |
+| 桌面容器 | Tauri | 2.11.5 |
+| 后端语言 | Rust stable / edition 2024 | 1.97.1 |
+| UI 运行时 | React / React DOM | 19.2.8 |
+| 构建工具 | Vite | 8.1.5 |
+| 类型检查 | TypeScript | 7.0.2 |
+| 包管理 | pnpm | 10.30.2 |
+
+## 前端库
+
+| 用途 | 选择 | 当前版本 | 使用边界 |
+| --- | --- | --- | --- |
+| UI | Mantine Core / Hooks | 9.4.2 | 组件、主题、响应式 UI |
+| 路由 | TanStack Router | 1.170.18 | 页面、导航、URL 状态 |
+| 异步状态 | TanStack Query | 5.101.4 | Rust command 的生命周期、缓存和失效 |
+| 客户端状态 | Jotai | 2.20.2 | 主题、面板开关等纯 UI 状态 |
+| 原生通信 | `@tauri-apps/api` | 2.11.1 | 类型化 `invoke` 调用 |
+
+## Rust 后端库
+
+| 用途 | 选择 | 当前锁定版本 | 使用边界 |
+| --- | --- | --- | --- |
+| 远端 HTTP | reqwest | 0.12.28 | 仅由 Rust application 层访问 AiMonitor 设备接口 |
+| 局域网服务发现 | mdns-sd | 0.20.2 | 仅由 Rust application 层发现 `_aimonitor._tcp.local.` 设备 |
+| JSON 持久化 | serde_json | 1.0.151 | 保存设备设置与 AI 实例配置 |
+
+## 为什么不使用 Axios
+
+本应用没有浏览器到业务服务的 HTTP 边界。前端与业务后端同处 Tauri
+进程模型，默认通道是官方 `invoke`：
+
+```text
+TanStack Query → typed TypeScript API → Tauri invoke → Rust command
+```
+
+因此 Axios、ky 或原生 `fetch` 都不是更合适的替代，它们会引入额外的
+HTTP 服务、端口、CORS、序列化和安全配置。TanStack Query 并不要求 HTTP；
+它可以管理任意 Promise，正适合管理 `invoke`。
+
+如果未来需要访问远端服务，网络请求也应由 Rust 后端发起。届时根据实际
+协议在 Rust 中选择客户端（HTTP 场景通常评估 `reqwest`），前端仍只调用
+Tauri command。不要提前加入未使用的网络依赖。
+
+## 依赖维护
+
+1. JavaScript 依赖使用 `pnpm update --latest` 检查大版本更新。
+2. Rust 使用 `cargo update` 更新锁文件，并在修改 manifest 前核对 crate
+   的当前稳定版本。
+3. 大版本升级必须阅读官方迁移说明，执行 `pnpm build`、`pnpm check` 和
+   `pnpm tauri build`。
+4. 不保留未使用依赖；需要时再添加。
+5. 提交 manifest 时同时提交对应锁文件。
