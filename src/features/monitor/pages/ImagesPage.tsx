@@ -7,13 +7,13 @@ import {
   Group,
   Loader,
   Menu,
+  SegmentedControl,
   SimpleGrid,
   Stack,
   Text,
-  Title,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import {
   deleteRemoteImage,
   uploadRemoteImages,
@@ -24,10 +24,13 @@ import {
 } from "../queries/monitor";
 import { LineIcon } from "../../../shared/ui/LineIcon";
 
+type ImageCategory = "all" | "jpeg" | "png" | "gif";
+
 export function ImagesPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
   const images = useQuery(remoteImagesQuery);
+  const [category, setCategory] = useState<ImageCategory>("all");
 
   const upload = useMutation({
     mutationFn: uploadRemoteImages,
@@ -42,47 +45,46 @@ export function ImagesPage() {
   });
 
   const error = images.error ?? upload.error ?? remove.error;
+  const imageList = images.data ?? [];
+  const filteredImages =
+    category === "all"
+      ? imageList
+      : imageList.filter(
+          (image) => image.mimeType === `image/${category}`,
+        );
+  const categoryCount = (value: Exclude<ImageCategory, "all">) =>
+    imageList.filter((image) => image.mimeType === `image/${value}`).length;
 
   return (
-    <Stack gap={28}>
-      <Group justify="space-between" align="flex-end">
-        <div>
-          <Title order={1} className="page-title">
-            图片管理
-          </Title>
-          <Text c="dimmed" mt={5}>
-            管理设备缓存中的远端图片资源。
-          </Text>
-        </div>
-        <Group gap="sm">
-          <Button
-            variant="default"
-            leftSection={<LineIcon name="refresh" size={17} />}
-            onClick={() => images.refetch()}
-            loading={images.isFetching}
-          >
-            刷新
-          </Button>
-          <Button
-            leftSection={<LineIcon name="upload" size={17} />}
-            onClick={() => inputRef.current?.click()}
-            loading={upload.isPending}
-          >
-            批量上传
-          </Button>
-          <input
-            ref={inputRef}
-            hidden
-            type="file"
-            multiple
-            accept="image/jpeg,image/png,image/gif"
-            onChange={(event) => {
-              const files = Array.from(event.currentTarget.files ?? []);
-              if (files.length > 0) upload.mutate(files);
-              event.currentTarget.value = "";
-            }}
-          />
-        </Group>
+    <Stack gap="lg">
+      <Group justify="flex-end" gap="sm">
+        <Button
+          variant="default"
+          leftSection={<LineIcon name="refresh" size={17} />}
+          onClick={() => images.refetch()}
+          loading={images.isFetching}
+        >
+          刷新
+        </Button>
+        <Button
+          leftSection={<LineIcon name="upload" size={17} />}
+          onClick={() => inputRef.current?.click()}
+          loading={upload.isPending}
+        >
+          批量上传
+        </Button>
+        <input
+          ref={inputRef}
+          hidden
+          type="file"
+          multiple
+          accept="image/jpeg,image/png,image/gif"
+          onChange={(event) => {
+            const files = Array.from(event.currentTarget.files ?? []);
+            if (files.length > 0) upload.mutate(files);
+            event.currentTarget.value = "";
+          }}
+        />
       </Group>
 
       {error && <Alert color="red">{error.message}</Alert>}
@@ -98,62 +100,81 @@ export function ImagesPage() {
         </Center>
       ) : images.data?.length ? (
         <>
-          <Group justify="space-between">
+          <Group justify="space-between" align="center">
             <Text size="sm" c="dimmed">
-              共 {images.data.length} 张图片
+              {category === "all"
+                ? `共 ${imageList.length} 张图片`
+                : `显示 ${filteredImages.length} / 共 ${imageList.length} 张`}
             </Text>
-            <Badge variant="light" color="gray">
-              JPEG · PNG · GIF
-            </Badge>
+            <SegmentedControl
+              size="sm"
+              value={category}
+              onChange={(value) => setCategory(value as ImageCategory)}
+              data={[
+                { value: "all", label: `全部 ${imageList.length}` },
+                { value: "jpeg", label: `JPEG ${categoryCount("jpeg")}` },
+                { value: "png", label: `PNG ${categoryCount("png")}` },
+                { value: "gif", label: `GIF ${categoryCount("gif")}` },
+              ]}
+            />
           </Group>
-          <SimpleGrid cols={{ base: 1, xs: 2, md: 3, xl: 4 }} spacing="lg">
-            {images.data.map((image) => (
-              <Card
-                key={image.filename}
-                withBorder
-                padding={0}
-                className="image-card"
-              >
-                <div className="image-preview">
-                  <img src={image.image} alt={image.filename} />
-                  <Badge
-                    className="image-type"
-                    variant="filled"
-                    color="dark"
-                    size="xs"
-                  >
-                    {image.mimeType.replace("image/", "").toUpperCase()}
-                  </Badge>
-                </div>
-                <Group p="md" justify="space-between" wrap="nowrap">
-                  <div className="min-width-zero">
-                    <Text fw={600} size="sm" truncate>
-                      {image.filename}
-                    </Text>
-                    <Text c="dimmed" size="xs" mt={3}>
-                      远端缓存
-                    </Text>
+          {filteredImages.length ? (
+            <SimpleGrid
+              cols={{ base: 1, xs: 2, md: 3, xl: 4 }}
+              spacing="lg"
+            >
+              {filteredImages.map((image) => (
+                <Card
+                  key={image.filename}
+                  withBorder
+                  padding={0}
+                  className="image-card"
+                >
+                  <div className="image-preview">
+                    <img src={image.image} alt={image.filename} />
+                    <Badge
+                      className="image-type"
+                      variant="filled"
+                      color="dark"
+                      size="xs"
+                    >
+                      {image.mimeType.replace("image/", "").toUpperCase()}
+                    </Badge>
                   </div>
-                  <Menu shadow="md" position="bottom-end">
-                    <Menu.Target>
-                      <Button variant="subtle" color="gray" px={10}>
-                        ···
-                      </Button>
-                    </Menu.Target>
-                    <Menu.Dropdown>
-                      <Menu.Item
-                        color="red"
-                        leftSection={<LineIcon name="trash" size={16} />}
-                        onClick={() => remove.mutate(image.filename)}
-                      >
-                        删除图片
-                      </Menu.Item>
-                    </Menu.Dropdown>
-                  </Menu>
-                </Group>
-              </Card>
-            ))}
-          </SimpleGrid>
+                  <Group p="md" justify="space-between" wrap="nowrap">
+                    <div className="min-width-zero">
+                      <Text fw={600} size="sm" truncate>
+                        {image.filename}
+                      </Text>
+                      <Text c="dimmed" size="xs" mt={3}>
+                        远端缓存
+                      </Text>
+                    </div>
+                    <Menu shadow="md" position="bottom-end">
+                      <Menu.Target>
+                        <Button variant="subtle" color="gray" px={10}>
+                          ···
+                        </Button>
+                      </Menu.Target>
+                      <Menu.Dropdown>
+                        <Menu.Item
+                          color="red"
+                          leftSection={<LineIcon name="trash" size={16} />}
+                          onClick={() => remove.mutate(image.filename)}
+                        >
+                          删除图片
+                        </Menu.Item>
+                      </Menu.Dropdown>
+                    </Menu>
+                  </Group>
+                </Card>
+              ))}
+            </SimpleGrid>
+          ) : (
+            <Center py={64}>
+              <Text c="dimmed">该分类暂无图片</Text>
+            </Center>
+          )}
         </>
       ) : (
         <Card withBorder className="empty-state">

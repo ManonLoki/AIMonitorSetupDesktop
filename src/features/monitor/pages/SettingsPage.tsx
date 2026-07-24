@@ -2,7 +2,6 @@ import {
   Alert,
   Badge,
   Button,
-  Card,
   Group,
   Loader,
   Select,
@@ -11,7 +10,6 @@ import {
   Tabs,
   Text,
   TextInput,
-  Title,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -112,65 +110,37 @@ export function SettingsPage() {
   });
 
   return (
-    <Stack gap={28} maw={860}>
-      <PageHeading
-        title="设置"
-        description="配置用户名并选择局域网中的 AIMonitor 设备。"
+    <Stack gap="lg" maw={860}>
+      <TextInput
+        label="显示用户名"
+        placeholder="输入设备上显示的名称"
+        value={username}
+        onChange={(event) => {
+          save.reset();
+          manualSave.reset();
+          setUsername(event.currentTarget.value);
+        }}
+        error={
+          saveAttempted && !username.trim()
+            ? "保存设置前请输入显示用户名"
+            : undefined
+        }
+        required
+        size="md"
       />
 
-      <Card withBorder className="surface-card" padding={0}>
-        <div className="settings-card-header">
-          <div className="settings-icon">
-            <LineIcon name="ai" size={22} />
-          </div>
-          <Text fw={650}>用户名</Text>
-        </div>
-        <Stack p={24}>
-          <TextInput
-            label="显示用户名"
-            placeholder="输入设备上显示的名称"
-            value={username}
-            onChange={(event) => {
-              save.reset();
-              manualSave.reset();
-              setUsername(event.currentTarget.value);
-            }}
-            error={
-              saveAttempted && !username.trim()
-                ? "保存设置前请输入显示用户名"
-                : undefined
-            }
-            required
-            size="md"
-          />
-        </Stack>
-      </Card>
+      <Tabs
+        defaultValue="automatic"
+        onChange={() => test.reset()}
+        keepMounted={false}
+      >
+        <Tabs.List>
+          <Tabs.Tab value="automatic">自动发现</Tabs.Tab>
+          <Tabs.Tab value="manual">手动维护</Tabs.Tab>
+        </Tabs.List>
 
-      <Card withBorder className="surface-card" padding={0}>
-        <div className="settings-card-header">
-          <div className="settings-icon">
-            <LineIcon name="server" size={22} />
-          </div>
-          <div>
-            <Text fw={650}>目标设备</Text>
-            <Text size="sm" c="dimmed">
-              从局域网中发现 AIMonitor，并选择状态与图片的目标设备
-            </Text>
-          </div>
-        </div>
-
-        <Tabs
-          defaultValue="automatic"
-          onChange={() => test.reset()}
-          keepMounted={false}
-        >
-          <Tabs.List px={24} pt={12}>
-            <Tabs.Tab value="automatic">自动发现</Tabs.Tab>
-            <Tabs.Tab value="manual">手动维护</Tabs.Tab>
-          </Tabs.List>
-
-          <Tabs.Panel value="automatic">
-            <Stack p={24} gap="lg">
+        <Tabs.Panel value="automatic">
+          <Stack pt="lg" gap="lg">
               {settings.isPending || devices.isPending ? (
                 <Skeleton height={72} radius="md" />
               ) : (
@@ -315,11 +285,11 @@ export function SettingsPage() {
                   保存设置
                 </Button>
               </Group>
-            </Stack>
-          </Tabs.Panel>
+          </Stack>
+        </Tabs.Panel>
 
-          <Tabs.Panel value="manual">
-            <Stack p={24} gap="lg">
+        <Tabs.Panel value="manual">
+          <Stack pt="lg" gap="lg">
               <TextInput
                 label="设备名称"
                 description="用于在应用中识别这台设备"
@@ -381,38 +351,9 @@ export function SettingsPage() {
                   保存手动设置
                 </Button>
               </Group>
-            </Stack>
-          </Tabs.Panel>
-        </Tabs>
-      </Card>
-
-      <Alert
-        variant="light"
-        color="blue"
-        title="局域网使用提示"
-        icon={<LineIcon name="settings" size={18} />}
-      >
-        设备接口目前不包含鉴权与 TLS，请仅在可信局域网内使用，不要将端口直接暴露到公网。
-      </Alert>
+          </Stack>
+        </Tabs.Panel>
+      </Tabs>
     </Stack>
-  );
-}
-
-function PageHeading({
-  title,
-  description,
-}: {
-  title: string;
-  description: string;
-}) {
-  return (
-    <div>
-      <Title order={1} className="page-title">
-        {title}
-      </Title>
-      <Text c="dimmed" mt={5}>
-        {description}
-      </Text>
-    </div>
   );
 }

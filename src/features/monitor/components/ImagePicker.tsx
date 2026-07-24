@@ -2,6 +2,7 @@ import {
   ActionIcon,
   Group,
   Popover,
+  SegmentedControl,
   SimpleGrid,
   Text,
   Tooltip,
@@ -10,6 +11,8 @@ import {
 import { useId, useState } from "react";
 import type { RemoteImage } from "../api/monitor";
 import { LineIcon } from "../../../shared/ui/LineIcon";
+
+type ImageCategory = "all" | "jpeg" | "png" | "gif";
 
 interface ImagePickerProps {
   images: RemoteImage[];
@@ -25,8 +28,17 @@ export function ImagePicker({
   onChange,
 }: ImagePickerProps) {
   const [opened, setOpened] = useState(false);
+  const [category, setCategory] = useState<ImageCategory>("all");
   const labelId = useId();
   const selectedImage = images.find((image) => image.filename === value);
+  const filteredImages =
+    category === "all"
+      ? images
+      : images.filter(
+          (image) => image.mimeType === `image/${category}`,
+        );
+  const categoryCount = (value: Exclude<ImageCategory, "all">) =>
+    images.filter((image) => image.mimeType === `image/${value}`).length;
 
   return (
     <div>
@@ -92,7 +104,9 @@ export function ImagePicker({
                 选择展示图片
               </Text>
               <Text size="xs" c="dimmed">
-                共 {images.length} 张
+                {category === "all"
+                  ? `共 ${images.length} 张`
+                  : `显示 ${filteredImages.length} / 共 ${images.length} 张`}
               </Text>
             </div>
             <ActionIcon
@@ -105,32 +119,54 @@ export function ImagePicker({
             </ActionIcon>
           </Group>
 
+          <SegmentedControl
+            fullWidth
+            size="xs"
+            mb="sm"
+            value={category}
+            onChange={(nextCategory) =>
+              setCategory(nextCategory as ImageCategory)
+            }
+            data={[
+              { value: "all", label: `全部 ${images.length}` },
+              { value: "jpeg", label: `JPEG ${categoryCount("jpeg")}` },
+              { value: "png", label: `PNG ${categoryCount("png")}` },
+              { value: "gif", label: `GIF ${categoryCount("gif")}` },
+            ]}
+          />
+
           <div className="image-picker-options" role="listbox">
-            <SimpleGrid cols={4} spacing="xs">
-              {images.map((image) => (
-                <Tooltip key={image.filename} label={image.filename}>
-                  <UnstyledButton
-                    type="button"
-                    role="option"
-                    aria-selected={image.filename === value}
-                    aria-label={`选择图片 ${image.filename}`}
-                    className="image-picker-option"
-                    data-selected={image.filename === value || undefined}
-                    onClick={() => {
-                      onChange(image.filename);
-                      setOpened(false);
-                    }}
-                  >
-                    <img src={image.image} alt="" />
-                    {image.filename === value && (
-                      <span className="image-picker-check">
-                        <LineIcon name="check" size={14} />
-                      </span>
-                    )}
-                  </UnstyledButton>
-                </Tooltip>
-              ))}
-            </SimpleGrid>
+            {filteredImages.length ? (
+              <SimpleGrid cols={4} spacing="xs">
+                {filteredImages.map((image) => (
+                  <Tooltip key={image.filename} label={image.filename}>
+                    <UnstyledButton
+                      type="button"
+                      role="option"
+                      aria-selected={image.filename === value}
+                      aria-label={`选择图片 ${image.filename}`}
+                      className="image-picker-option"
+                      data-selected={image.filename === value || undefined}
+                      onClick={() => {
+                        onChange(image.filename);
+                        setOpened(false);
+                      }}
+                    >
+                      <img src={image.image} alt="" />
+                      {image.filename === value && (
+                        <span className="image-picker-check">
+                          <LineIcon name="check" size={14} />
+                        </span>
+                      )}
+                    </UnstyledButton>
+                  </Tooltip>
+                ))}
+              </SimpleGrid>
+            ) : (
+              <Text c="dimmed" size="sm" ta="center" py="xl">
+                该分类暂无图片
+              </Text>
+            )}
           </div>
         </Popover.Dropdown>
       </Popover>

@@ -49,31 +49,26 @@ const tools: Array<{ value: AiTool; label: string }> = [
 const behaviors: Array<{
   value: HookBehavior;
   label: string;
-  description: string;
   color: string;
 }> = [
   {
     value: "idle",
     label: "空闲",
-    description: "客户端已启动，当前等待新的任务",
     color: "gray",
   },
   {
     value: "running",
     label: "运行中",
-    description: "正在处理提示词或调用工具",
     color: "violet",
   },
   {
     value: "asking",
     label: "询问",
-    description: "等待用户确认、授权或输入",
     color: "yellow",
   },
   {
     value: "error",
     label: "异常",
-    description: "工具调用或任务执行失败",
     color: "red",
   },
 ];
@@ -261,32 +256,13 @@ export function AiManagementPage() {
           return (
           <Tabs.Panel key={tool.value} value={tool.value} pt="lg">
             <Stack gap="lg">
-              <Card withBorder className="surface-card" p="lg">
-                <Stack gap="md">
-                  <Group justify="space-between" align="flex-start">
-                    <div>
-                      <Text fw={650}>Hooks 写入位置</Text>
-                      <Text size="sm" c="dimmed" mt={3}>
-                        每个工具独立保存。未自定义时使用探测到的目录或标准保底目录。
-                      </Text>
-                    </div>
-                    {location && (
-                      <Badge
-                        variant="light"
-                        color={location.isCustom ? "violet" : "gray"}
-                      >
-                        {location.isCustom ? "自定义" : "默认"}
-                      </Badge>
-                    )}
-                  </Group>
-
+              <Stack gap="md">
+                <Group align="center">
+                  <Text fw={650} miw={72}>
+                    配置目录
+                  </Text>
                   <TextInput
-                    label="配置目录"
-                    description={
-                      location
-                        ? `当前配置文件：${location.configPath}`
-                        : "正在探测默认路径"
-                    }
+                    aria-label="配置目录"
                     placeholder="选择或输入绝对目录"
                     value={directoryDraft}
                     disabled={hookConfigLocations.isPending}
@@ -298,85 +274,86 @@ export function AiManagementPage() {
                         [tool.value]: event.currentTarget.value,
                       }));
                     }}
+                    style={{ flex: "1 1 320px" }}
                   />
+                </Group>
 
-                  {pathDirty && (
-                    <Alert color="yellow" variant="light">
-                      路径尚未保存。保存后，预览、状态检查和写入都会切换到新目录；旧文件不会被移动或删除。
-                    </Alert>
-                  )}
+                {pathDirty && (
+                  <Alert color="yellow" variant="light">
+                    路径尚未保存。保存后，预览、状态检查和写入都会切换到新目录；旧文件不会被移动或删除。
+                  </Alert>
+                )}
 
-                  <Group justify="space-between">
+                <Group justify="space-between">
+                  <Button
+                    variant="subtle"
+                    color="gray"
+                    onClick={() =>
+                      saveDirectory.mutate({
+                        tool: tool.value,
+                        directory: "",
+                      })
+                    }
+                    loading={
+                      saveDirectory.isPending &&
+                      saveDirectory.variables?.tool === tool.value &&
+                      saveDirectory.variables.directory === ""
+                    }
+                    disabled={!location?.isCustom}
+                  >
+                    恢复默认
+                  </Button>
+                  <Group>
                     <Button
-                      variant="subtle"
-                      color="gray"
+                      variant="default"
+                      leftSection={<LineIcon name="edit" size={17} />}
+                      loading={selectingDirectory === tool.value}
+                      onClick={async () => {
+                        setSelectingDirectory(tool.value);
+                        setDirectoryPickerError(null);
+                        try {
+                          const selected =
+                            await chooseHookConfigDirectory(
+                              directoryDraft || location?.directory || "",
+                            );
+                          if (selected) {
+                            setDirectoryDrafts((current) => ({
+                              ...current,
+                              [tool.value]: selected,
+                            }));
+                          }
+                        } catch (error) {
+                          setDirectoryPickerError(
+                            error instanceof Error
+                              ? error.message
+                              : String(error),
+                          );
+                        } finally {
+                          setSelectingDirectory(null);
+                        }
+                      }}
+                    >
+                      选择目录
+                    </Button>
+                    <Button
                       onClick={() =>
                         saveDirectory.mutate({
                           tool: tool.value,
-                          directory: "",
+                          directory: directoryDraft,
                         })
                       }
                       loading={
                         saveDirectory.isPending &&
                         saveDirectory.variables?.tool === tool.value &&
-                        saveDirectory.variables.directory === ""
+                        saveDirectory.variables.directory !== ""
                       }
-                      disabled={!location?.isCustom}
+                      disabled={!directoryDraft.trim() || !pathDirty}
                     >
-                      恢复默认
+                      保存路径
                     </Button>
-                    <Group>
-                      <Button
-                        variant="default"
-                        leftSection={<LineIcon name="edit" size={17} />}
-                        loading={selectingDirectory === tool.value}
-                        onClick={async () => {
-                          setSelectingDirectory(tool.value);
-                          setDirectoryPickerError(null);
-                          try {
-                            const selected =
-                              await chooseHookConfigDirectory(
-                                directoryDraft || location?.directory || "",
-                              );
-                            if (selected) {
-                              setDirectoryDrafts((current) => ({
-                                ...current,
-                                [tool.value]: selected,
-                              }));
-                            }
-                          } catch (error) {
-                            setDirectoryPickerError(
-                              error instanceof Error
-                                ? error.message
-                                : String(error),
-                            );
-                          } finally {
-                            setSelectingDirectory(null);
-                          }
-                        }}
-                      >
-                        选择目录
-                      </Button>
-                      <Button
-                        onClick={() =>
-                          saveDirectory.mutate({
-                            tool: tool.value,
-                            directory: directoryDraft,
-                          })
-                        }
-                        loading={
-                          saveDirectory.isPending &&
-                          saveDirectory.variables?.tool === tool.value &&
-                          saveDirectory.variables.directory !== ""
-                        }
-                        disabled={!directoryDraft.trim() || !pathDirty}
-                      >
-                        保存路径
-                      </Button>
-                    </Group>
                   </Group>
-                </Stack>
-              </Card>
+                </Group>
+              </Stack>
 
               <Card withBorder className="surface-card" p="lg">
                 <Stack gap="lg">
@@ -415,19 +392,13 @@ export function AiManagementPage() {
                           p="md"
                         >
                           <Stack gap="md">
-                            <Group justify="space-between" align="flex-start">
-                              <div>
-                                <Badge color={behavior.color} variant="light">
-                                  {behavior.label}
-                                </Badge>
-                                <Text size="sm" c="dimmed" mt={7}>
-                                  {activeTool === "codex" &&
-                                  behavior.value === "error"
-                                    ? "当前 Codex Desktop Hook 协议没有独立的 Error 事件，暂不自动触发"
-                                    : behavior.description}
-                                </Text>
-                              </div>
-                            </Group>
+                            <Badge
+                              color={behavior.color}
+                              variant="light"
+                              w="fit-content"
+                            >
+                              {behavior.label}
+                            </Badge>
 
                             <ImagePicker
                               images={availableImages}
@@ -446,8 +417,19 @@ export function AiManagementPage() {
                             />
 
                             <Textarea
-                              label="内容"
-                              description="可选"
+                              label={
+                                <span>
+                                  内容{" "}
+                                  <Text
+                                    component="span"
+                                    size="xs"
+                                    fw={400}
+                                    c="dimmed"
+                                  >
+                                    可选
+                                  </Text>
+                                </span>
+                              }
                               placeholder="输入设备上显示的补充内容"
                               autosize
                               minRows={2}
