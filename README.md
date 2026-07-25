@@ -30,3 +30,12 @@ pnpm tauri build
 - [技术栈与版本](docs/technology-stack.md)
 - [架构与代码边界](docs/architecture.md)
 - [代理协作规则](AGENTS.md)
+
+## 许可证
+
+本项目源码以 [PolyForm Noncommercial License 1.0.0](LICENSE) 提供，可用于
+个人、研究、教育及其他许可证允许的非商业用途，也可在这些用途范围内修改和
+分发。未经版权所有者另行书面授权，不得用于商业用途。
+
+由于包含非商业用途限制，本项目属于“源码可用（source-available）”，不属于
+OSI 定义的开源软件。

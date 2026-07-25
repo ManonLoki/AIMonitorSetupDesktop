@@ -2,6 +2,8 @@
   "name": "ai-monitor-setup",
   "private": true,
   "version": "1.0.5",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": "https://github.com/ManonLoki/AIMonitorSetupDesktop.git",
   "type": "module",
   "packageManager": "pnpm@10.30.2",
   "engines": {
