@@ -334,7 +334,13 @@ pub fn generate_hook_config(
 
     for event in native_state_events(profile.tool) {
         let commands = managed_commands(profile.tool, event.name, runner_paths);
-        insert_handler(&mut hooks, profile.tool, event.name, &commands);
+        insert_handler(
+            &mut hooks,
+            profile.tool,
+            event.name,
+            event.matcher,
+            &commands,
+        );
     }
     let session_end_event = native_session_end_event(profile.tool);
     let session_end_commands = managed_commands(profile.tool, session_end_event, runner_paths);
@@ -342,6 +348,7 @@ pub fn generate_hook_config(
         &mut hooks,
         profile.tool,
         session_end_event,
+        None,
         &session_end_commands,
     );
 
@@ -448,13 +455,14 @@ pub fn generate_hook_runner_scripts(
                 .iter()
                 .find(|hook| hook.behavior == event.behavior)
                 .ok_or_else(|| "行为配置不完整".to_owned())?;
+            let retry = requires_delivery_retry(event.name);
             append_runner_case(
                 &mut posix_cases,
                 &mut windows_cases,
                 profile.tool,
                 event.name,
-                &update_slot_command(settings, profile.tool, profile.slot, state)?,
-                &update_slot_command_windows(settings, profile.tool, profile.slot, state)?,
+                &update_slot_command(settings, profile.tool, profile.slot, state, retry)?,
+                &update_slot_command_windows(settings, profile.tool, profile.slot, state, retry)?,
             );
         }
 
@@ -466,8 +474,8 @@ pub fn generate_hook_runner_scripts(
                 .find(|hook| hook.behavior == HookBehavior::Idle)
                 .ok_or_else(|| "空闲行为配置不完整".to_owned())?;
             (
-                update_slot_command(settings, profile.tool, profile.slot, idle)?,
-                update_slot_command_windows(settings, profile.tool, profile.slot, idle)?,
+                update_slot_command(settings, profile.tool, profile.slot, idle, true)?,
+                update_slot_command_windows(settings, profile.tool, profile.slot, idle, true)?,
             )
         } else {
             (
@@ -509,6 +517,7 @@ impl HookBehavior {
 
 struct NativeStateEvent {
     name: &'static str,
+    matcher: Option<&'static str>,
     behavior: HookBehavior,
 }
 
@@ -537,7 +546,7 @@ fn cursor_state_events() -> Vec<NativeStateEvent> {
 }
 
 fn claude_state_events() -> Vec<NativeStateEvent> {
-    state_events(&[
+    let mut events = state_events(&[
         ("SessionStart", HookBehavior::Idle),
         ("UserPromptSubmit", HookBehavior::Running),
         ("PreToolUse", HookBehavior::Running),
@@ -551,7 +560,17 @@ fn claude_state_events() -> Vec<NativeStateEvent> {
         ("SubagentStop", HookBehavior::Running),
         ("PreCompact", HookBehavior::Running),
         ("PostCompact", HookBehavior::Running),
-    ])
+    ]);
+    // Stop is the primary end-of-turn signal. Claude does not emit it for every
+    // termination path, so idle_prompt provides a second authoritative signal
+    // that the whole session is waiting for user input. In particular, this
+    // prevents a late SubagentStop update from leaving the slot running.
+    events.push(NativeStateEvent {
+        name: "Notification",
+        matcher: Some("idle_prompt"),
+        behavior: HookBehavior::Idle,
+    });
+    events
 }
 
 fn codex_state_events() -> Vec<NativeStateEvent> {
@@ -574,9 +593,22 @@ fn state_events(events: &[(&'static str, HookBehavior)]) -> Vec<NativeStateEvent
         .iter()
         .map(|(name, behavior)| NativeStateEvent {
             name,
+            matcher: None,
             behavior: *behavior,
         })
         .collect()
+}
+
+fn requires_delivery_retry(event: &str) -> bool {
+    matches!(
+        event,
+        "UserPromptSubmit"
+            | "beforeSubmitPrompt"
+            | "Stop"
+            | "stop"
+            | "StopFailure"
+            | "Notification"
+    )
 }
 
 fn native_session_end_event(tool: AiTool) -> &'static str {
@@ -596,16 +628,23 @@ fn insert_handler(
     hooks: &mut Map<String, Value>,
     tool: AiTool,
     event: &str,
+    matcher: Option<&str>,
     commands: &ManagedCommands,
 ) {
     let handler = match tool {
         AiTool::Cursor => json!([{ "command": platform_command(commands) }]),
-        AiTool::ClaudeCode => json!([{
-            "hooks": [{
-                "type": "command",
-                "command": platform_command(commands)
-            }]
-        }]),
+        AiTool::ClaudeCode => {
+            let mut group = json!({
+                "hooks": [{
+                    "type": "command",
+                    "command": platform_command(commands)
+                }]
+            });
+            if let Some(matcher) = matcher {
+                group["matcher"] = Value::String(matcher.to_owned());
+            }
+            Value::Array(vec![group])
+        }
         AiTool::Codex => json!([{
             "hooks": [{
                 "type": "command",
@@ -899,6 +938,7 @@ fn update_slot_command(
     tool: AiTool,
     slot: u8,
     state: &HookContent,
+    retry: bool,
 ) -> Result<String, String> {
     let payload = serde_json::to_string(&json!({
         "username": settings.username,
@@ -909,8 +949,14 @@ fn update_slot_command(
     }))
     .map_err(|error| format!("无法生成状态请求：{error}"))?;
     let url = format!("{}/api/slots/{slot}", settings.base_url);
+    let retry_options = if retry {
+        " --retry 2 --retry-delay 1 --retry-all-errors"
+    } else {
+        ""
+    };
     Ok(format!(
-        "curl --silent --show-error --fail --connect-timeout 2 --max-time 5 --request POST --header 'Content-Type: application/json' --data-binary {} {}",
+        "curl --silent --show-error --fail --connect-timeout 2 --max-time 5{retry_options} \
+         --request POST --header 'Content-Type: application/json' --data-binary {} {}",
         shell_quote(&payload),
         shell_quote(&url)
     ))
@@ -921,6 +967,7 @@ fn update_slot_command_windows(
     tool: AiTool,
     slot: u8,
     state: &HookContent,
+    retry: bool,
 ) -> Result<String, String> {
     let payload = serde_json::to_string(&json!({
         "username": settings.username,
@@ -931,13 +978,25 @@ fn update_slot_command_windows(
     }))
     .map_err(|error| format!("无法生成 Windows 状态请求：{error}"))?;
     let url = format!("{}/api/slots/{slot}", settings.base_url);
-    Ok(format!(
-        "$ProgressPreference = 'SilentlyContinue'; \
-         Invoke-RestMethod -Uri '{}' -Method Post -ContentType 'application/json' \
+    let request = format!(
+        "Invoke-RestMethod -Uri '{}' -Method Post -ContentType 'application/json' \
          -Body '{}' -TimeoutSec 5 | Out-Null",
         powershell_quote(&url),
         powershell_quote(&payload)
-    ))
+    );
+    if retry {
+        Ok(format!(
+            "$ProgressPreference = 'SilentlyContinue'; $lastError = $null; \
+         for ($attempt = 1; $attempt -le 3; $attempt++) {{ \
+         try {{ {request}; $lastError = $null; break }} \
+         catch {{ $lastError = $_; if ($attempt -lt 3) {{ Start-Sleep -Seconds 1 }} }} }}; \
+         if ($null -ne $lastError) {{ throw $lastError }}"
+        ))
+    } else {
+        Ok(format!(
+            "$ProgressPreference = 'SilentlyContinue'; {request}"
+        ))
+    }
 }
 
 const fn ai_tool_name(tool: AiTool) -> &'static str {
@@ -951,7 +1010,8 @@ const fn ai_tool_name(tool: AiTool) -> &'static str {
 fn release_slot_command(settings: &MonitorSettings, slot: u8) -> String {
     let url = format!("{}/api/slots/{slot}", settings.base_url);
     format!(
-        "curl --silent --show-error --fail --connect-timeout 2 --max-time 5 --request DELETE {}",
+        "curl --silent --show-error --fail --connect-timeout 2 --max-time 5 \
+         --retry 2 --retry-delay 1 --retry-all-errors --request DELETE {}",
         shell_quote(&url)
     )
 }
@@ -959,8 +1019,12 @@ fn release_slot_command(settings: &MonitorSettings, slot: u8) -> String {
 fn release_slot_command_windows(settings: &MonitorSettings, slot: u8) -> String {
     let url = format!("{}/api/slots/{slot}", settings.base_url);
     format!(
-        "$ProgressPreference = 'SilentlyContinue'; \
-         Invoke-RestMethod -Uri '{}' -Method Delete -TimeoutSec 5 | Out-Null",
+        "$ProgressPreference = 'SilentlyContinue'; $lastError = $null; \
+         for ($attempt = 1; $attempt -le 3; $attempt++) {{ \
+         try {{ Invoke-RestMethod -Uri '{}' -Method Delete -TimeoutSec 5 | Out-Null; \
+         $lastError = $null; break }} catch {{ $lastError = $_; \
+         if ($attempt -lt 3) {{ Start-Sleep -Seconds 1 }} }} }}; \
+         if ($null -ne $lastError) {{ throw $lastError }}",
         powershell_quote(&url)
     )
 }
@@ -1245,13 +1309,16 @@ mod tests {
         assert!(preview.content.contains("\"PostToolUseFailure\""));
         assert!(preview.content.contains("\"StopFailure\""));
         assert!(preview.content.contains("\"SessionEnd\""));
-        assert!(!preview.content.contains("\"Notification\""));
+        assert!(preview.content.contains("\"Notification\""));
         assert!(
             preview
                 .content
                 .contains("aimonitor-managed-hook:v2|tool=claude-code")
         );
         assert!(preview.content.contains(">/dev/null"));
+        let value: Value = serde_json::from_str(&preview.content).unwrap();
+        assert_eq!(value["hooks"]["Notification"][0]["matcher"], "idle_prompt");
+        assert!(value["hooks"]["SessionStart"][0].get("matcher").is_none());
     }
 
     #[test]
@@ -1397,9 +1464,44 @@ mod tests {
         assert!(scripts.posix.contains("/api/slots/4"));
         assert!(scripts.posix.contains("\"behavior\":\"running\""));
         assert!(scripts.posix.contains("codex:SessionEnd"));
+        assert!(scripts.posix.contains("--retry-all-errors"));
         assert!(scripts.windows.contains("Invoke-RestMethod"));
+        assert!(scripts.windows.contains("$attempt -le 3"));
         assert!(!preview.content.contains(DEFAULT_BASE_URL));
         assert!(!preview.content.contains("\"behavior\":\"running\""));
+    }
+
+    #[test]
+    fn claude_runner_uses_idle_notification_as_terminal_fallback() {
+        let settings = MonitorSettings {
+            base_url: DEFAULT_BASE_URL.to_owned(),
+            username: "Manon".to_owned(),
+            device_id: "device-1".to_owned(),
+            device_name: "Desk Monitor".to_owned(),
+        };
+        let scripts =
+            generate_hook_runner_scripts(&settings, &[profile(AiTool::ClaudeCode)]).unwrap();
+
+        let notification_case = scripts
+            .posix
+            .split("'claude-code:Notification')")
+            .nth(1)
+            .unwrap()
+            .split(";;")
+            .next()
+            .unwrap();
+        assert!(notification_case.contains("\"behavior\":\"idle\""));
+        assert!(notification_case.contains("--retry-all-errors"));
+
+        let pre_tool_case = scripts
+            .posix
+            .split("'claude-code:PreToolUse')")
+            .nth(1)
+            .unwrap()
+            .split(";;")
+            .next()
+            .unwrap();
+        assert!(!pre_tool_case.contains("--retry"));
     }
 
     #[test]
