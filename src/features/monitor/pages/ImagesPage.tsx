@@ -13,7 +13,7 @@ import {
   Text,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useRef } from "react";
 import {
   deleteRemoteImage,
   uploadRemoteImages,
@@ -22,15 +22,13 @@ import {
   monitorKeys,
   remoteImagesQuery,
 } from "../queries/monitor";
+import { useImageCategoryFilter } from "../hooks/useImageCategoryFilter";
 import { LineIcon } from "../../../shared/ui/LineIcon";
-
-type ImageCategory = "all" | "jpeg" | "png" | "gif";
 
 export function ImagesPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
   const images = useQuery(remoteImagesQuery);
-  const [category, setCategory] = useState<ImageCategory>("all");
 
   const upload = useMutation({
     mutationFn: uploadRemoteImages,
@@ -46,14 +44,8 @@ export function ImagesPage() {
 
   const error = images.error ?? upload.error ?? remove.error;
   const imageList = images.data ?? [];
-  const filteredImages =
-    category === "all"
-      ? imageList
-      : imageList.filter(
-          (image) => image.mimeType === `image/${category}`,
-        );
-  const categoryCount = (value: Exclude<ImageCategory, "all">) =>
-    imageList.filter((image) => image.mimeType === `image/${value}`).length;
+  const { category, setCategory, filteredImages, counts } =
+    useImageCategoryFilter(imageList);
 
   return (
     <Stack gap="lg">
@@ -109,12 +101,12 @@ export function ImagesPage() {
             <SegmentedControl
               size="sm"
               value={category}
-              onChange={(value) => setCategory(value as ImageCategory)}
+              onChange={(value) => setCategory(value as typeof category)}
               data={[
                 { value: "all", label: `全部 ${imageList.length}` },
-                { value: "jpeg", label: `JPEG ${categoryCount("jpeg")}` },
-                { value: "png", label: `PNG ${categoryCount("png")}` },
-                { value: "gif", label: `GIF ${categoryCount("gif")}` },
+                { value: "jpeg", label: `JPEG ${counts.jpeg}` },
+                { value: "png", label: `PNG ${counts.png}` },
+                { value: "gif", label: `GIF ${counts.gif}` },
               ]}
             />
           </Group>

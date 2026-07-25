@@ -29,7 +29,9 @@ src/
 ├── features/<feature>/
 │   ├── api/                   # command 名称与传输 DTO 类型
 │   ├── queries/               # Query key、缓存与失效策略
-│   └── pages/                 # Mantine 页面组合和交互
+│   ├── pages/                 # Mantine 页面组合和交互
+│   ├── components/            # feature 内可复用的展示组件
+│   └── hooks/                 # feature 内可复用的纯 UI 状态逻辑
 └── shared/
     ├── state/                 # 仅纯 UI Jotai atoms
     ├── tauri/                 # 通用 invoke 传输适配
@@ -38,11 +40,12 @@ src/
 src-tauri/src/
 ├── commands/                  # Tauri 参数/结果适配；保持极薄
 ├── domain/                    # 业务实体、规则与纯逻辑
+├── application/                # 服务编排（如 MonitorService、设备发现）
 └── lib.rs                     # 插件与 command 注册
 ```
 
-业务增长后可以在 Rust 增加 `application/`、`infrastructure/` 层，但不得
-把业务逻辑放回 command 或 React。
+业务增长后可以在 Rust 继续增加 `infrastructure/` 等新层，但不得把业务
+逻辑放回 command 或 React。
 
 ## 状态归属
 
@@ -96,6 +99,6 @@ Rust DTO 使用 `serde` 的 `camelCase` 输出以匹配 TypeScript。Command
 - Command：`src-tauri/src/commands/system.rs`
 - TypeScript API：`src/features/system/api/system.ts`
 - Query：`src/features/system/queries/system.ts`
-- 页面：`src/features/system/pages/HomePage.tsx`
+- 消费方：`src/shared/ui/AppShellLayout.tsx`（在应用外壳中展示设备状态）
 
 后续功能应复制这条边界，而不是把实现集中到单个 React 组件。

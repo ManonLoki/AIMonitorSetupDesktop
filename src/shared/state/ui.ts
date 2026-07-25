@@ -5,3 +5,8 @@ export const colorSchemeAtom = atomWithStorage<"light" | "dark">(
   "ai-monitor-color-scheme",
   "light",
 );
+
+export const sidebarCollapsedAtom = atomWithStorage<boolean>(
+  "ai-monitor-sidebar-collapsed",
+  false,
+);

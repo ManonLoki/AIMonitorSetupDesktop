@@ -13,7 +13,9 @@ type IconName =
   | "upload"
   | "check"
   | "close"
-  | "server";
+  | "server"
+  | "chevronDown"
+  | "panel";
 
 const paths: Record<IconName, ReactNode> = {
   ai: (
@@ -45,6 +47,13 @@ const paths: Record<IconName, ReactNode> = {
   check: <path d="m5 12 4 4L19 6" />,
   close: <path d="M6 6l12 12M18 6 6 18" />,
   server: <path d="M4 5h16v6H4V5ZM4 13h16v6H4v-6ZM8 8h.01M8 16h.01" />,
+  chevronDown: <path d="m6 9 6 6 6-6" />,
+  panel: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="3" />
+      <path d="M9 4v16" />
+    </>
+  ),
 };
 
 export function LineIcon({

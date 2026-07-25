@@ -61,7 +61,7 @@ src-tauri/src/
 Reference implementation to copy when adding a new feature slice: `get_system_overview` —
 Rust domain `src-tauri/src/domain/system.rs` → command `src-tauri/src/commands/system.rs` →
 TS API `src/features/system/api/system.ts` → query `src/features/system/queries/system.ts` →
-page `src/features/system/pages/HomePage.tsx`.
+consumed by `src/shared/ui/AppShellLayout.tsx` (renders device status in the app shell).
 
 ### State ownership
 

@@ -37,6 +37,7 @@ body {
 .app-navbar {
   border-right: 1px solid var(--app-border);
   background: light-dark(#fff, #18191d);
+  transition: width 180ms ease;
 }
 
 .nav-section-label {
@@ -46,6 +47,35 @@ body {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  padding: 0 4px;
+}
+
+.app-brand.collapsed {
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+}
+
+.app-brand-identity {
+  min-width: 0;
+}
+
+.app-brand-controls {
+  flex: 0 0 auto;
+}
+
+.app-brand.collapsed .app-brand-controls {
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
 }
 
 .sidebar-link {
@@ -59,13 +89,37 @@ body {
   color: light-dark(#6741d9, #b197fc);
 }
 
+.rail-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 40px;
+  border-radius: 10px;
+  margin-bottom: 5px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.rail-link:hover {
+  background: var(--app-muted);
+}
+
+.rail-link.active {
+  background: light-dark(#f0ecff, rgba(121, 80, 242, 0.16));
+  color: light-dark(#6741d9, #b197fc);
+}
+
+.app-navbar.collapsed .sidebar-footer {
+  justify-content: center;
+}
+
 .sidebar-footer {
   margin-top: auto;
   padding: 14px 4px 0;
   border-top: 1px solid var(--app-border);
   display: flex;
   align-items: center;
-  justify-content: space-between;
 }
 
 .status-dot {
@@ -76,6 +130,16 @@ body {
   box-shadow: 0 0 0 4px rgba(64, 192, 87, 0.12);
 }
 
+.sidebar-device-button-collapsed {
+  position: relative;
+}
+
+.device-indicator {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+}
+
 .page-container {
   width: 100%;
   max-width: 1180px;
@@ -84,6 +148,110 @@ body {
 
 .mobile-nav-trigger {
   margin-bottom: 16px;
+}
+
+.boot-screen {
+  position: relative;
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--app-canvas);
+  isolation: isolate;
+}
+
+.boot-screen-glow {
+  position: absolute;
+  inset: -10%;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      circle at 50% 38%,
+      light-dark(rgba(121, 80, 242, 0.24), rgba(148, 108, 255, 0.32)),
+      transparent 58%
+    ),
+    radial-gradient(
+      circle at 20% 80%,
+      light-dark(rgba(64, 192, 87, 0.1), rgba(64, 192, 87, 0.14)),
+      transparent 50%
+    ),
+    radial-gradient(
+      circle at 82% 78%,
+      light-dark(rgba(121, 80, 242, 0.12), rgba(121, 80, 242, 0.18)),
+      transparent 50%
+    );
+  animation: boot-glow-drift 7s ease-in-out infinite;
+}
+
+.boot-screen-content {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+}
+
+.boot-screen-icon-wrap {
+  width: 76px;
+  height: 76px;
+  display: grid;
+  place-items: center;
+  border-radius: 22px;
+  background: light-dark(#fff, #1d1f24);
+  animation: boot-icon-breathe 2.4s ease-in-out infinite;
+}
+
+.boot-screen-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  object-fit: cover;
+}
+
+@keyframes boot-glow-drift {
+  0%,
+  100% {
+    transform: scale(1) translateY(0);
+    opacity: 0.9;
+  }
+  50% {
+    transform: scale(1.08) translateY(-1.5%);
+    opacity: 1;
+  }
+}
+
+@keyframes boot-icon-breathe {
+  0%,
+  100% {
+    box-shadow:
+      0 10px 26px rgba(121, 80, 242, 0.26),
+      0 0 0 0 rgba(121, 80, 242, 0.22);
+  }
+  50% {
+    box-shadow:
+      0 14px 34px rgba(121, 80, 242, 0.36),
+      0 0 0 12px rgba(121, 80, 242, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-screen-glow,
+  .boot-screen-icon-wrap {
+    animation: none;
+  }
+}
+
+.sidebar-device-button {
+  border-radius: 10px;
+  padding: 6px 8px;
+  margin: 0 -8px;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-device-button:hover {
+  background: var(--app-muted);
 }
 
 .surface-card,

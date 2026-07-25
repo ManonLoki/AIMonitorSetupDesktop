@@ -38,16 +38,6 @@ pub async fn discover_monitor_devices(
 }
 
 #[tauri::command]
-pub fn save_manual_monitor_settings(
-    service: State<'_, MonitorService>,
-    name: String,
-    base_url: String,
-    username: String,
-) -> Result<MonitorSettings, String> {
-    service.save_manual_settings(&name, &base_url, &username)
-}
-
-#[tauri::command]
 pub async fn check_monitor_connection(
     service: State<'_, MonitorService>,
     base_url: Option<String>,

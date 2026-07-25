@@ -10,9 +10,8 @@ import {
 } from "@mantine/core";
 import { useId, useState } from "react";
 import type { RemoteImage } from "../api/monitor";
+import { useImageCategoryFilter } from "../hooks/useImageCategoryFilter";
 import { LineIcon } from "../../../shared/ui/LineIcon";
-
-type ImageCategory = "all" | "jpeg" | "png" | "gif";
 
 interface ImagePickerProps {
   images: RemoteImage[];
@@ -28,17 +27,10 @@ export function ImagePicker({
   onChange,
 }: ImagePickerProps) {
   const [opened, setOpened] = useState(false);
-  const [category, setCategory] = useState<ImageCategory>("all");
+  const { category, setCategory, filteredImages, counts } =
+    useImageCategoryFilter(images);
   const labelId = useId();
   const selectedImage = images.find((image) => image.filename === value);
-  const filteredImages =
-    category === "all"
-      ? images
-      : images.filter(
-          (image) => image.mimeType === `image/${category}`,
-        );
-  const categoryCount = (value: Exclude<ImageCategory, "all">) =>
-    images.filter((image) => image.mimeType === `image/${value}`).length;
 
   return (
     <div>
@@ -125,13 +117,13 @@ export function ImagePicker({
             mb="sm"
             value={category}
             onChange={(nextCategory) =>
-              setCategory(nextCategory as ImageCategory)
+              setCategory(nextCategory as typeof category)
             }
             data={[
               { value: "all", label: `全部 ${images.length}` },
-              { value: "jpeg", label: `JPEG ${categoryCount("jpeg")}` },
-              { value: "png", label: `PNG ${categoryCount("png")}` },
-              { value: "gif", label: `GIF ${categoryCount("gif")}` },
+              { value: "jpeg", label: `JPEG ${counts.jpeg}` },
+              { value: "png", label: `PNG ${counts.png}` },
+              { value: "gif", label: `GIF ${counts.gif}` },
             ]}
           />
 

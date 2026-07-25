@@ -78,6 +78,8 @@ pub struct DiscoveredMonitorDevice {
     pub discovery_source: DiscoverySource,
 }
 
+/// 设备是如何被找到的；决定发现流程的信任优先级：mDNS 优先，
+/// 失败后回退到 UDP 广播，再回退到已保存地址。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum DiscoverySource {
@@ -85,7 +87,6 @@ pub enum DiscoverySource {
     Mdns,
     UdpBroadcast,
     SavedAddress,
-    ManualAddress,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -100,6 +101,8 @@ impl AiTool {
     pub const ALL: [Self; 3] = [Self::Codex, Self::ClaudeCode, Self::Cursor];
 }
 
+/// AI 实例在展示屏上呈现的状态。`Idle`/`Running`/`Asking`/`Error` 是当前
+/// 有效的四种展示行为（见 `DISPLAY_BEHAVIORS`），每个 Profile 必须四选四配齐。
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub enum HookBehavior {
@@ -133,6 +136,7 @@ pub struct HookContent {
 #[serde(rename_all = "camelCase")]
 pub struct AiProfile {
     pub tool: AiTool,
+    /// 在展示屏上的显示位置，取值范围 1-25（校验见 `validate_profile`）。
     pub slot: u8,
     #[serde(default)]
     pub hooks: Vec<HookContent>,
@@ -163,7 +167,11 @@ pub struct HookConfigWriteResult {
     pub profile: AiProfile,
     pub filename: String,
     pub config_changed: bool,
+    /// 仅当写入的是 Codex 且配置发生变化时为真：Codex 不会热加载
+    /// hooks.json，需要提示用户手动确认写入内容。
     pub requires_review: bool,
+    /// 仅当写入的是 Codex 且配置发生变化时为真：需要提示用户重启 Codex
+    /// 才能使新的 hooks 配置生效。
     pub restart_required: bool,
 }
 
@@ -174,8 +182,11 @@ pub struct LocalHookConfig {
     pub filename: String,
     pub exists: bool,
     pub valid: bool,
+    /// 现有配置里的托管条目是否已指向当前版本的 runner 脚本路径
+    /// （即是否已是最新版，无需迁移/重写）。
     pub stable_runner: bool,
     pub error: String,
+    /// 从现有配置中解析出的、由本工具托管写入的事件名列表（去重排序）。
     pub managed_targets: Vec<String>,
     pub content: String,
 }
@@ -276,23 +287,8 @@ pub fn validate_settings(
     })
 }
 
-pub fn manual_device(name: &str, base_url: &str) -> Result<DiscoveredMonitorDevice, String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("设备名称不能为空".to_owned());
-    }
-    let base_url = normalize_base_url(base_url)?;
-
-    Ok(DiscoveredMonitorDevice {
-        id: format!("manual:{base_url}"),
-        name: name.to_owned(),
-        api_version: "1".to_owned(),
-        base_url,
-        path: "/api/device".to_owned(),
-        discovery_source: DiscoverySource::ManualAddress,
-    })
-}
-
+/// 校验 Profile 是否可用于生成 Hooks 配置：位置在 1-25 之间，且四种展示
+/// 行为（空闲/运行中/询问/异常）各配置一次、都选择了图片。
 pub fn validate_profile(mut profile: AiProfile) -> Result<AiProfile, String> {
     if !(1..=25).contains(&profile.slot) {
         return Err("显示位置必须在 1 到 25 之间".to_owned());
@@ -325,6 +321,8 @@ pub fn validate_profile(mut profile: AiProfile) -> Result<AiProfile, String> {
     Ok(profile)
 }
 
+/// 根据 Profile 生成目标工具（Codex/Claude Code/Cursor）原生的 hooks 配置
+/// 文件内容：为每个原生事件写入调用 runner 脚本更新对应展示位置的命令。
 pub fn generate_hook_config(
     profile: AiProfile,
     runner_paths: &HookRunnerPaths,
@@ -370,6 +368,8 @@ pub fn generate_hook_config(
     })
 }
 
+/// 将生成的 hooks 配置合并进用户现有的配置文件，只替换本工具此前写入的
+/// 托管条目（通过 `MANAGED_HOOK_PREFIX` 识别），保留用户手工添加的其他内容。
 pub fn merge_hook_config(
     existing_content: Option<&str>,
     generated: &HookConfigPreview,
@@ -440,6 +440,8 @@ pub fn merge_hook_config(
     })
 }
 
+/// 生成 hooks 实际调用的 runner 脚本（POSIX sh 与 Windows PowerShell 各一份），
+/// 按 `工具:事件` 分支，把每个 Profile 的展示状态更新为对应设备图片。
 pub fn generate_hook_runner_scripts(
     settings: &MonitorSettings,
     profiles: &[AiProfile],
@@ -599,6 +601,8 @@ fn state_events(events: &[(&'static str, HookBehavior)]) -> Vec<NativeStateEvent
         .collect()
 }
 
+/// 这些事件对应的通知在网络抖动时容易丢失（用户正等待反馈的关键节点），
+/// 因此 runner 脚本需要对它们做请求重试，其余事件失败可直接忽略。
 fn requires_delivery_retry(event: &str) -> bool {
     matches!(
         event,
@@ -1042,6 +1046,8 @@ pub fn migrate_legacy_profile(profile: &mut AiProfile) {
         .collect();
 }
 
+/// 为旧版（v1）细粒度行为找到对应的新版展示行为迁移来源，按优先级取第一个
+/// 已配置的旧行为内容；找不到则该展示行为迁移后为空，需要用户重新配置。
 fn find_migration_source(hooks: &[HookContent], behavior: HookBehavior) -> Option<&HookContent> {
     let fallbacks: &[HookBehavior] = match behavior {
         HookBehavior::Idle => &[
@@ -1178,8 +1184,8 @@ mod tests {
         HookBehavior, HookConfigPreview, HookContent, HookRunnerPaths, LEGACY_MANAGED_HOOK_PREFIX,
         MANAGED_HOOK_PREFIX, MonitorSettings, command_has_marker, decoded_hook_command,
         generate_hook_config, generate_hook_runner_scripts, inspect_local_hook_config,
-        managed_hook_marker, manual_device, merge_hook_config, migrate_legacy_profile,
-        normalize_base_url, validate_profile, validate_settings,
+        managed_hook_marker, merge_hook_config, migrate_legacy_profile, normalize_base_url,
+        validate_profile, validate_settings,
     };
 
     fn profile(tool: AiTool) -> AiProfile {
@@ -1242,21 +1248,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn manual_device_trims_fields_and_does_not_require_reachability() {
-        let device = manual_device("  Office Monitor  ", " http://192.168.50.20:8080/ ").unwrap();
-
-        assert_eq!(device.name, "Office Monitor");
-        assert_eq!(device.base_url, "http://192.168.50.20:8080");
-        assert_eq!(device.id, "manual:http://192.168.50.20:8080");
-        assert_eq!(device.discovery_source, DiscoverySource::ManualAddress);
-    }
-
-    #[test]
-    fn manual_device_requires_a_name() {
-        assert!(manual_device(" ", DEFAULT_BASE_URL).is_err());
     }
 
     #[test]

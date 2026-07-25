@@ -14,11 +14,8 @@ export interface DiscoveredMonitorDevice {
   apiVersion: string;
   baseUrl: string;
   path: string;
-  discoverySource:
-    | "mdns"
-    | "udpBroadcast"
-    | "savedAddress"
-    | "manualAddress";
+  /** 设备是如何被找到的：mDNS 优先，失败回退 UDP 广播，再回退已保存地址。 */
+  discoverySource: "mdns" | "udpBroadcast" | "savedAddress";
 }
 
 export interface ConnectionStatus {
@@ -45,6 +42,7 @@ export interface HookContent {
 
 export interface AiProfile {
   tool: AiTool;
+  /** 在展示屏上的显示位置，取值范围 1-25。 */
   slot: number;
   hooks: HookContent[];
 }
@@ -58,7 +56,9 @@ export interface HookConfigWriteResult {
   profile: AiProfile;
   filename: string;
   configChanged: boolean;
+  /** 仅 Codex 且配置发生变化时为真：Codex 不会热加载 hooks.json，需提示用户手动确认。 */
   requiresReview: boolean;
+  /** 仅 Codex 且配置发生变化时为真：需提示用户重启 Codex 才能生效。 */
   restartRequired: boolean;
 }
 
@@ -67,8 +67,10 @@ export interface LocalHookConfig {
   filename: string;
   exists: boolean;
   valid: boolean;
+  /** 现有配置里的托管条目是否已指向当前版本的 runner 脚本路径（无需迁移）。 */
   stableRunner: boolean;
   error: string;
+  /** 现有配置中由本工具托管写入的事件名列表。 */
   managedTargets: string[];
   content: string;
 }
@@ -96,18 +98,6 @@ export function saveMonitorSettings(
 
 export function discoverMonitorDevices(): Promise<DiscoveredMonitorDevice[]> {
   return invokeCommand<DiscoveredMonitorDevice[]>("discover_monitor_devices");
-}
-
-export function saveManualMonitorSettings(
-  name: string,
-  baseUrl: string,
-  username: string,
-): Promise<MonitorSettings> {
-  return invokeCommand<MonitorSettings>("save_manual_monitor_settings", {
-    name,
-    baseUrl,
-    username,
-  });
 }
 
 export function checkMonitorConnection(

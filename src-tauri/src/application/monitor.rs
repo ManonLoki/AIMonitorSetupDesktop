@@ -18,7 +18,7 @@ use crate::domain::monitor::{
     AiProfile, AiTool, DiscoveredMonitorDevice, DiscoverySource, HookConfigDirectories,
     HookConfigLocation, HookConfigPreview, HookConfigWriteResult, HookRunnerPaths, LocalHookConfig,
     MonitorSettings, SavedMonitorData, encode_base64, generate_hook_config,
-    generate_hook_runner_scripts, hook_config_filename, inspect_local_hook_config, manual_device,
+    generate_hook_runner_scripts, hook_config_filename, inspect_local_hook_config,
     merge_hook_config, migrate_legacy_profile, normalize_base_url, validate_profile,
     validate_settings,
 };
@@ -53,6 +53,8 @@ fn detected_config_directory(variable: &str, fallback: &Path) -> String {
         .into_owned()
 }
 
+/// 一次发现命中的设备，可能同时拥有多个候选地址（IPv4/IPv6、多网卡）；
+/// 连接测试按 `candidate_url_priority` 排序后依次尝试，取第一个可达的。
 #[derive(Clone, Debug)]
 pub(crate) struct DiscoveryCandidate {
     device: DiscoveredMonitorDevice,
@@ -86,6 +88,8 @@ fn discovery_base_url(address: &ScopedIp, port: u16) -> Option<String> {
     }
 }
 
+/// IPv4 地址优先于 IPv6（`http://[` 形式，第 8 个字符是 `[`）：IPv6
+/// 链路本地地址更容易受网卡切换、作用域 ID 失效等问题影响，连接稳定性更低。
 fn candidate_url_priority(base_url: &str) -> u8 {
     u8::from(base_url.as_bytes().get(7) == Some(&b'['))
 }
@@ -382,6 +386,8 @@ impl MonitorService {
         Ok(settings)
     }
 
+    /// 设备发现的主入口：优先使用 mDNS（更快、支持局域网内跨网段发现），
+    /// 找不到结果或出错时回退到向每张网卡发送 UDP 广播。两者都失败才报错。
     pub(crate) fn discover_device_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
         match Self::discover_mdns_candidates() {
             Ok(candidates) if !candidates.is_empty() => Ok(candidates),
@@ -475,6 +481,10 @@ impl MonitorService {
         Ok(candidates)
     }
 
+    /// 对发现候选逐一做可达性探测，选出每个候选可用的地址；如果候选本身
+    /// 探测失败，但恰好是当前已保存设备且保存地址可达，则回退使用保存地址。
+    /// 若已保存设备完全不在候选列表中但仍可达，额外补一条"当前保存设备"记录，
+    /// 避免用户当前使用的设备因为不在本轮发现结果里而从列表消失。
     pub(crate) async fn finish_device_discovery(
         &self,
         candidates: Vec<DiscoveryCandidate>,
@@ -509,16 +519,6 @@ impl MonitorService {
 
         devices.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(devices)
-    }
-
-    pub fn save_manual_settings(
-        &self,
-        name: &str,
-        base_url: &str,
-        username: &str,
-    ) -> Result<MonitorSettings, String> {
-        let device = manual_device(name, base_url)?;
-        self.save_settings(&device, username)
     }
 
     pub async fn check_connection(
