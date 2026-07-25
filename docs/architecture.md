@@ -102,3 +102,48 @@ Rust DTO 使用 `serde` 的 `camelCase` 输出以匹配 TypeScript。Command
 - 消费方：`src/shared/ui/AppShellLayout.tsx`（在应用外壳中展示设备状态）
 
 后续功能应复制这条边界，而不是把实现集中到单个 React 组件。
+
+## Hook 中继与状态归属
+
+AI 工具的 Hooks 不再直接访问监控屏。桌面端是状态计算与转发的唯一事实来源：
+
+```text
+Codex / Claude Code / Cursor Hook
+  ↓ POST 127.0.0.1:10240/api/hooks/{tool}，请求体仅含 type
+Rust 本机 Hook listener
+  ↓ 根据 tool + Hook type 计算 Idle / Running / Asking / Error
+Rust 中读取共享用户名，并按 AI 工具遍历已配置设备的 Profile、路由和显示位置
+  ↓ 对每台已配置设备 POST / DELETE /api/slots/{slot}
+AIMonitor APK（单台失败不终止后续设备）
+```
+
+- listener 只绑定环回地址，不向局域网暴露 Hook 接口。
+- Hooks 配置直接请求固定的本机地址，不生成 `.sh` 或 `.ps1` runner，也不保存
+  监控屏 IP、用户名、图片或状态规则。
+- 所有新托管 Hook 命令统一携带大小写固定的 `AIMonitor` 前缀（完整标识如
+  `AIMonitor|tool=codex`）。合并、覆盖和后续删除只按该前缀识别。
+- 初始化时由独立后台线程尽力删除 v1/v2/v3 旧标识条目和遗留 runner 文件。
+  清理失败不阻止应用启动，也不会把旧条目升级为新条目；新规则只在用户写入
+  对应工具的 Hooks 配置时生成。非 AIMonitor Hook 始终保留。
+- Profile 按“设备 ID + AI 工具”隔离保存显示位置及四种显示状态，不保存
+  设备名称或地址。设备名称和地址作为独立设备路由保存在桌面端；显示用户名是
+  所有设备共享的全局设置。左下角当前设备只决定 AI 管理页正在编辑哪台设备。
+  中继收到 Hook 后按 AI 工具遍历所有已保存设备路由及对应 Profile，逐台转发；
+  单台失败不阻止后续设备。未配置的新设备从空 Profile 开始，不继承或转移上
+  一台设备的配置。Hooks JSON 仍只连接固定本机中继，因此切换设备时无需重写。
+- AI 管理页只保存 Profile。“工作台”只展示 Hook listener、队列及逐设备转发
+  结果。设置页只管理共享用户名、开机自启、各 AI 工具配置目录和 Hooks 写入；
+  写入时 Rust 读取当前编辑设备对应的已保存 Profile，只生成固定本机中继规则。
+  配置目录仍由 Rust 校验并持久化。
+- listener 与转发 worker 通过内存队列解耦，按接收顺序处理。网络失败最多
+  自动重试三次；终态到达后的两秒内会抑制迟到的完成类事件，避免
+  `Stop → SubagentStop` 把屏幕错误地从空闲切回运行中。
+- Rust 在启动后立即执行一次在线设备发现，之后每五分钟刷新在线设备快照。
+  Hook 转发遍历已配置路由前，先按快照把在线设备排到前面，并优先使用发现
+  得到的最新地址；快照发生变化时通过 Tauri event 更新前端的 TanStack Query
+  设备缓存。前端“重新扫描”仍调用原有 command，不依赖定时器。
+- 开机自启由 Rust application 层通过 Tauri autostart 插件管理；自启参数
+  `--silent` 只控制窗口可见性，不改变 Hook listener 和转发服务的启动。
+- 桌面生命周期由 Rust 管理：Windows/macOS 使用系统托盘，关闭主窗口只隐藏
+  应用；托盘负责显示/隐藏窗口、开机自启勾选和真正退出。macOS 使用
+  `Accessory` activation policy 隐藏 Dock 图标。

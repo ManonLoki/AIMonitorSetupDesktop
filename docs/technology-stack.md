@@ -35,6 +35,19 @@
 | 网卡与广播地址 | if-addrs | 0.15.0 | 仅由 Rust application 层枚举可用 IPv4 网卡并发送 UDP 定向广播 |
 | JSON 持久化 | serde_json | 1.0.151 | 保存设备设置与 AI 实例配置 |
 | 原生目录选择 | tauri-plugin-dialog | 2.7.2 | 为前端提供系统目录选择器 |
+| 开机自启 | tauri-plugin-autostart | 2.5.1 | 由 Rust 管理桌面端自启，自启参数固定为 `--silent` |
+| 单实例 | tauri-plugin-single-instance | 2.4.3 | 静默运行时再次打开应用，唤起已有主窗口 |
+| 系统托盘 | Tauri `tray-icon` feature | 2.11.5 | Windows/macOS 托盘菜单、窗口显隐与退出 |
+
+Cargo 二进制目标名固定为 `AIMonitor`，与 Tauri 的 `productName` 和
+`mainBinaryName` 保持一致。这样开发构建与正式 `.app` 注册开机自启时，
+macOS 都显示 `AIMonitor`，不会退回 Cargo 包名 `ai-monitor-setup`。
+
+本机 Hook 接口使用 Rust 标准库 `TcpListener`，仅绑定
+`127.0.0.1:10240`，协议面只覆盖短连接 POST JSON，不引入通用 Web
+框架或额外 runner 脚本。APK 转发继续使用 `reqwest`；为后台 listener
+增加 `blocking` feature，使其可以在独立顺序 worker 中转发、重试并避免
+占用 Tauri UI 线程。
 
 ## 为什么不使用 Axios
 

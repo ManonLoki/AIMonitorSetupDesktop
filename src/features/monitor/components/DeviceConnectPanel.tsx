@@ -8,7 +8,6 @@ import {
   Skeleton,
   Stack,
   Text,
-  TextInput,
 } from "@mantine/core";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -37,14 +36,6 @@ export function DeviceConnectPanel() {
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(
     null,
   );
-  const [username, setUsername] = useState("");
-  const [saveAttempted, setSaveAttempted] = useState(false);
-
-  useEffect(() => {
-    if (settings.data) {
-      setUsername((current) => current || settings.data.username);
-    }
-  }, [settings.data]);
 
   useEffect(() => {
     if (selectedDeviceId || !devices.data?.length) return;
@@ -91,23 +82,6 @@ export function DeviceConnectPanel() {
 
   return (
     <Stack gap="lg">
-      <TextInput
-        label="显示用户名"
-        placeholder="输入设备上显示的名称"
-        value={username}
-        onChange={(event) => {
-          connect.reset();
-          setUsername(event.currentTarget.value);
-        }}
-        error={
-          saveAttempted && !username.trim()
-            ? "连接设备前请输入显示用户名"
-            : undefined
-        }
-        required
-        size="md"
-      />
-
       {settings.isPending || devices.isPending ? (
         <Skeleton height={72} radius="md" />
       ) : (
@@ -213,10 +187,7 @@ export function DeviceConnectPanel() {
         </Button>
         <Button
           onClick={() => {
-            setSaveAttempted(true);
-            if (selectedDevice && username.trim()) {
-              connect.mutate({ device: selectedDevice, username });
-            }
+            if (selectedDevice) connect.mutate(selectedDevice);
           }}
           loading={connect.isPending}
           leftSection={<LineIcon name="check" size={17} />}

@@ -1,14 +1,13 @@
 import { queryOptions } from "@tanstack/react-query";
 import {
   getMonitorSettings,
+  getRuntimeOverview,
   discoverMonitorDevices,
   listAiProfiles,
   listHookConfigLocations,
   listLocalHookConfigs,
   listRemoteImages,
-  previewHookConfig,
 } from "../api/monitor";
-import type { AiProfile } from "../api/monitor";
 
 export const monitorKeys = {
   all: ["monitor"] as const,
@@ -20,9 +19,7 @@ export const monitorKeys = {
     [...monitorKeys.all, "hook-config-locations"] as const,
   localHookConfigs: () =>
     [...monitorKeys.all, "local-hook-configs"] as const,
-  hookPreviews: () => [...monitorKeys.all, "hook-preview"] as const,
-  hookPreview: (profile: AiProfile) =>
-    [...monitorKeys.hookPreviews(), profile] as const,
+  runtime: () => [...monitorKeys.all, "runtime"] as const,
 };
 
 export const monitorSettingsQuery = queryOptions({
@@ -58,10 +55,8 @@ export const localHookConfigsQuery = queryOptions({
   queryFn: listLocalHookConfigs,
 });
 
-export function hookPreviewQuery(profile: AiProfile) {
-  return queryOptions({
-    queryKey: monitorKeys.hookPreview(profile),
-    queryFn: () => previewHookConfig(profile),
-    staleTime: Number.POSITIVE_INFINITY,
-  });
-}
+export const runtimeOverviewQuery = queryOptions({
+  queryKey: monitorKeys.runtime(),
+  queryFn: getRuntimeOverview,
+  refetchInterval: 3_000,
+});

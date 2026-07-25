@@ -1,42 +1,33 @@
 import {
-  Accordion,
   Alert,
   Badge,
   Button,
   Card,
-  Code,
   Group,
   Loader,
-  ScrollArea,
   SimpleGrid,
   Stack,
   Tabs,
   Text,
-  TextInput,
   Textarea,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   AiProfile,
   AiTool,
   HookBehavior,
-  HookConfigLocation,
 } from "../api/monitor";
-import {
-  chooseHookConfigDirectory,
-  saveHookConfigDirectory,
-  writeAiProfile,
-} from "../api/monitor";
+import { saveAiProfile } from "../api/monitor";
 import {
   aiProfilesQuery,
-  hookPreviewQuery,
-  hookConfigLocationsQuery,
-  localHookConfigsQuery,
+  monitorDevicesQuery,
   monitorKeys,
+  monitorSettingsQuery,
   remoteImagesQuery,
 } from "../queries/monitor";
 import { LineIcon } from "../../../shared/ui/LineIcon";
+import { DeviceConnectPanel } from "../components/DeviceConnectPanel";
 import { ImagePicker } from "../components/ImagePicker";
 import { SlotPicker } from "../components/SlotPicker";
 
@@ -51,30 +42,15 @@ const behaviors: Array<{
   label: string;
   color: string;
 }> = [
-  {
-    value: "idle",
-    label: "空闲",
-    color: "gray",
-  },
-  {
-    value: "running",
-    label: "运行中",
-    color: "violet",
-  },
-  {
-    value: "asking",
-    label: "询问",
-    color: "yellow",
-  },
-  {
-    value: "error",
-    label: "异常",
-    color: "red",
-  },
+  { value: "idle", label: "空闲", color: "gray" },
+  { value: "running", label: "运行中", color: "violet" },
+  { value: "asking", label: "询问", color: "yellow" },
+  { value: "error", label: "异常", color: "red" },
 ];
 
 function emptyProfile(tool: AiTool): AiProfile {
   return {
+    deviceId: "",
     tool,
     slot: 1,
     hooks: behaviors.map(({ value }) => ({
@@ -93,145 +69,97 @@ function initialDrafts(): Record<AiTool, AiProfile> {
   };
 }
 
-function initialDirectoryDrafts(): Record<AiTool, string> {
-  return {
-    codex: "",
-    claudeCode: "",
-    cursor: "",
-  };
-}
-
 export function AiManagementPage() {
   const queryClient = useQueryClient();
   const profiles = useQuery(aiProfilesQuery);
-  const images = useQuery(remoteImagesQuery);
-  const localConfigs = useQuery(localHookConfigsQuery);
-  const hookConfigLocations = useQuery(hookConfigLocationsQuery);
-  const initialized = useRef(false);
-  const locationsInitialized = useRef(false);
+  const devices = useQuery(monitorDevicesQuery);
+  const monitorSettings = useQuery(monitorSettingsQuery);
+  const connectedDevice = devices.data?.find(
+    (device) => device.id === monitorSettings.data?.deviceId,
+  );
+  const hasConnectedDevice = Boolean(connectedDevice);
+  const images = useQuery({
+    ...remoteImagesQuery,
+    enabled: hasConnectedDevice,
+  });
   const [activeTool, setActiveTool] = useState<AiTool>("codex");
   const [drafts, setDrafts] =
     useState<Record<AiTool, AiProfile>>(initialDrafts);
-  const [directoryDrafts, setDirectoryDrafts] = useState<
-    Record<AiTool, string>
-  >(initialDirectoryDrafts);
-  const [selectingDirectory, setSelectingDirectory] =
-    useState<AiTool | null>(null);
-  const [directoryPickerError, setDirectoryPickerError] = useState<
-    string | null
-  >(null);
   const draft = drafts[activeTool];
   const isComplete =
     draft.hooks.length === behaviors.length &&
     draft.hooks.every((hook) => hook.image.length > 0);
-  const preview = useQuery({
-    ...hookPreviewQuery(draft),
-    enabled: isComplete,
-  });
 
   useEffect(() => {
-    if (!profiles.data || initialized.current) return;
-    setDrafts((current) => {
-      const next = { ...current };
+    if (!profiles.data) return;
+    setDrafts(() => {
+      const next = initialDrafts();
       for (const profile of profiles.data) next[profile.tool] = profile;
       return next;
     });
-    initialized.current = true;
   }, [profiles.data]);
 
-  useEffect(() => {
-    if (!hookConfigLocations.data || locationsInitialized.current) return;
-    setDirectoryDrafts((current) => {
-      const next = { ...current };
-      for (const location of hookConfigLocations.data) {
-        next[location.tool] = location.directory;
-      }
-      return next;
-    });
-    locationsInitialized.current = true;
-  }, [hookConfigLocations.data]);
-
-  const saveDirectory = useMutation({
-    mutationFn: ({
-      tool,
-      directory,
-    }: {
-      tool: AiTool;
-      directory: string;
-    }) => saveHookConfigDirectory(tool, directory),
-    onSuccess: (savedLocation) => {
-      queryClient.setQueryData<HookConfigLocation[]>(
-        monitorKeys.hookConfigLocations(),
-        (current = []) => [
-          ...current.filter(
-            (location) => location.tool !== savedLocation.tool,
-          ),
-          savedLocation,
-        ],
-      );
-      setDirectoryDrafts((current) => ({
-        ...current,
-        [savedLocation.tool]: savedLocation.directory,
-      }));
-      write.reset();
-      void queryClient.invalidateQueries({
-        queryKey: monitorKeys.localHookConfigs(),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: monitorKeys.hookPreviews(),
-      });
-    },
-  });
-
-  const write = useMutation({
-    mutationFn: writeAiProfile,
-    onSuccess: ({ profile: writtenProfile }) => {
+  const save = useMutation({
+    mutationFn: saveAiProfile,
+    onSuccess: (savedProfile) => {
       queryClient.setQueryData<AiProfile[]>(
         monitorKeys.profiles(),
         (current = []) => [
           ...current.filter(
-            (profile) => profile.tool !== writtenProfile.tool,
+            (profile) => profile.tool !== savedProfile.tool,
           ),
-          writtenProfile,
+          savedProfile,
         ],
       );
-      void queryClient.invalidateQueries({
-        queryKey: monitorKeys.localHookConfigs(),
-      });
     },
   });
 
   const updateDraft = (next: AiProfile) => {
-    write.reset();
+    save.reset();
     setDrafts((current) => ({ ...current, [activeTool]: next }));
   };
 
-  const written =
-    write.isSuccess && write.data.profile.tool === activeTool;
+  const saved = save.isSuccess && save.data.tool === activeTool;
   const error =
     profiles.error ??
+    devices.error ??
+    monitorSettings.error ??
     images.error ??
-    hookConfigLocations.error ??
-    localConfigs.error ??
-    saveDirectory.error ??
-    write.error ??
-    preview.error;
+    save.error;
   const availableImages = images.data ?? [];
+
+  if (devices.isPending || monitorSettings.isPending) {
+    return (
+      <Stack align="center" py="xl">
+        <Loader size="sm" />
+        <Text size="sm" c="dimmed">
+          正在发现 AIMonitor 设备…
+        </Text>
+      </Stack>
+    );
+  }
+
+  if (!connectedDevice) {
+    return (
+      <Stack gap="lg" maw={860}>
+        <Alert color="blue" title="先连接一台设备">
+          首次使用需要先选择一台设备。显示用户名可在“设置”中统一配置，每台
+          设备分别保存自己的 AI 展示配置。
+        </Alert>
+        <DeviceConnectPanel />
+      </Stack>
+    );
+  }
 
   return (
     <Stack gap="lg">
       {error && <Alert color="red">{error.message}</Alert>}
-      {directoryPickerError && (
-        <Alert color="red">{directoryPickerError}</Alert>
-      )}
 
       <Tabs
         value={activeTool}
         onChange={(value) => {
           if (!value) return;
-          write.reset();
-          saveDirectory.reset();
-          setDirectoryPickerError(null);
+          save.reset();
           setActiveTool(value as AiTool);
         }}
         className="ai-tool-tabs"
@@ -244,381 +172,127 @@ export function AiManagementPage() {
           ))}
         </Tabs.List>
 
-        {tools.map((tool) => {
-          const location = hookConfigLocations.data?.find(
-            (item) => item.tool === tool.value,
-          );
-          const directoryDraft = directoryDrafts[tool.value];
-          const pathDirty =
-            Boolean(location) &&
-            directoryDraft.trim() !== location?.directory;
-
-          return (
+        {tools.map((tool) => (
           <Tabs.Panel key={tool.value} value={tool.value} pt="lg">
-            <Stack gap="lg">
-              <Stack gap="md">
-                <Group align="center">
-                  <Text fw={650} miw={72}>
-                    配置目录
-                  </Text>
-                  <TextInput
-                    aria-label="配置目录"
-                    placeholder="选择或输入绝对目录"
-                    value={directoryDraft}
-                    disabled={hookConfigLocations.isPending}
-                    onChange={(event) => {
-                      saveDirectory.reset();
-                      setDirectoryPickerError(null);
-                      setDirectoryDrafts((current) => ({
-                        ...current,
-                        [tool.value]: event.currentTarget.value,
-                      }));
-                    }}
-                    style={{ flex: "1 1 320px" }}
-                  />
-                </Group>
+            <Card withBorder className="surface-card" p="lg">
+              <Stack gap="lg">
+                <SlotPicker
+                  value={draft.slot}
+                  onChange={(slot) => updateDraft({ ...draft, slot })}
+                />
 
-                {pathDirty && (
+                <div>
+                  <Text fw={650}>行为展示</Text>
+                  <Text size="sm" c="dimmed" mt={3}>
+                    为每种行为选择图片；显示内容可按需填写。
+                  </Text>
+                </div>
+
+                {!images.isPending && availableImages.length === 0 && (
                   <Alert color="yellow" variant="light">
-                    路径尚未保存。保存后，预览、状态检查和写入都会切换到新目录；旧文件不会被移动或删除。
+                    暂无可选图片，请先到“图片管理”上传至少一张图片。
                   </Alert>
                 )}
 
-                <Group justify="space-between">
+                <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
+                  {behaviors.map((behavior) => {
+                    const hook = draft.hooks.find(
+                      (item) => item.behavior === behavior.value,
+                    ) ?? {
+                      behavior: behavior.value,
+                      content: "",
+                      image: "",
+                    };
+                    return (
+                      <Card
+                        key={behavior.value}
+                        withBorder
+                        className="behavior-card"
+                        p="md"
+                      >
+                        <Stack gap="md">
+                          <Badge
+                            color={behavior.color}
+                            variant="light"
+                            w="fit-content"
+                          >
+                            {behavior.label}
+                          </Badge>
+
+                          <ImagePicker
+                            images={availableImages}
+                            value={hook.image}
+                            disabled={images.isPending}
+                            onChange={(value) =>
+                              updateDraft({
+                                ...draft,
+                                hooks: draft.hooks.map((item) =>
+                                  item.behavior === behavior.value
+                                    ? { ...item, image: value }
+                                    : item,
+                                ),
+                              })
+                            }
+                          />
+
+                          <Textarea
+                            label={
+                              <span>
+                                内容{" "}
+                                <Text
+                                  component="span"
+                                  size="xs"
+                                  fw={400}
+                                  c="dimmed"
+                                >
+                                  可选
+                                </Text>
+                              </span>
+                            }
+                            placeholder="输入设备上显示的补充内容"
+                            autosize
+                            minRows={2}
+                            value={hook.content}
+                            onChange={(event) =>
+                              updateDraft({
+                                ...draft,
+                                hooks: draft.hooks.map((item) =>
+                                  item.behavior === behavior.value
+                                    ? {
+                                        ...item,
+                                        content: event.currentTarget.value,
+                                      }
+                                    : item,
+                                ),
+                              })
+                            }
+                          />
+                        </Stack>
+                      </Card>
+                    );
+                  })}
+                </SimpleGrid>
+
+                <Group justify="flex-end">
+                  {saved && (
+                    <Badge variant="light" color="teal">
+                      已保存
+                    </Badge>
+                  )}
                   <Button
-                    variant="subtle"
-                    color="gray"
-                    onClick={() =>
-                      saveDirectory.mutate({
-                        tool: tool.value,
-                        directory: "",
-                      })
-                    }
-                    loading={
-                      saveDirectory.isPending &&
-                      saveDirectory.variables?.tool === tool.value &&
-                      saveDirectory.variables.directory === ""
-                    }
-                    disabled={!location?.isCustom}
+                    leftSection={<LineIcon name="check" size={17} />}
+                    onClick={() => save.mutate(draft)}
+                    loading={save.isPending}
+                    disabled={!isComplete}
                   >
-                    恢复默认
+                    保存展示配置
                   </Button>
-                  <Group>
-                    <Button
-                      variant="default"
-                      leftSection={<LineIcon name="edit" size={17} />}
-                      loading={selectingDirectory === tool.value}
-                      onClick={async () => {
-                        setSelectingDirectory(tool.value);
-                        setDirectoryPickerError(null);
-                        try {
-                          const selected =
-                            await chooseHookConfigDirectory(
-                              directoryDraft || location?.directory || "",
-                            );
-                          if (selected) {
-                            setDirectoryDrafts((current) => ({
-                              ...current,
-                              [tool.value]: selected,
-                            }));
-                          }
-                        } catch (error) {
-                          setDirectoryPickerError(
-                            error instanceof Error
-                              ? error.message
-                              : String(error),
-                          );
-                        } finally {
-                          setSelectingDirectory(null);
-                        }
-                      }}
-                    >
-                      选择目录
-                    </Button>
-                    <Button
-                      onClick={() =>
-                        saveDirectory.mutate({
-                          tool: tool.value,
-                          directory: directoryDraft,
-                        })
-                      }
-                      loading={
-                        saveDirectory.isPending &&
-                        saveDirectory.variables?.tool === tool.value &&
-                        saveDirectory.variables.directory !== ""
-                      }
-                      disabled={!directoryDraft.trim() || !pathDirty}
-                    >
-                      保存路径
-                    </Button>
-                  </Group>
                 </Group>
               </Stack>
-
-              <Card withBorder className="surface-card" p="lg">
-                <Stack gap="lg">
-                  <SlotPicker
-                    value={draft.slot}
-                    onChange={(slot) => updateDraft({ ...draft, slot })}
-                  />
-
-                  <div>
-                    <Text fw={650}>行为展示</Text>
-                    <Text size="sm" c="dimmed" mt={3}>
-                      为每种行为选择图片；显示内容可按需填写。
-                    </Text>
-                  </div>
-
-                  {!images.isPending && availableImages.length === 0 && (
-                    <Alert color="yellow" variant="light">
-                      暂无可选图片，请先到“图片管理”上传至少一张图片。
-                    </Alert>
-                  )}
-
-                  <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
-                    {behaviors.map((behavior) => {
-                      const hook = draft.hooks.find(
-                        (item) => item.behavior === behavior.value,
-                      ) ?? {
-                        behavior: behavior.value,
-                        content: "",
-                        image: "",
-                      };
-                      return (
-                        <Card
-                          key={behavior.value}
-                          withBorder
-                          className="behavior-card"
-                          p="md"
-                        >
-                          <Stack gap="md">
-                            <Badge
-                              color={behavior.color}
-                              variant="light"
-                              w="fit-content"
-                            >
-                              {behavior.label}
-                            </Badge>
-
-                            <ImagePicker
-                              images={availableImages}
-                              value={hook.image}
-                              disabled={images.isPending}
-                              onChange={(value) =>
-                                updateDraft({
-                                  ...draft,
-                                  hooks: draft.hooks.map((item) =>
-                                    item.behavior === behavior.value
-                                      ? { ...item, image: value }
-                                      : item,
-                                  ),
-                                })
-                              }
-                            />
-
-                            <Textarea
-                              label={
-                                <span>
-                                  内容{" "}
-                                  <Text
-                                    component="span"
-                                    size="xs"
-                                    fw={400}
-                                    c="dimmed"
-                                  >
-                                    可选
-                                  </Text>
-                                </span>
-                              }
-                              placeholder="输入设备上显示的补充内容"
-                              autosize
-                              minRows={2}
-                              value={hook.content}
-                              onChange={(event) =>
-                                updateDraft({
-                                  ...draft,
-                                  hooks: draft.hooks.map((item) =>
-                                    item.behavior === behavior.value
-                                      ? {
-                                          ...item,
-                                          content: event.currentTarget.value,
-                                        }
-                                      : item,
-                                  ),
-                                })
-                              }
-                            />
-                          </Stack>
-                        </Card>
-                      );
-                    })}
-                  </SimpleGrid>
-
-                  <Group justify="flex-end">
-                    {written && (
-                      <Badge variant="light" color="teal">
-                        {write.data.requiresReview
-                          ? "已写入，待 Codex 确认"
-                          : "已写入"}
-                      </Badge>
-                    )}
-                    <Button
-                      leftSection={<LineIcon name="check" size={17} />}
-                      onClick={() => write.mutate(draft)}
-                      loading={write.isPending}
-                      disabled={!isComplete || pathDirty}
-                    >
-                      写入 Hooks 配置
-                    </Button>
-                  </Group>
-
-                  {written && activeTool === "codex" && (
-                    <Alert
-                      color={write.data.requiresReview ? "yellow" : "blue"}
-                      title={
-                        write.data.requiresReview
-                          ? "还需要在 Codex 中信任配置"
-                          : "Codex 配置没有变化"
-                      }
-                    >
-                      {write.data.requiresReview
-                        ? `配置已写入 ${write.data.filename}。请在 Codex CLI 中运行 /hooks，审核并信任包含 aimonitor-managed-hook 的新增规则，然后重启 Codex App 或创建新任务。此后修改展示配置不需要再次信任。`
-                        : "如状态仍未生效，请在 Codex CLI 中运行 /hooks 确认规则已受信任，然后在 Codex App 中创建新任务。"}
-                    </Alert>
-                  )}
-                </Stack>
-              </Card>
-
-              <Card withBorder className="surface-card" padding={0}>
-                <Group justify="space-between" p="md">
-                  <div>
-                    <Text fw={650}>合并后将写入的 Hooks 配置</Text>
-                    <Text size="xs" c="dimmed" mt={2}>
-                      其他 APP 的配置会保持不变；旧版 AIMonitor
-                      目标会清理并迁移为固定 Runner。后续修改设备、图片或文案
-                      不会再次改变 Hook 信任哈希
-                    </Text>
-                  </div>
-                  {preview.data && (
-                    <Code>{preview.data.filename}</Code>
-                  )}
-                </Group>
-                <div className="hook-preview">
-                  {!isComplete ? (
-                    <Text c="dimmed" size="sm">
-                      为四种行为选择图片后显示预览
-                    </Text>
-                  ) : preview.isPending ? (
-                    <Loader size="sm" />
-                  ) : preview.data ? (
-                    <ScrollArea type="auto">
-                      <pre>{preview.data.content}</pre>
-                    </ScrollArea>
-                  ) : null}
-                </div>
-              </Card>
-            </Stack>
+            </Card>
           </Tabs.Panel>
-          );
-        })}
+        ))}
       </Tabs>
-
-      <Card withBorder className="surface-card" p="lg">
-        <Stack gap="md">
-          <div>
-            <Text fw={650}>本机历史配置</Text>
-            <Text size="sm" c="dimmed" mt={3}>
-              查看本机三个 AI 工具的实际配置文件，以及 AIMonitor
-              曾写入的目标设备地址。
-            </Text>
-          </div>
-
-          {localConfigs.isPending ? (
-            <Loader size="sm" />
-          ) : (
-            <Accordion multiple variant="separated">
-              {localConfigs.data?.map((config) => {
-                const toolLabel =
-                  tools.find((tool) => tool.value === config.tool)?.label ??
-                  config.tool;
-                return (
-                  <Accordion.Item key={config.tool} value={config.tool}>
-                    <Accordion.Control>
-                      <Group justify="space-between" pr="md">
-                        <div>
-                          <Text fw={600}>{toolLabel}</Text>
-                          <Code>{config.filename}</Code>
-                        </div>
-                        <Group gap="xs">
-                          {!config.exists ? (
-                            <Badge variant="light" color="gray">
-                              尚未创建
-                            </Badge>
-                          ) : config.valid ? (
-                            <Badge variant="light" color="teal">
-                              配置有效
-                            </Badge>
-                          ) : (
-                            <Badge variant="light" color="red">
-                              格式异常
-                            </Badge>
-                          )}
-                          {config.managedTargets.length > 0 && (
-                            <Badge variant="light">
-                              {config.managedTargets.length} 个目标
-                            </Badge>
-                          )}
-                          {config.stableRunner && (
-                            <Badge variant="light" color="blue">
-                              稳定 Runner
-                            </Badge>
-                          )}
-                        </Group>
-                      </Group>
-                    </Accordion.Control>
-                    <Accordion.Panel>
-                      <Stack gap="sm">
-                        {config.error && (
-                          <Alert color="red">{config.error}</Alert>
-                        )}
-                        {config.managedTargets.length > 0 && (
-                          <div>
-                            <Text size="xs" c="dimmed" mb={5}>
-                              AIMonitor 历史目标
-                            </Text>
-                            <Group gap="xs">
-                              {config.managedTargets.map((target) => (
-                                <Code key={target}>{target}</Code>
-                              ))}
-                            </Group>
-                          </div>
-                        )}
-                        {config.stableRunner && (
-                          <Alert color="blue" variant="light">
-                            已使用稳定 Runner。以后修改 AIMonitor
-                            设备、槽位、图片或文案时，不需要重新信任这些 Hooks。
-                          </Alert>
-                        )}
-                        {config.exists ? (
-                          <div className="hook-preview">
-                            <ScrollArea type="auto">
-                              <pre>{config.content}</pre>
-                            </ScrollArea>
-                          </div>
-                        ) : (
-                          <Text size="sm" c="dimmed">
-                            本机还没有这个配置文件。
-                          </Text>
-                        )}
-                      </Stack>
-                    </Accordion.Panel>
-                  </Accordion.Item>
-                );
-              })}
-            </Accordion>
-          )}
-        </Stack>
-      </Card>
     </Stack>
   );
 }

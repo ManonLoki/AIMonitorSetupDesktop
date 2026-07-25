@@ -1,10 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::ErrorKind,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
+    io::{ErrorKind, Read, Write},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
-    sync::RwLock,
+    sync::{Arc, RwLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -13,19 +13,21 @@ use if_addrs::{IfAddr, IfOperStatus};
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent};
 use reqwest::{Client, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 
 use crate::domain::monitor::{
-    AiProfile, AiTool, DiscoveredMonitorDevice, DiscoverySource, HookConfigDirectories,
-    HookConfigLocation, HookConfigPreview, HookConfigWriteResult, HookRunnerPaths, LocalHookConfig,
-    MonitorSettings, SavedMonitorData, encode_base64, generate_hook_config,
-    generate_hook_runner_scripts, hook_config_filename, inspect_local_hook_config,
-    merge_hook_config, migrate_legacy_profile, normalize_base_url, validate_profile,
-    validate_settings,
+    AiProfile, AiTool, DEFAULT_HOOK_RELAY_PORT, DiscoveredMonitorDevice, DiscoverySource,
+    HookBehavior, HookConfigDirectories, HookConfigLocation, HookConfigWriteResult, HookTransition,
+    LocalHookConfig, MonitorDeviceRoute, MonitorSettings, SavedMonitorData, ai_tool_name,
+    cleanup_legacy_hook_config, encode_base64, generate_hook_config, hook_config_filename,
+    hook_transition, inspect_local_hook_config, is_authoritative_terminal_event,
+    is_late_completion_event, merge_hook_config, migrate_legacy_profile, normalize_base_url,
+    validate_device_route, validate_profile, validate_username,
 };
 
 const STORE_FILENAME: &str = "monitor-data.json";
-const POSIX_RUNNER_FILENAME: &str = "aimonitor-hook.sh";
-const WINDOWS_RUNNER_FILENAME: &str = "aimonitor-hook.ps1";
+const LEGACY_POSIX_RUNNER_FILENAME: &str = "aimonitor-hook.sh";
+const LEGACY_WINDOWS_RUNNER_FILENAME: &str = "aimonitor-hook.ps1";
 const AIMONITOR_SERVICE_TYPE: &str = "_aimonitor._tcp.local.";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(4);
 const DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
@@ -35,6 +37,14 @@ const UDP_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1_200);
 const UDP_RESPONSE_MAX_BYTES: usize = 1_024;
 const DEFAULT_DEVICE_API_PATH: &str = "/api/device";
 const MAX_REMOTE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+pub const HOOK_LISTENER_PORT: u16 = DEFAULT_HOOK_RELAY_PORT;
+const HOOK_BIND_ADDRESS: &str = "127.0.0.1";
+const MAX_HOOK_REQUEST_BYTES: usize = 8 * 1024;
+const MAX_HOOK_BODY_BYTES: usize = 2 * 1024;
+const TERMINAL_STATE_GUARD: Duration = Duration::from_secs(2);
+const FORWARD_ATTEMPTS: u8 = 3;
+const BACKGROUND_DISCOVERY_INTERVAL: Duration = Duration::from_mins(5);
+pub const MONITOR_DEVICES_CHANGED_EVENT: &str = "monitor-devices-changed";
 
 fn detect_hook_config_directories(config_home: &Path) -> HookConfigDirectories {
     HookConfigDirectories {
@@ -275,12 +285,50 @@ fn merge_udp_candidate(
         .sort_by_key(|url| candidate_url_priority(url));
 }
 
+#[derive(Clone)]
 pub struct MonitorService {
     client: Client,
     data_path: PathBuf,
     default_hook_config_directories: HookConfigDirectories,
-    runner_paths: HookRunnerPaths,
-    data: RwLock<SavedMonitorData>,
+    legacy_runner_paths: [PathBuf; 2],
+    data: Arc<RwLock<SavedMonitorData>>,
+    online_devices: Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
+    relay_status: Arc<RwLock<HookRelayStatus>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookRelayStatus {
+    pub listening: bool,
+    pub bind_address: String,
+    pub port: u16,
+    pub received_count: u64,
+    pub forwarded_count: u64,
+    pub failed_count: u64,
+    pub retried_count: u64,
+    pub suppressed_count: u64,
+    pub pending_count: u64,
+    pub last_tool: Option<AiTool>,
+    pub last_hook_type: String,
+    pub last_behavior: Option<HookBehavior>,
+    pub last_error: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookRequest {
+    #[serde(rename = "type")]
+    hook_type: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SlotUpdateRequest<'a> {
+    username: &'a str,
+    ai_name: &'static str,
+    behavior: HookBehavior,
+    content: &'a str,
+    image: &'a str,
 }
 
 #[derive(Serialize)]
@@ -340,26 +388,192 @@ impl MonitorService {
         } else {
             SavedMonitorData::default()
         };
+        if !data.settings.device_id.trim().is_empty()
+            && !data
+                .devices
+                .iter()
+                .any(|device| device.device_id == data.settings.device_id)
+        {
+            data.devices.push(MonitorDeviceRoute {
+                base_url: data.settings.base_url.clone(),
+                device_id: data.settings.device_id.clone(),
+                device_name: data.settings.device_name.clone(),
+            });
+        }
+        let current_device_id = data.settings.device_id.clone();
         for profile in &mut data.profiles {
             migrate_legacy_profile(profile);
+            if profile.device_id.trim().is_empty() {
+                profile.device_id.clone_from(&current_device_id);
+            }
         }
 
         Ok(Self {
             client: Client::new(),
             data_path,
             default_hook_config_directories: detect_hook_config_directories(config_home),
-            runner_paths: HookRunnerPaths {
-                posix: app_data_dir
-                    .join(POSIX_RUNNER_FILENAME)
-                    .to_string_lossy()
-                    .into_owned(),
-                windows: app_data_dir
-                    .join(WINDOWS_RUNNER_FILENAME)
-                    .to_string_lossy()
-                    .into_owned(),
-            },
-            data: RwLock::new(data),
+            legacy_runner_paths: [
+                app_data_dir.join(LEGACY_POSIX_RUNNER_FILENAME),
+                app_data_dir.join(LEGACY_WINDOWS_RUNNER_FILENAME),
+            ],
+            data: Arc::new(RwLock::new(data)),
+            online_devices: Arc::new(RwLock::new(Vec::new())),
+            relay_status: Arc::new(RwLock::new(HookRelayStatus {
+                bind_address: HOOK_BIND_ADDRESS.to_owned(),
+                port: HOOK_LISTENER_PORT,
+                ..HookRelayStatus::default()
+            })),
         })
+    }
+
+    pub fn start_hook_listener(&self) {
+        let data = Arc::clone(&self.data);
+        let online_devices = Arc::clone(&self.online_devices);
+        let status = Arc::clone(&self.relay_status);
+        thread::spawn(move || {
+            let listener = match TcpListener::bind((HOOK_BIND_ADDRESS, HOOK_LISTENER_PORT)) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    record_relay_failure(&status, format!("Hook 监听端口启动失败：{error}"));
+                    return;
+                }
+            };
+            if let Ok(mut current) = status.write() {
+                current.listening = true;
+                current.last_error.clear();
+            }
+            let client = reqwest::blocking::Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(Duration::from_secs(2))
+                .build();
+            let client = match client {
+                Ok(client) => client,
+                Err(error) => {
+                    record_relay_failure(&status, format!("无法创建转发客户端：{error}"));
+                    return;
+                }
+            };
+            let (sender, receiver) = mpsc::channel::<(AiTool, String)>();
+            let worker_data = Arc::clone(&data);
+            let worker_status = Arc::clone(&status);
+            thread::spawn(move || {
+                let mut terminal_states = HashMap::<AiTool, Instant>::new();
+                while let Ok((tool, hook_type)) = receiver.recv() {
+                    if should_suppress_late_event(&mut terminal_states, tool, &hook_type) {
+                        record_suppressed_hook(&worker_status, tool, &hook_type);
+                        continue;
+                    }
+                    relay_hook(
+                        &client,
+                        &worker_data,
+                        &online_devices,
+                        &worker_status,
+                        tool,
+                        &hook_type,
+                    );
+                }
+            });
+
+            for connection in listener.incoming() {
+                let Ok(mut stream) = connection else {
+                    continue;
+                };
+                match read_hook_request(&mut stream) {
+                    Ok((tool, hook_type)) => {
+                        if let Ok(mut current) = status.write() {
+                            current.pending_count += 1;
+                        }
+                        if sender.send((tool, hook_type)).is_ok() {
+                            write_http_response(&mut stream, 202, "Accepted");
+                        } else {
+                            if let Ok(mut current) = status.write() {
+                                current.pending_count = current.pending_count.saturating_sub(1);
+                            }
+                            write_http_response(&mut stream, 503, "Service Unavailable");
+                            record_relay_failure(&status, "Hook 转发工作线程已停止".to_owned());
+                        }
+                    }
+                    Err(error) => {
+                        write_http_response(&mut stream, 400, "Bad Request");
+                        record_relay_failure(&status, error);
+                    }
+                }
+            }
+            if let Ok(mut current) = status.write() {
+                current.listening = false;
+            }
+        });
+    }
+
+    pub fn hook_relay_status(&self) -> Result<HookRelayStatus, String> {
+        self.relay_status
+            .read()
+            .map(|status| status.clone())
+            .map_err(|_| "Hook 服务状态读取锁已损坏".to_owned())
+    }
+
+    pub fn start_legacy_hook_cleanup(&self) {
+        let Ok(data) = self.data.read() else {
+            return;
+        };
+        let config_paths = AiTool::ALL.map(|tool| (tool, self.hook_config_path(&data, tool)));
+        drop(data);
+        let runner_paths = self.legacy_runner_paths.clone();
+        let data = Arc::clone(&self.data);
+
+        thread::spawn(move || {
+            // Serialize cleanup against Hooks writes so a late cleanup cannot
+            // overwrite a newly written AIMonitor entry.
+            let Ok(_guard) = data.write() else {
+                return;
+            };
+            for (tool, path) in config_paths {
+                let Ok(Some(content)) = read_optional_config(&path) else {
+                    continue;
+                };
+                let Ok(Some(cleaned)) = cleanup_legacy_hook_config(&content, tool) else {
+                    continue;
+                };
+                let _ = write_atomic_file(&path, &cleaned, "旧 Hook 标识清理");
+            }
+            for path in runner_paths {
+                let _ = fs::remove_file(path);
+            }
+        });
+    }
+
+    /// 在独立后台线程中立即发现一次设备，之后每五分钟刷新在线设备快照。
+    /// 只有快照实际变化时才向前端发送事件，避免无意义地重绘设备列表。
+    pub fn start_background_device_discovery(&self, app: AppHandle) {
+        let service = self.clone();
+        thread::spawn(move || {
+            loop {
+                let result = Self::discover_device_candidates().and_then(|candidates| {
+                    tauri::async_runtime::block_on(service.finish_device_discovery(candidates))
+                });
+                if let Ok(devices) = result {
+                    service.publish_online_devices(&app, devices);
+                }
+                thread::sleep(BACKGROUND_DISCOVERY_INTERVAL);
+            }
+        });
+    }
+
+    pub fn publish_online_devices(&self, app: &AppHandle, devices: Vec<DiscoveredMonitorDevice>) {
+        if self.replace_online_devices(&devices) {
+            let _ = app.emit(MONITOR_DEVICES_CHANGED_EVENT, devices);
+        }
+    }
+
+    fn replace_online_devices(&self, devices: &[DiscoveredMonitorDevice]) -> bool {
+        let Ok(mut current) = self.online_devices.write() else {
+            return false;
+        };
+        if current.as_slice() == devices {
+            return false;
+        }
+        *current = devices.to_vec();
+        true
     }
 
     pub fn settings(&self) -> Result<MonitorSettings, String> {
@@ -369,21 +583,45 @@ impl MonitorService {
             .map_err(|_| "配置读取锁已损坏".to_owned())
     }
 
-    pub fn save_settings(
+    pub fn select_device(
         &self,
         device: &DiscoveredMonitorDevice,
-        username: &str,
     ) -> Result<MonitorSettings, String> {
-        let settings = validate_settings(device, username)?;
+        let route = validate_device_route(device)?;
         let mut data = self
             .data
             .write()
             .map_err(|_| "配置写入锁已损坏".to_owned())?;
         let mut next_data = data.clone();
-        next_data.settings = settings.clone();
-        self.persist_with_runners(&next_data)?;
+        next_data.settings.base_url.clone_from(&route.base_url);
+        next_data.settings.device_id.clone_from(&route.device_id);
+        next_data
+            .settings
+            .device_name
+            .clone_from(&route.device_name);
+        next_data
+            .devices
+            .retain(|existing| existing.device_id != route.device_id);
+        next_data.devices.push(route);
+        next_data
+            .devices
+            .sort_by(|left, right| left.device_id.cmp(&right.device_id));
+        self.persist(&next_data)?;
         *data = next_data;
-        Ok(settings)
+        Ok(data.settings.clone())
+    }
+
+    pub fn save_username(&self, username: &str) -> Result<MonitorSettings, String> {
+        let username = validate_username(username)?;
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| "配置写入锁已损坏".to_owned())?;
+        let mut next_data = data.clone();
+        next_data.settings.username = username;
+        self.persist(&next_data)?;
+        *data = next_data;
+        Ok(data.settings.clone())
     }
 
     /// 设备发现的主入口：优先使用 mDNS（更快、支持局域网内跨网段发现），
@@ -499,6 +737,8 @@ impl MonitorService {
             } else if saved_is_reachable && candidate.device.id == settings.device_id {
                 candidate.device.base_url.clone_from(&settings.base_url);
                 candidate.device.discovery_source = DiscoverySource::SavedAddress;
+            } else {
+                continue;
             }
             devices.push(candidate.device);
         }
@@ -691,7 +931,13 @@ impl MonitorService {
     pub fn profiles(&self) -> Result<Vec<AiProfile>, String> {
         self.data
             .read()
-            .map(|data| data.profiles.clone())
+            .map(|data| {
+                data.profiles
+                    .iter()
+                    .filter(|profile| profile.device_id == data.settings.device_id)
+                    .cloned()
+                    .collect()
+            })
             .map_err(|_| "AI 配置读取锁已损坏".to_owned())
     }
 
@@ -736,55 +982,59 @@ impl MonitorService {
         Ok(location)
     }
 
-    pub fn write_profile(&self, profile: AiProfile) -> Result<HookConfigWriteResult, String> {
-        let profile = validate_profile(profile)?;
+    pub fn save_profile(&self, profile: AiProfile) -> Result<AiProfile, String> {
         let mut data = self
             .data
             .write()
             .map_err(|_| "AI 配置写入锁已损坏".to_owned())?;
-        let generated = generate_hook_config(profile.clone(), &self.runner_paths)?;
-        let config_path = self.hook_config_path(&data, profile.tool);
-        let existing = read_optional_config(&config_path)?;
-        let mut merged = merge_hook_config(existing.as_deref(), &generated, profile.tool)?;
-        merged.filename = config_path.to_string_lossy().into_owned();
-        let config_changed = existing.as_deref() != Some(merged.content.as_str());
-
+        if data.settings.device_id.is_empty() {
+            return Err("请先选择 AIMonitor 设备".to_owned());
+        }
+        let mut profile = profile;
+        profile.device_id.clone_from(&data.settings.device_id);
+        let profile = validate_profile(profile)?;
         let mut next_data = data.clone();
-        next_data
-            .profiles
-            .retain(|existing| existing.tool != profile.tool);
+        next_data.profiles.retain(|existing| {
+            existing.device_id != profile.device_id || existing.tool != profile.tool
+        });
         next_data.profiles.push(profile.clone());
-        next_data.profiles.sort_by_key(|item| item.slot);
-
-        self.persist_profile_transaction(
-            &next_data,
-            &config_path,
-            existing.as_deref(),
-            config_changed.then_some(merged.content.as_str()),
-        )?;
+        next_data.profiles.sort_by(|left, right| {
+            left.device_id
+                .cmp(&right.device_id)
+                .then(left.slot.cmp(&right.slot))
+        });
+        self.persist(&next_data)?;
         *data = next_data;
-
-        Ok(HookConfigWriteResult {
-            requires_review: profile.tool == AiTool::Codex && config_changed,
-            restart_required: profile.tool == AiTool::Codex && config_changed,
-            profile,
-            filename: merged.filename,
-            config_changed,
-        })
+        Ok(profile)
     }
 
-    pub fn hook_config_preview(&self, profile: AiProfile) -> Result<HookConfigPreview, String> {
-        let tool = profile.tool;
-        let generated = generate_hook_config(profile, &self.runner_paths)?;
+    pub fn write_hook_config(&self, tool: AiTool) -> Result<HookConfigWriteResult, String> {
         let data = self
             .data
             .read()
-            .map_err(|_| "Hooks 路径读取锁已损坏".to_owned())?;
+            .map_err(|_| "Hooks 配置读取锁已损坏".to_owned())?;
+        let profile = data
+            .profiles
+            .iter()
+            .find(|profile| profile.device_id == data.settings.device_id && profile.tool == tool)
+            .cloned()
+            .ok_or_else(|| "请先在 AI 管理中保存该工具的展示配置".to_owned())?;
+        let generated = generate_hook_config(profile)?;
         let config_path = self.hook_config_path(&data, tool);
         let existing = read_optional_config(&config_path)?;
         let mut merged = merge_hook_config(existing.as_deref(), &generated, tool)?;
         merged.filename = config_path.to_string_lossy().into_owned();
-        Ok(merged)
+        let config_changed = existing.as_deref() != Some(merged.content.as_str());
+        if config_changed {
+            write_config(&config_path, &merged.content)?;
+        }
+        Ok(HookConfigWriteResult {
+            requires_review: tool == AiTool::Codex && config_changed,
+            restart_required: tool == AiTool::Codex && config_changed,
+            tool,
+            filename: merged.filename,
+            config_changed,
+        })
     }
 
     pub fn local_hook_configs(&self) -> Result<Vec<LocalHookConfig>, String> {
@@ -831,60 +1081,348 @@ impl MonitorService {
             .map_err(|error| format!("无法序列化配置：{error}"))?;
         write_atomic_file(&self.data_path, &serialized, "应用配置")
     }
+}
 
-    fn persist_with_runners(&self, data: &SavedMonitorData) -> Result<(), String> {
-        let scripts = generate_hook_runner_scripts(&data.settings, &data.profiles)?;
-        let posix_path = Path::new(&self.runner_paths.posix);
-        let windows_path = Path::new(&self.runner_paths.windows);
-        let previous_posix = read_optional_config(posix_path)?;
-        let previous_windows = read_optional_config(windows_path)?;
+fn read_hook_request(stream: &mut TcpStream) -> Result<(AiTool, String), String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| format!("无法设置 Hook 请求超时：{error}"))?;
+    let mut request = Vec::with_capacity(1024);
+    let mut buffer = [0_u8; 1024];
+    let header_end = loop {
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|error| format!("无法读取 Hook 请求：{error}"))?;
+        if read == 0 {
+            return Err("Hook 请求未完整发送".to_owned());
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.len() > MAX_HOOK_REQUEST_BYTES {
+            return Err("Hook 请求过大".to_owned());
+        }
+        if let Some(index) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            break index + 4;
+        }
+    };
 
-        write_atomic_file(posix_path, &scripts.posix, "Hook 运行脚本")?;
-        if let Err(error) =
-            write_atomic_file(windows_path, &scripts.windows, "Windows Hook 运行脚本")
-        {
-            let _ = restore_optional_file(posix_path, previous_posix.as_deref(), "Hook 运行脚本");
-            return Err(error);
-        }
-        if let Err(error) = self.persist(data) {
-            let rollback = rollback_runner_files(
-                posix_path,
-                previous_posix.as_deref(),
-                windows_path,
-                previous_windows.as_deref(),
-            );
-            return match rollback {
-                Ok(()) => Err(error),
-                Err(rollback_error) => {
-                    Err(format!("{error}；Hook 运行脚本回滚失败：{rollback_error}"))
-                }
-            };
-        }
-        Ok(())
+    let headers = std::str::from_utf8(&request[..header_end])
+        .map_err(|_| "Hook 请求头不是有效 UTF-8".to_owned())?;
+    let mut lines = headers.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| "Hook 请求缺少请求行".to_owned())?;
+    let mut request_parts = request_line.split_whitespace();
+    if request_parts.next() != Some("POST") {
+        return Err("Hook 接口只接受 POST".to_owned());
+    }
+    let path = request_parts
+        .next()
+        .ok_or_else(|| "Hook 请求缺少路径".to_owned())?;
+    let tool = match path.strip_prefix("/api/hooks/") {
+        Some("codex") => AiTool::Codex,
+        Some("claude-code") => AiTool::ClaudeCode,
+        Some("cursor") => AiTool::Cursor,
+        _ => return Err("Hook 请求中的 AI 工具无效".to_owned()),
+    };
+    let content_length = lines
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .ok_or_else(|| "Hook 请求缺少有效的 Content-Length".to_owned())?;
+    if content_length == 0 || content_length > MAX_HOOK_BODY_BYTES {
+        return Err("Hook 请求体大小无效".to_owned());
     }
 
-    fn persist_profile_transaction(
-        &self,
-        data: &SavedMonitorData,
-        config_path: &Path,
-        previous_config: Option<&str>,
-        next_config: Option<&str>,
-    ) -> Result<(), String> {
-        if let Some(next_config) = next_config {
-            write_config(config_path, next_config)?;
+    while request.len() < header_end + content_length {
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|error| format!("无法读取 Hook 请求体：{error}"))?;
+        if read == 0 {
+            return Err("Hook 请求体未完整发送".to_owned());
         }
-        if let Err(error) = self.persist_with_runners(data) {
-            if next_config.is_some()
-                && let Err(rollback_error) = restore_optional_config(config_path, previous_config)
-            {
-                return Err(format!(
-                    "{error}；Hooks 配置回滚失败，当前文件可能已发生变化：{rollback_error}"
-                ));
+        request.extend_from_slice(&buffer[..read]);
+        if request.len() > MAX_HOOK_REQUEST_BYTES {
+            return Err("Hook 请求过大".to_owned());
+        }
+    }
+    let body =
+        serde_json::from_slice::<HookRequest>(&request[header_end..header_end + content_length])
+            .map_err(|error| format!("Hook 请求 JSON 无效：{error}"))?;
+    let hook_type = body.hook_type.trim();
+    if hook_type.is_empty() || hook_type.len() > 128 {
+        return Err("Hook 类型不能为空且不能超过 128 个字符".to_owned());
+    }
+    Ok((tool, hook_type.to_owned()))
+}
+
+fn relay_hook(
+    client: &reqwest::blocking::Client,
+    data: &Arc<RwLock<SavedMonitorData>>,
+    online_devices: &Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
+    status: &Arc<RwLock<HookRelayStatus>>,
+    tool: AiTool,
+    hook_type: &str,
+) {
+    let Some(transition) = hook_transition(tool, hook_type) else {
+        record_hook_result(
+            status,
+            tool,
+            hook_type,
+            None,
+            Err(format!("不支持的 Hook 类型：{hook_type}")),
+        );
+        return;
+    };
+    let Ok(data) = data.read() else {
+        record_hook_result(
+            status,
+            tool,
+            hook_type,
+            None,
+            Err("转发配置读取锁已损坏".to_owned()),
+        );
+        return;
+    };
+    let snapshot = data.clone();
+    drop(data);
+    let online_snapshot = online_devices
+        .read()
+        .map(|devices| devices.clone())
+        .unwrap_or_default();
+    let online_ids = online_snapshot
+        .iter()
+        .map(|device| device.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut targets = snapshot
+        .profiles
+        .iter()
+        .filter(|profile| profile.tool == tool)
+        .filter_map(|profile| {
+            snapshot
+                .devices
+                .iter()
+                .find(|device| device.device_id == profile.device_id)
+                .map(|device| (device, profile))
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|(device, _)| !online_ids.contains(device.device_id.as_str()));
+    if targets.is_empty() {
+        record_hook_result(
+            status,
+            tool,
+            hook_type,
+            None,
+            Err("尚未配置该 AI 的转发位置".to_owned()),
+        );
+        return;
+    }
+
+    let behavior = match transition {
+        HookTransition::Display(behavior) => Some(behavior),
+        HookTransition::Release => None,
+    };
+    let mut forwarded = 0_u64;
+    let mut errors = Vec::new();
+    for (saved_device, profile) in targets {
+        let online_device = online_snapshot
+            .iter()
+            .find(|device| device.id == saved_device.device_id);
+        let effective_device = online_device.map_or_else(
+            || saved_device.clone(),
+            |device| MonitorDeviceRoute {
+                base_url: device.base_url.clone(),
+                device_id: device.id.clone(),
+                device_name: device.name.clone(),
+            },
+        );
+        let result = forward_profile(
+            client,
+            status,
+            tool,
+            transition,
+            &snapshot.settings.username,
+            &effective_device,
+            profile,
+        );
+        match result {
+            Ok(()) => forwarded += 1,
+            Err(error) => errors.push(format!("{}：{error}", effective_device.device_name)),
+        }
+    }
+    record_hook_results(status, tool, hook_type, behavior, forwarded, &errors);
+}
+
+fn forward_profile(
+    client: &reqwest::blocking::Client,
+    status: &Arc<RwLock<HookRelayStatus>>,
+    tool: AiTool,
+    transition: HookTransition,
+    username: &str,
+    device: &MonitorDeviceRoute,
+    profile: &AiProfile,
+) -> Result<(), String> {
+    if device.base_url.is_empty() || username.is_empty() {
+        return Err("设备地址或显示用户名为空".to_owned());
+    }
+    let url = format!("{}/api/slots/{}", device.base_url, profile.slot);
+    match transition {
+        HookTransition::Display(behavior) => profile
+            .hooks
+            .iter()
+            .find(|state| state.behavior == behavior)
+            .ok_or_else(|| "AI 状态配置不完整".to_owned())
+            .and_then(|state| {
+                forward_with_retry(status, || {
+                    client
+                        .post(&url)
+                        .json(&SlotUpdateRequest {
+                            username,
+                            ai_name: ai_tool_name(tool),
+                            behavior,
+                            content: &state.content,
+                            image: &state.image,
+                        })
+                        .send()
+                        .map_err(|error| format!("转发到监控屏失败：{error}"))
+                        .and_then(|response| {
+                            response
+                                .error_for_status()
+                                .map(|_| ())
+                                .map_err(|error| format!("监控屏拒绝了状态更新：{error}"))
+                        })
+                })
+            }),
+        HookTransition::Release => forward_with_retry(status, || {
+            client
+                .delete(&url)
+                .send()
+                .map_err(|error| format!("释放监控屏位置失败：{error}"))
+                .and_then(|response| {
+                    response
+                        .error_for_status()
+                        .map(|_| ())
+                        .map_err(|error| format!("监控屏拒绝了位置释放：{error}"))
+                })
+        }),
+    }
+}
+
+fn record_hook_result(
+    status: &Arc<RwLock<HookRelayStatus>>,
+    tool: AiTool,
+    hook_type: &str,
+    behavior: Option<HookBehavior>,
+    result: Result<(), String>,
+) {
+    if let Ok(mut current) = status.write() {
+        current.received_count += 1;
+        current.pending_count = current.pending_count.saturating_sub(1);
+        current.last_tool = Some(tool);
+        hook_type.clone_into(&mut current.last_hook_type);
+        current.last_behavior = behavior;
+        match result {
+            Ok(()) => {
+                current.forwarded_count += 1;
+                current.last_error.clear();
             }
-            return Err(error);
+            Err(error) => {
+                current.failed_count += 1;
+                current.last_error = error;
+            }
         }
-        Ok(())
     }
+}
+
+fn record_hook_results(
+    status: &Arc<RwLock<HookRelayStatus>>,
+    tool: AiTool,
+    hook_type: &str,
+    behavior: Option<HookBehavior>,
+    forwarded: u64,
+    errors: &[String],
+) {
+    if let Ok(mut current) = status.write() {
+        current.received_count += 1;
+        current.pending_count = current.pending_count.saturating_sub(1);
+        current.forwarded_count += forwarded;
+        current.failed_count += errors.len() as u64;
+        current.last_tool = Some(tool);
+        hook_type.clone_into(&mut current.last_hook_type);
+        current.last_behavior = behavior;
+        current.last_error = errors.join("；");
+    }
+}
+
+fn should_suppress_late_event(
+    terminal_states: &mut HashMap<AiTool, Instant>,
+    tool: AiTool,
+    hook_type: &str,
+) -> bool {
+    let now = Instant::now();
+    if is_authoritative_terminal_event(tool, hook_type) {
+        terminal_states.insert(tool, now);
+        return false;
+    }
+    if is_late_completion_event(hook_type)
+        && terminal_states
+            .get(&tool)
+            .is_some_and(|terminal| now.duration_since(*terminal) <= TERMINAL_STATE_GUARD)
+    {
+        return true;
+    }
+    if !is_late_completion_event(hook_type) {
+        terminal_states.remove(&tool);
+    }
+    false
+}
+
+fn record_suppressed_hook(status: &Arc<RwLock<HookRelayStatus>>, tool: AiTool, hook_type: &str) {
+    if let Ok(mut current) = status.write() {
+        current.received_count += 1;
+        current.suppressed_count += 1;
+        current.pending_count = current.pending_count.saturating_sub(1);
+        current.last_tool = Some(tool);
+        hook_type.clone_into(&mut current.last_hook_type);
+        current.last_behavior = Some(HookBehavior::Idle);
+        current.last_error.clear();
+    }
+}
+
+fn forward_with_retry(
+    status: &Arc<RwLock<HookRelayStatus>>,
+    mut request: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let mut last_error = String::new();
+    for attempt in 0..FORWARD_ATTEMPTS {
+        if attempt > 0 {
+            if let Ok(mut current) = status.write() {
+                current.retried_count += 1;
+            }
+            thread::sleep(Duration::from_millis(250 * u64::from(attempt)));
+        }
+        match request() {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
+}
+
+fn record_relay_failure(status: &Arc<RwLock<HookRelayStatus>>, error: String) {
+    if let Ok(mut current) = status.write() {
+        current.failed_count += 1;
+        current.last_error = error;
+    }
+}
+
+fn write_http_response(stream: &mut TcpStream, status: u16, reason: &str) {
+    let response =
+        format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
 }
 
 fn remote_image_url(base_url: &str, filename: &str) -> Result<Url, String> {
@@ -973,33 +1511,6 @@ fn write_atomic_file(path: &Path, content: &str, label: &str) -> Result<(), Stri
     Ok(())
 }
 
-fn restore_optional_config(path: &Path, content: Option<&str>) -> Result<(), String> {
-    restore_optional_file(path, content, "Hooks 配置")
-}
-
-fn restore_optional_file(path: &Path, content: Option<&str>, label: &str) -> Result<(), String> {
-    if let Some(content) = content {
-        return write_atomic_file(path, content, label);
-    }
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("无法删除新建配置 {}：{error}", path.display())),
-    }
-}
-
-fn rollback_runner_files(
-    posix_path: &Path,
-    previous_posix: Option<&str>,
-    windows_path: &Path,
-    previous_windows: Option<&str>,
-) -> Result<(), String> {
-    let posix_result = restore_optional_file(posix_path, previous_posix, "Hook 运行脚本");
-    let windows_result =
-        restore_optional_file(windows_path, previous_windows, "Windows Hook 运行脚本");
-    posix_result.and(windows_result)
-}
-
 async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, String> {
     let status = response.status();
     if status.is_success() {
@@ -1029,6 +1540,7 @@ mod tests {
 
     fn test_profile() -> AiProfile {
         AiProfile {
+            device_id: "screen-1".to_owned(),
             tool: AiTool::Codex,
             slot: 1,
             hooks: [
@@ -1045,6 +1557,390 @@ mod tests {
             })
             .collect(),
         }
+    }
+
+    #[test]
+    fn local_hook_request_accepts_only_tool_path_and_type_body() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"type":"SessionStart"}"#;
+        let request = format!(
+            "POST /api/hooks/codex HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let sender = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+
+        let request = read_hook_request(&mut stream).unwrap();
+
+        sender.join().unwrap();
+        assert_eq!(request, (AiTool::Codex, "SessionStart".to_owned()));
+    }
+
+    #[test]
+    fn local_hook_request_rejects_business_payload_fields() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"type":"Stop","image":"should-not-be-here.png"}"#;
+        let request = format!(
+            "POST /api/hooks/cursor HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let sender = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+
+        let error = read_hook_request(&mut stream).unwrap_err();
+
+        sender.join().unwrap();
+        assert!(error.contains("unknown field"));
+    }
+
+    #[test]
+    fn relay_computes_state_and_uses_a_configured_device_route() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            loop {
+                let length = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..length]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let header_end = header_end + 4;
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .split("\r\n")
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                if request.len() >= header_end + content_length {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let data = Arc::new(RwLock::new(SavedMonitorData {
+            settings: MonitorSettings {
+                base_url: format!("http://{address}"),
+                username: "Manon".to_owned(),
+                device_id: "screen-1".to_owned(),
+                device_name: "Desk".to_owned(),
+            },
+            devices: vec![MonitorDeviceRoute {
+                base_url: format!("http://{address}"),
+                device_id: "screen-1".to_owned(),
+                device_name: "Desk".to_owned(),
+            }],
+            profiles: vec![test_profile()],
+            hook_config_directories: HookConfigDirectories::default(),
+        }));
+        let status = Arc::new(RwLock::new(HookRelayStatus::default()));
+        let online_devices = Arc::new(RwLock::new(Vec::new()));
+
+        relay_hook(
+            &reqwest::blocking::Client::new(),
+            &data,
+            &online_devices,
+            &status,
+            AiTool::Codex,
+            "UserPromptSubmit",
+        );
+
+        let request = receiver.join().unwrap();
+        assert!(request.starts_with("POST /api/slots/1 HTTP/1.1"));
+        assert!(request.contains(r#""username":"Manon""#));
+        assert!(request.contains(r#""aiName":"Codex""#));
+        assert!(request.contains(r#""behavior":"running""#));
+        assert!(request.contains(r#""image":"running.gif""#));
+        let status = status.read().unwrap();
+        assert_eq!(status.received_count, 1);
+        assert_eq!(status.forwarded_count, 1);
+        assert_eq!(status.last_behavior, Some(HookBehavior::Running));
+        assert!(status.last_error.is_empty());
+    }
+
+    #[test]
+    fn relay_prioritizes_online_routes_and_uses_their_latest_address() {
+        let unavailable_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let unavailable_address = unavailable_listener.local_addr().unwrap();
+        drop(unavailable_listener);
+
+        let available_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let available_address = available_listener.local_addr().unwrap();
+        let receiver = thread::spawn(move || {
+            let (mut stream, _) = available_listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            loop {
+                let length = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..length]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let header_end = header_end + 4;
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .split("\r\n")
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                if request.len() >= header_end + content_length {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        let mut available_profile = test_profile();
+        available_profile.device_id = "screen-2".to_owned();
+        available_profile.slot = 7;
+        let data = Arc::new(RwLock::new(SavedMonitorData {
+            settings: MonitorSettings {
+                base_url: format!("http://{unavailable_address}"),
+                username: "Desk user".to_owned(),
+                device_id: "screen-1".to_owned(),
+                device_name: "Desk".to_owned(),
+            },
+            devices: vec![
+                MonitorDeviceRoute {
+                    base_url: format!("http://{unavailable_address}"),
+                    device_id: "screen-1".to_owned(),
+                    device_name: "Desk".to_owned(),
+                },
+                MonitorDeviceRoute {
+                    base_url: format!("http://{unavailable_address}"),
+                    device_id: "screen-2".to_owned(),
+                    device_name: "Studio".to_owned(),
+                },
+            ],
+            profiles: vec![test_profile(), available_profile],
+            hook_config_directories: HookConfigDirectories::default(),
+        }));
+        let status = Arc::new(RwLock::new(HookRelayStatus::default()));
+        let online_devices = Arc::new(RwLock::new(vec![DiscoveredMonitorDevice {
+            id: "screen-2".to_owned(),
+            name: "Studio".to_owned(),
+            api_version: "1".to_owned(),
+            base_url: format!("http://{available_address}"),
+            path: DEFAULT_DEVICE_API_PATH.to_owned(),
+            discovery_source: DiscoverySource::Mdns,
+        }]));
+
+        relay_hook(
+            &reqwest::blocking::Client::new(),
+            &data,
+            &online_devices,
+            &status,
+            AiTool::Codex,
+            "UserPromptSubmit",
+        );
+
+        let request = receiver.join().unwrap();
+        assert!(request.starts_with("POST /api/slots/7 HTTP/1.1"));
+        assert!(request.contains(r#""username":"Desk user""#));
+        let status = status.read().unwrap();
+        assert_eq!(status.received_count, 1);
+        assert_eq!(status.forwarded_count, 1);
+        assert_eq!(status.failed_count, 1);
+        assert!(status.last_error.contains("Desk"));
+    }
+
+    #[test]
+    fn terminal_state_guard_suppresses_late_completion_but_not_new_work() {
+        let mut terminals = HashMap::new();
+        assert!(!should_suppress_late_event(
+            &mut terminals,
+            AiTool::ClaudeCode,
+            "Stop"
+        ));
+        assert!(should_suppress_late_event(
+            &mut terminals,
+            AiTool::ClaudeCode,
+            "SubagentStop"
+        ));
+        assert!(!should_suppress_late_event(
+            &mut terminals,
+            AiTool::ClaudeCode,
+            "UserPromptSubmit"
+        ));
+        assert!(!should_suppress_late_event(
+            &mut terminals,
+            AiTool::ClaudeCode,
+            "PostToolUse"
+        ));
+    }
+
+    #[test]
+    fn forward_queue_retries_transient_failures_in_order() {
+        let status = Arc::new(RwLock::new(HookRelayStatus::default()));
+        let mut attempts = 0_u8;
+
+        let result = forward_with_retry(&status, || {
+            attempts += 1;
+            (attempts >= 3)
+                .then_some(())
+                .ok_or_else(|| "temporary".to_owned())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts, 3);
+        assert_eq!(status.read().unwrap().retried_count, 2);
+    }
+
+    #[test]
+    fn switching_current_device_loads_that_devices_profiles() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-route-refresh-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("home");
+        fs::create_dir_all(&app_data).unwrap();
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+        service.save_username("Manon").unwrap();
+        service
+            .select_device(&DiscoveredMonitorDevice {
+                id: "screen-1".to_owned(),
+                name: "Desk".to_owned(),
+                api_version: "1".to_owned(),
+                base_url: "http://192.168.50.10:8080".to_owned(),
+                path: "/api/device".to_owned(),
+                discovery_source: DiscoverySource::Mdns,
+            })
+            .unwrap();
+        service.save_profile(test_profile()).unwrap();
+
+        service
+            .select_device(&DiscoveredMonitorDevice {
+                id: "screen-2".to_owned(),
+                name: "Studio".to_owned(),
+                api_version: "1".to_owned(),
+                base_url: "http://192.168.50.99:8080".to_owned(),
+                path: "/api/device".to_owned(),
+                discovery_source: DiscoverySource::Mdns,
+            })
+            .unwrap();
+
+        assert!(service.profiles().unwrap().is_empty());
+        let mut studio_profile = test_profile();
+        studio_profile.slot = 9;
+        service.save_profile(studio_profile).unwrap();
+        let saved_studio_profile = service.profiles().unwrap().remove(0);
+        assert_eq!(saved_studio_profile.device_id, "screen-2");
+        assert_eq!(saved_studio_profile.slot, 9);
+        service
+            .select_device(&DiscoveredMonitorDevice {
+                id: "screen-1".to_owned(),
+                name: "Desk".to_owned(),
+                api_version: "1".to_owned(),
+                base_url: "http://192.168.50.10:8080".to_owned(),
+                path: "/api/device".to_owned(),
+                discovery_source: DiscoverySource::Mdns,
+            })
+            .unwrap();
+        let profile = service.profiles().unwrap().remove(0);
+        assert_eq!(profile.tool, AiTool::Codex);
+        assert_eq!(profile.device_id, "screen-1");
+        assert_eq!(profile.slot, 1);
+        assert_eq!(service.settings().unwrap().username, "Manon");
+        let saved = service.data.read().unwrap();
+        assert_eq!(saved.devices.len(), 2);
+        assert!(
+            saved
+                .devices
+                .iter()
+                .any(|device| device.device_id == "screen-2")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn loading_legacy_profiles_uses_their_obsolete_target_device_id() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-route-migration-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("home");
+        fs::create_dir_all(&app_data).unwrap();
+        fs::write(
+            app_data.join(STORE_FILENAME),
+            r#"{
+              "settings": {
+                "baseUrl": "http://192.168.1.77:8080",
+                "username": "Manon",
+                "deviceId": "legacy-screen",
+                "deviceName": "Legacy Screen"
+              },
+              "profiles": [{
+                "tool": "codex",
+                "slot": 7,
+                "targetDeviceId": "obsolete-screen",
+                "targetDeviceName": "Obsolete Screen",
+                "targetBaseUrl": "http://192.168.1.88:8080",
+                "hooks": [
+                  {"behavior":"idle","content":"","image":"idle.png"},
+                  {"behavior":"running","content":"","image":"running.png"},
+                  {"behavior":"asking","content":"","image":"asking.png"},
+                  {"behavior":"error","content":"","image":"error.png"}
+                ]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+        assert!(service.profiles().unwrap().is_empty());
+        let saved = service.data.read().unwrap();
+        let profile = saved.profiles[0].clone();
+
+        assert_eq!(profile.device_id, "obsolete-screen");
+        assert_eq!(profile.tool, AiTool::Codex);
+        assert_eq!(profile.slot, 7);
+        assert_eq!(saved.devices.len(), 1);
+        assert_eq!(saved.devices[0].device_id, "legacy-screen");
+        assert_eq!(saved.settings.username, "Manon");
+        drop(saved);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1205,7 +2101,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_write_rolls_back_hook_file_when_data_persistence_fails() {
+    fn profile_save_does_not_write_hooks_when_data_persistence_fails() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1226,29 +2122,26 @@ mod tests {
                 claude_code: config_home.join(".claude").to_string_lossy().into_owned(),
                 cursor: config_home.join(".cursor").to_string_lossy().into_owned(),
             },
-            runner_paths: HookRunnerPaths {
-                posix: root
-                    .join(POSIX_RUNNER_FILENAME)
-                    .to_string_lossy()
-                    .into_owned(),
-                windows: root
-                    .join(WINDOWS_RUNNER_FILENAME)
-                    .to_string_lossy()
-                    .into_owned(),
-            },
-            data: RwLock::new(SavedMonitorData {
+            legacy_runner_paths: [
+                root.join(LEGACY_POSIX_RUNNER_FILENAME),
+                root.join(LEGACY_WINDOWS_RUNNER_FILENAME),
+            ],
+            data: Arc::new(RwLock::new(SavedMonitorData {
                 settings: MonitorSettings {
                     base_url: "http://127.0.0.1:8080".to_owned(),
                     username: "tester".to_owned(),
                     device_id: "device-1".to_owned(),
                     device_name: "monitor".to_owned(),
                 },
+                devices: Vec::new(),
                 profiles: Vec::new(),
                 hook_config_directories: HookConfigDirectories::default(),
-            }),
+            })),
+            online_devices: Arc::new(RwLock::new(Vec::new())),
+            relay_status: Arc::new(RwLock::new(HookRelayStatus::default())),
         };
 
-        let result = service.write_profile(test_profile());
+        let result = service.save_profile(test_profile());
 
         assert!(result.is_err());
         assert!(!config_home.join(".codex/hooks.json").exists());
@@ -1257,7 +2150,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_hook_directory_is_persisted_and_used_for_profile_writes() {
+    fn custom_hook_directory_is_persisted_and_used_for_hook_writes() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1270,6 +2163,18 @@ mod tests {
         let config_home = root.join("home");
         fs::create_dir_all(&app_data).unwrap();
         let service = MonitorService::load(&app_data, &config_home).unwrap();
+        service
+            .select_device(&DiscoveredMonitorDevice {
+                id: "screen-1".to_owned(),
+                name: "Desk".to_owned(),
+                api_version: "1".to_owned(),
+                base_url: "http://127.0.0.1:8080".to_owned(),
+                path: "/api/device".to_owned(),
+                discovery_source: DiscoverySource::Mdns,
+            })
+            .unwrap();
+        fs::write(app_data.join(LEGACY_POSIX_RUNNER_FILENAME), "legacy").unwrap();
+        fs::write(app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME), "legacy").unwrap();
         let custom_directory = root.join("custom-codex");
         let detected_directory = service
             .hook_config_locations()
@@ -1288,9 +2193,24 @@ mod tests {
             PathBuf::from(&location.config_path),
             custom_directory.join("hooks.json")
         );
-        service.write_profile(test_profile()).unwrap();
+        service.save_profile(test_profile()).unwrap();
+        assert!(!custom_directory.join("hooks.json").exists());
+        service.write_hook_config(AiTool::Codex).unwrap();
         assert!(custom_directory.join("hooks.json").exists());
         assert!(!config_home.join(".codex/hooks.json").exists());
+        assert!(app_data.join(LEGACY_POSIX_RUNNER_FILENAME).exists());
+        assert!(app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME).exists());
+        service.start_legacy_hook_cleanup();
+        for _ in 0..100 {
+            if !app_data.join(LEGACY_POSIX_RUNNER_FILENAME).exists()
+                && !app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME).exists()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!app_data.join(LEGACY_POSIX_RUNNER_FILENAME).exists());
+        assert!(!app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME).exists());
 
         let reloaded = MonitorService::load(&app_data, &config_home).unwrap();
         let reloaded_location = reloaded
@@ -1307,6 +2227,61 @@ mod tests {
             .unwrap();
         assert!(!default_location.is_custom);
         assert_eq!(default_location.directory, detected_directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn background_cleanup_removes_old_markers_and_preserves_aimonitor_entries() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-background-cleanup-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("home");
+        let codex_dir = config_home.join(".codex");
+        fs::create_dir_all(&app_data).unwrap();
+        fs::create_dir_all(&codex_dir).unwrap();
+        let config_path = codex_dir.join("hooks.json");
+        fs::write(
+            &config_path,
+            r#"{
+              "hooks": {
+                "Stop": [
+                  { "hooks": [{ "type":"command", "command":"custom hook" }] },
+                  { "hooks": [{ "type":"command", "command":": 'aimonitor-managed-hook:v1|target=http://old'; curl old" }] },
+                  { "hooks": [{ "type":"command", "command":": 'aimonitor-managed-hook:v3|tool=codex'; curl old-direct" }] },
+                  { "hooks": [{ "type":"command", "command":": 'AIMonitor|tool=codex'; curl new" }] }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+        fs::write(app_data.join(LEGACY_POSIX_RUNNER_FILENAME), "legacy").unwrap();
+        fs::write(app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME), "legacy").unwrap();
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+
+        service.start_legacy_hook_cleanup();
+
+        let mut cleaned = String::new();
+        for _ in 0..100 {
+            cleaned = fs::read_to_string(&config_path).unwrap();
+            if !cleaned.contains("aimonitor-managed-hook")
+                && !app_data.join(LEGACY_POSIX_RUNNER_FILENAME).exists()
+                && !app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME).exists()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!cleaned.contains("aimonitor-managed-hook"));
+        assert!(cleaned.contains("custom hook"));
+        assert!(cleaned.contains("AIMonitor|tool=codex"));
+        assert!(!app_data.join(LEGACY_POSIX_RUNNER_FILENAME).exists());
+        assert!(!app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME).exists());
         fs::remove_dir_all(root).unwrap();
     }
 

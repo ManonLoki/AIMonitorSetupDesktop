@@ -8,7 +8,7 @@ interface DeviceSwitchMenuProps {
 }
 
 export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
-  const { settings, connectedDevice, otherDevices } = useMonitorConnection();
+  const { connectedDevice, otherDevices } = useMonitorConnection();
   const connect = useConnectDevice();
 
   if (!connectedDevice) return null;
@@ -69,16 +69,10 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
               <Menu.Item
                 key={device.id}
                 disabled={connect.isPending}
-                onClick={() =>
-                  settings.data &&
-                  connect.mutate({
-                    device,
-                    username: settings.data.username,
-                  })
-                }
+                onClick={() => connect.mutate(device)}
                 rightSection={
                   connect.isPending &&
-                  connect.variables?.device.id === device.id ? (
+                  connect.variables?.id === device.id ? (
                     <Loader size={14} />
                   ) : undefined
                 }

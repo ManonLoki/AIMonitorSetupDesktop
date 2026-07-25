@@ -4,6 +4,7 @@ import type { PropsWithChildren } from "react";
 import { useAtomValue } from "jotai";
 import { queryClient } from "./query-client";
 import { colorSchemeAtom } from "../shared/state/ui";
+import { useMonitorDeviceEvents } from "../features/monitor/hooks/useMonitorDeviceEvents";
 
 const theme = createTheme({
   primaryColor: "violet",
@@ -23,8 +24,14 @@ export function AppProviders({ children }: PropsWithChildren) {
   return (
     <QueryClientProvider client={queryClient}>
       <MantineProvider theme={theme} forceColorScheme={colorScheme}>
+        <MonitorDeviceEvents />
         {children}
       </MantineProvider>
     </QueryClientProvider>
   );
+}
+
+function MonitorDeviceEvents() {
+  useMonitorDeviceEvents();
+  return null;
 }

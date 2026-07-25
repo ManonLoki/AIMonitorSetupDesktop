@@ -2,13 +2,13 @@
 // generated adapter, even when the application service only borrows them.
 #![allow(clippy::needless_pass_by_value)]
 
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::{
     application::monitor::{ConnectionStatus, ImageUpload, MonitorService, RemoteImage},
     domain::monitor::{
-        AiProfile, AiTool, DiscoveredMonitorDevice, HookConfigLocation, HookConfigPreview,
-        HookConfigWriteResult, LocalHookConfig, MonitorSettings,
+        AiProfile, AiTool, DiscoveredMonitorDevice, HookConfigLocation, HookConfigWriteResult,
+        LocalHookConfig, MonitorSettings,
     },
 };
 
@@ -18,23 +18,33 @@ pub fn get_monitor_settings(service: State<'_, MonitorService>) -> Result<Monito
 }
 
 #[tauri::command]
-pub fn save_monitor_settings(
+pub fn select_monitor_device(
     service: State<'_, MonitorService>,
     device: DiscoveredMonitorDevice,
+) -> Result<MonitorSettings, String> {
+    service.select_device(&device)
+}
+
+#[tauri::command]
+pub fn save_monitor_username(
+    service: State<'_, MonitorService>,
     username: String,
 ) -> Result<MonitorSettings, String> {
-    service.save_settings(&device, &username)
+    service.save_username(&username)
 }
 
 #[tauri::command]
 pub async fn discover_monitor_devices(
+    app: AppHandle,
     service: State<'_, MonitorService>,
 ) -> Result<Vec<DiscoveredMonitorDevice>, String> {
     let candidates =
         tauri::async_runtime::spawn_blocking(MonitorService::discover_device_candidates)
             .await
             .map_err(|error| format!("设备发现任务失败：{error}"))??;
-    service.finish_device_discovery(candidates).await
+    let devices = service.finish_device_discovery(candidates).await?;
+    service.publish_online_devices(&app, devices.clone());
+    Ok(devices)
 }
 
 #[tauri::command]
@@ -90,19 +100,19 @@ pub fn save_hook_config_directory(
 }
 
 #[tauri::command]
-pub fn write_ai_profile(
+pub fn save_ai_profile(
     service: State<'_, MonitorService>,
     profile: AiProfile,
-) -> Result<HookConfigWriteResult, String> {
-    service.write_profile(profile)
+) -> Result<AiProfile, String> {
+    service.save_profile(profile)
 }
 
 #[tauri::command]
-pub fn preview_hook_config(
+pub fn write_hook_config(
     service: State<'_, MonitorService>,
-    profile: AiProfile,
-) -> Result<HookConfigPreview, String> {
-    service.hook_config_preview(profile)
+    tool: AiTool,
+) -> Result<HookConfigWriteResult, String> {
+    service.write_hook_config(tool)
 }
 
 #[tauri::command]

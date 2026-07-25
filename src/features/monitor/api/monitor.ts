@@ -41,19 +41,16 @@ export interface HookContent {
 }
 
 export interface AiProfile {
+  /** Profile 所属设备，由 Rust 按当前设备写入。 */
+  deviceId: string;
   tool: AiTool;
   /** 在展示屏上的显示位置，取值范围 1-25。 */
   slot: number;
   hooks: HookContent[];
 }
 
-export interface HookConfigPreview {
-  filename: string;
-  content: string;
-}
-
 export interface HookConfigWriteResult {
-  profile: AiProfile;
+  tool: AiTool;
   filename: string;
   configChanged: boolean;
   /** 仅 Codex 且配置发生变化时为真：Codex 不会热加载 hooks.json，需提示用户手动确认。 */
@@ -67,8 +64,8 @@ export interface LocalHookConfig {
   filename: string;
   exists: boolean;
   valid: boolean;
-  /** 现有配置里的托管条目是否已指向当前版本的 runner 脚本路径（无需迁移）。 */
-  stableRunner: boolean;
+  /** 现有配置是否直接请求固定的本机中继地址，不依赖 runner。 */
+  directRelay: boolean;
   error: string;
   /** 现有配置中由本工具托管写入的事件名列表。 */
   managedTargets: string[];
@@ -82,18 +79,42 @@ export interface HookConfigLocation {
   isCustom: boolean;
 }
 
+export interface HookRelayStatus {
+  listening: boolean;
+  bindAddress: string;
+  port: number;
+  receivedCount: number;
+  forwardedCount: number;
+  failedCount: number;
+  retriedCount: number;
+  suppressedCount: number;
+  pendingCount: number;
+  lastTool: AiTool | null;
+  lastHookType: string;
+  lastBehavior: HookBehavior | null;
+  lastError: string;
+}
+
+export interface RuntimeOverview {
+  autostartEnabled: boolean;
+  silentStartSupported: boolean;
+  hookRelay: HookRelayStatus;
+}
+
 export function getMonitorSettings(): Promise<MonitorSettings> {
   return invokeCommand<MonitorSettings>("get_monitor_settings");
 }
 
-export function saveMonitorSettings(
+export function selectMonitorDevice(
   device: DiscoveredMonitorDevice,
-  username: string,
 ): Promise<MonitorSettings> {
-  return invokeCommand<MonitorSettings>("save_monitor_settings", {
+  return invokeCommand<MonitorSettings>("select_monitor_device", {
     device,
-    username,
   });
+}
+
+export function saveMonitorUsername(username: string): Promise<MonitorSettings> {
+  return invokeCommand<MonitorSettings>("save_monitor_username", { username });
 }
 
 export function discoverMonitorDevices(): Promise<DiscoveredMonitorDevice[]> {
@@ -157,18 +178,24 @@ export async function chooseHookConfigDirectory(
   });
 }
 
-export function writeAiProfile(
-  profile: AiProfile,
-): Promise<HookConfigWriteResult> {
-  return invokeCommand<HookConfigWriteResult>("write_ai_profile", { profile });
+export function saveAiProfile(profile: AiProfile): Promise<AiProfile> {
+  return invokeCommand<AiProfile>("save_ai_profile", { profile });
 }
 
-export function previewHookConfig(
-  profile: AiProfile,
-): Promise<HookConfigPreview> {
-  return invokeCommand<HookConfigPreview>("preview_hook_config", { profile });
+export function writeHookConfig(
+  tool: AiTool,
+): Promise<HookConfigWriteResult> {
+  return invokeCommand<HookConfigWriteResult>("write_hook_config", { tool });
 }
 
 export function listLocalHookConfigs(): Promise<LocalHookConfig[]> {
   return invokeCommand<LocalHookConfig[]>("list_local_hook_configs");
+}
+
+export function getRuntimeOverview(): Promise<RuntimeOverview> {
+  return invokeCommand<RuntimeOverview>("get_runtime_overview");
+}
+
+export function updateAutostart(enabled: boolean): Promise<RuntimeOverview> {
+  return invokeCommand<RuntimeOverview>("update_autostart", { enabled });
 }

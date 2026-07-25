@@ -19,7 +19,8 @@ import { systemOverviewQuery } from "../../features/system/queries/system";
 import { DeviceSwitchMenu } from "../../features/monitor/components/DeviceSwitchMenu";
 
 const navigation = [
-  { label: "AI 管理", to: "/" as const, icon: "ai" as const },
+  { label: "工作台", to: "/" as const, icon: "dashboard" as const },
+  { label: "AI 管理", to: "/ai-management" as const, icon: "ai" as const },
   { label: "图片管理", to: "/images" as const, icon: "image" as const },
   { label: "设置", to: "/settings" as const, icon: "settings" as const },
 ];

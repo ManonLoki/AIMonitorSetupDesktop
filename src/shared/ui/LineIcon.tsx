@@ -2,6 +2,7 @@ import type { ReactNode, SVGProps } from "react";
 
 type IconName =
   | "ai"
+  | "dashboard"
   | "image"
   | "settings"
   | "sun"
@@ -22,6 +23,14 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <rect x="4" y="6" width="16" height="14" rx="3" />
       <path d="M9 11h.01M15 11h.01M9 16h6M12 6V3M8 3h8" />
+    </>
+  ),
+  dashboard: (
+    <>
+      <rect x="3" y="3" width="7" height="7" rx="1.5" />
+      <rect x="14" y="3" width="7" height="7" rx="1.5" />
+      <rect x="3" y="14" width="7" height="7" rx="1.5" />
+      <rect x="14" y="14" width="7" height="7" rx="1.5" />
     </>
   ),
   image: (

@@ -14,6 +14,7 @@ import { AppBootScreen } from "../shared/ui/AppBootScreen";
 import { AiManagementPage } from "../features/monitor/pages/AiManagementPage";
 import { ImagesPage } from "../features/monitor/pages/ImagesPage";
 import { SettingsPage } from "../features/monitor/pages/SettingsPage";
+import { WorkbenchPage } from "../features/monitor/pages/WorkbenchPage";
 
 async function hasConnectedDevice() {
   try {
@@ -42,12 +43,13 @@ const rootRoute = createRootRoute({
 const homeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
+  component: WorkbenchPage,
+});
+
+const aiManagementRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/ai-management",
   component: AiManagementPage,
-  beforeLoad: async () => {
-    if (!(await hasConnectedDevice())) {
-      throw redirect({ to: "/settings" });
-    }
-  },
 });
 
 const imagesRoute = createRoute({
@@ -56,7 +58,7 @@ const imagesRoute = createRoute({
   component: ImagesPage,
   beforeLoad: async () => {
     if (!(await hasConnectedDevice())) {
-      throw redirect({ to: "/settings" });
+      throw redirect({ to: "/ai-management" });
     }
   },
 });
@@ -67,8 +69,18 @@ const settingsRoute = createRoute({
   component: SettingsPage,
 });
 
+const workbenchRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workbench",
+  beforeLoad: () => {
+    throw redirect({ to: "/" });
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   homeRoute,
+  aiManagementRoute,
+  workbenchRoute,
   imagesRoute,
   settingsRoute,
 ]);
