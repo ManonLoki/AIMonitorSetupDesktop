@@ -53,7 +53,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 24px;
+  margin-bottom: 14px;
   padding: 0 4px;
 }
 
@@ -142,12 +142,12 @@ body {
 
 .page-container {
   width: 100%;
-  max-width: 1180px;
+  max-width: 1320px;
   margin: 0 auto;
 }
 
 .mobile-nav-trigger {
-  margin-bottom: 16px;
+  margin-bottom: 8px;
 }
 
 .boot-screen {
@@ -274,7 +274,7 @@ body {
 }
 
 .endpoint-preview {
-  padding: 14px 16px;
+  padding: 10px 12px;
   border: 1px solid var(--app-border);
   border-radius: var(--mantine-radius-md);
   background: var(--app-muted);
@@ -365,8 +365,8 @@ body {
 }
 
 .ai-tool-tabs .mantine-Tabs-list {
-  gap: 6px;
-  padding: 4px;
+  gap: 4px;
+  padding: 3px;
   border: 0;
   border-radius: var(--mantine-radius-lg);
   background: var(--app-muted);
@@ -376,7 +376,7 @@ body {
   border: 0;
   border-radius: var(--mantine-radius-md);
   font-weight: 650;
-  padding-block: 11px;
+  padding-block: 8px;
   transition:
     color 140ms ease,
     background 140ms ease,
@@ -469,7 +469,7 @@ body {
 .image-picker-trigger {
   position: relative;
   width: 100%;
-  height: 132px;
+  height: 108px;
   overflow: hidden;
   border: 1px solid var(--app-border);
   border-radius: var(--mantine-radius-md);

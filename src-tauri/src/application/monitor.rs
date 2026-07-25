@@ -4,7 +4,7 @@ use std::{
     io::{ErrorKind, Read, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock, mpsc},
+    sync::{Arc, Mutex, RwLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -18,18 +18,16 @@ use tauri::{AppHandle, Emitter};
 use crate::domain::monitor::{
     AiProfile, AiTool, DEFAULT_HOOK_RELAY_PORT, DiscoveredMonitorDevice, DiscoverySource,
     HookBehavior, HookConfigDirectories, HookConfigLocation, HookConfigWriteResult, HookTransition,
-    LocalHookConfig, MonitorDeviceRoute, MonitorSettings, SavedMonitorData, ai_tool_name,
-    cleanup_legacy_hook_config, encode_base64, generate_hook_config, hook_config_filename,
-    hook_transition, inspect_local_hook_config, is_authoritative_terminal_event,
-    is_late_completion_event, merge_hook_config, migrate_legacy_profile, normalize_base_url,
-    validate_device_route, validate_profile, validate_username,
+    MonitorDeviceRoute, MonitorSettings, SavedMonitorData, ai_tool_name, encode_base64,
+    generate_hook_config, hook_config_filename, hook_transition, is_authoritative_terminal_event,
+    is_late_completion_event, merge_hook_config, normalize_base_url, validate_device_route,
+    validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
+    validate_username,
 };
 
 const STORE_FILENAME: &str = "monitor-data.json";
-const LEGACY_POSIX_RUNNER_FILENAME: &str = "aimonitor-hook.sh";
-const LEGACY_WINDOWS_RUNNER_FILENAME: &str = "aimonitor-hook.ps1";
 const AIMONITOR_SERVICE_TYPE: &str = "_aimonitor._tcp.local.";
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(4);
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 const UDP_DISCOVERY_PORT: u16 = 8080;
 const UDP_DISCOVERY_REQUEST: &[u8] = b"AIMONITOR_DISCOVER_V1";
@@ -43,7 +41,10 @@ const MAX_HOOK_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_HOOK_BODY_BYTES: usize = 2 * 1024;
 const TERMINAL_STATE_GUARD: Duration = Duration::from_secs(2);
 const FORWARD_ATTEMPTS: u8 = 3;
-const BACKGROUND_DISCOVERY_INTERVAL: Duration = Duration::from_mins(5);
+const DISCOVERY_MISSES_BEFORE_REMOVAL: u8 = 2;
+/// 后台发现循环的轮询粒度：每次醒来都会重新读取当前配置的检查间隔，
+/// 因此设置页修改间隔后，最多这么久就会生效，无需重启线程。
+const DISCOVERY_POLL_GRANULARITY: Duration = Duration::from_secs(1);
 pub const MONITOR_DEVICES_CHANGED_EVENT: &str = "monitor-devices-changed";
 
 fn detect_hook_config_directories(config_home: &Path) -> HookConfigDirectories {
@@ -285,14 +286,76 @@ fn merge_udp_candidate(
         .sort_by_key(|url| candidate_url_priority(url));
 }
 
+/// 按设备 id 合并 mDNS 和 UDP 广播两路发现结果：同一设备的候选地址取
+/// 并集（mDNS 提供的地址通常更准确，优先排在前面），只在其中一路出现的
+/// 设备原样保留，避免任何一台设备因为只被一种协议发现而从列表消失。
+fn merge_discovery_candidates(
+    mdns_candidates: Vec<DiscoveryCandidate>,
+    udp_candidates: Vec<DiscoveryCandidate>,
+) -> Vec<DiscoveryCandidate> {
+    let mut merged = mdns_candidates
+        .into_iter()
+        .map(|candidate| (candidate.device.id.clone(), candidate))
+        .collect::<HashMap<_, _>>();
+
+    for udp_candidate in udp_candidates {
+        merged
+            .entry(udp_candidate.device.id.clone())
+            .and_modify(|existing| {
+                for base_url in &udp_candidate.base_urls {
+                    if !existing.base_urls.contains(base_url) {
+                        existing.base_urls.push(base_url.clone());
+                    }
+                }
+                existing
+                    .base_urls
+                    .sort_by_key(|url| candidate_url_priority(url));
+            })
+            .or_insert(udp_candidate);
+    }
+
+    let mut merged = merged.into_values().collect::<Vec<_>>();
+    merged.sort_by(|left, right| left.device.name.cmp(&right.device.name));
+    merged
+}
+
+/// 对单轮偶发漏报做去抖：设备连续缺席两轮才从在线快照移除。mDNS/UDP 在
+/// Wi-Fi 漫游或切换页面触发的并发扫描中可能丢一轮响应，直接替换列表会造成
+/// “切换设备后少一台，稍后又恢复”的闪烁。
+fn stabilize_discovered_devices(
+    previous: &[DiscoveredMonitorDevice],
+    mut discovered: Vec<DiscoveredMonitorDevice>,
+    missed_scans: &mut HashMap<String, u8>,
+) -> Vec<DiscoveredMonitorDevice> {
+    let discovered_ids = discovered
+        .iter()
+        .map(|device| device.id.clone())
+        .collect::<HashSet<_>>();
+    missed_scans.retain(|id, _| !discovered_ids.contains(id));
+
+    for device in previous {
+        if discovered_ids.contains(&device.id) {
+            continue;
+        }
+        let misses = missed_scans.entry(device.id.clone()).or_default();
+        *misses = misses.saturating_add(1);
+        if *misses < DISCOVERY_MISSES_BEFORE_REMOVAL {
+            discovered.push(device.clone());
+        }
+    }
+    discovered.sort_by(|left, right| left.name.cmp(&right.name));
+    discovered
+}
+
 #[derive(Clone)]
 pub struct MonitorService {
     client: Client,
     data_path: PathBuf,
     default_hook_config_directories: HookConfigDirectories,
-    legacy_runner_paths: [PathBuf; 2],
     data: Arc<RwLock<SavedMonitorData>>,
     online_devices: Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
+    discovery_missed_scans: Arc<Mutex<HashMap<String, u8>>>,
+    hook_config_write_lock: Arc<Mutex<()>>,
     relay_status: Arc<RwLock<HookRelayStatus>>,
 }
 
@@ -381,43 +444,22 @@ impl MonitorService {
     pub fn load(app_data_dir: &Path, config_home: &Path) -> Result<Self, String> {
         fs::create_dir_all(app_data_dir).map_err(|error| format!("无法创建配置目录：{error}"))?;
         let data_path = app_data_dir.join(STORE_FILENAME);
-        let mut data = if data_path.exists() {
+        let data = if data_path.exists() {
             let contents =
                 fs::read_to_string(&data_path).map_err(|error| format!("无法读取配置：{error}"))?;
             serde_json::from_str(&contents).map_err(|error| format!("配置文件格式错误：{error}"))?
         } else {
             SavedMonitorData::default()
         };
-        if !data.settings.device_id.trim().is_empty()
-            && !data
-                .devices
-                .iter()
-                .any(|device| device.device_id == data.settings.device_id)
-        {
-            data.devices.push(MonitorDeviceRoute {
-                base_url: data.settings.base_url.clone(),
-                device_id: data.settings.device_id.clone(),
-                device_name: data.settings.device_name.clone(),
-            });
-        }
-        let current_device_id = data.settings.device_id.clone();
-        for profile in &mut data.profiles {
-            migrate_legacy_profile(profile);
-            if profile.device_id.trim().is_empty() {
-                profile.device_id.clone_from(&current_device_id);
-            }
-        }
-
+        validate_saved_monitor_data(&data).map_err(|error| format!("配置数据校验失败：{error}"))?;
         Ok(Self {
             client: Client::new(),
             data_path,
             default_hook_config_directories: detect_hook_config_directories(config_home),
-            legacy_runner_paths: [
-                app_data_dir.join(LEGACY_POSIX_RUNNER_FILENAME),
-                app_data_dir.join(LEGACY_WINDOWS_RUNNER_FILENAME),
-            ],
             data: Arc::new(RwLock::new(data)),
             online_devices: Arc::new(RwLock::new(Vec::new())),
+            discovery_missed_scans: Arc::new(Mutex::new(HashMap::new())),
+            hook_config_write_lock: Arc::new(Mutex::new(())),
             relay_status: Arc::new(RwLock::new(HookRelayStatus {
                 bind_address: HOOK_BIND_ADDRESS.to_owned(),
                 port: HOOK_LISTENER_PORT,
@@ -512,57 +554,72 @@ impl MonitorService {
             .map_err(|_| "Hook 服务状态读取锁已损坏".to_owned())
     }
 
-    pub fn start_legacy_hook_cleanup(&self) {
-        let Ok(data) = self.data.read() else {
-            return;
-        };
-        let config_paths = AiTool::ALL.map(|tool| (tool, self.hook_config_path(&data, tool)));
-        drop(data);
-        let runner_paths = self.legacy_runner_paths.clone();
-        let data = Arc::clone(&self.data);
-
-        thread::spawn(move || {
-            // Serialize cleanup against Hooks writes so a late cleanup cannot
-            // overwrite a newly written AIMonitor entry.
-            let Ok(_guard) = data.write() else {
-                return;
-            };
-            for (tool, path) in config_paths {
-                let Ok(Some(content)) = read_optional_config(&path) else {
-                    continue;
-                };
-                let Ok(Some(cleaned)) = cleanup_legacy_hook_config(&content, tool) else {
-                    continue;
-                };
-                let _ = write_atomic_file(&path, &cleaned, "旧 Hook 标识清理");
-            }
-            for path in runner_paths {
-                let _ = fs::remove_file(path);
-            }
-        });
-    }
-
-    /// 在独立后台线程中立即发现一次设备，之后每五分钟刷新在线设备快照。
+    /// 在独立后台线程中立即发现一次设备，之后按设置页配置的间隔（默认一
+    /// 分钟）持续刷新在线设备快照。循环以 1 秒粒度醒来并重新读取当前配置
+    /// 的间隔，因此用户在设置页修改间隔后无需重启应用或线程即可立即生效。
     /// 只有快照实际变化时才向前端发送事件，避免无意义地重绘设备列表。
     pub fn start_background_device_discovery(&self, app: AppHandle) {
         let service = self.clone();
         thread::spawn(move || {
+            let mut next_run = Instant::now();
             loop {
-                let result = Self::discover_device_candidates().and_then(|candidates| {
-                    tauri::async_runtime::block_on(service.finish_device_discovery(candidates))
-                });
-                if let Ok(devices) = result {
-                    service.publish_online_devices(&app, devices);
+                if Instant::now() >= next_run {
+                    let result = Self::discover_device_candidates().and_then(|candidates| {
+                        tauri::async_runtime::block_on(service.finish_device_discovery(candidates))
+                    });
+                    if let Ok(devices) = result {
+                        service.publish_online_devices(&app, devices);
+                    }
+                    next_run = Instant::now() + service.discovery_interval();
                 }
-                thread::sleep(BACKGROUND_DISCOVERY_INTERVAL);
+                thread::sleep(DISCOVERY_POLL_GRANULARITY);
             }
         });
     }
 
-    pub fn publish_online_devices(&self, app: &AppHandle, devices: Vec<DiscoveredMonitorDevice>) {
+    /// 读取当前配置的自动检查间隔；配置读取失败或存了非法值时退回默认值，
+    /// 保证后台发现循环始终能继续运行。
+    fn discovery_interval(&self) -> Duration {
+        let minutes = self
+            .settings()
+            .map(|settings| settings.discovery_interval_minutes)
+            .ok()
+            .and_then(|minutes| validate_discovery_interval_minutes(minutes).ok())
+            .unwrap_or(crate::domain::monitor::DEFAULT_DISCOVERY_INTERVAL_MINUTES);
+        Duration::from_secs(minutes * 60)
+    }
+
+    pub fn save_discovery_interval(&self, minutes: u64) -> Result<MonitorSettings, String> {
+        let minutes = validate_discovery_interval_minutes(minutes)?;
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| "配置写入锁已损坏".to_owned())?;
+        let mut next_data = data.clone();
+        next_data.settings.discovery_interval_minutes = minutes;
+        self.persist(&next_data)?;
+        *data = next_data;
+        Ok(data.settings.clone())
+    }
+
+    pub fn publish_online_devices(
+        &self,
+        app: &AppHandle,
+        devices: Vec<DiscoveredMonitorDevice>,
+    ) -> Vec<DiscoveredMonitorDevice> {
+        let devices = if let Ok(mut missed_scans) = self.discovery_missed_scans.lock() {
+            let previous = self
+                .online_devices
+                .read()
+                .map_or_else(|_| Vec::new(), |current| current.clone());
+            stabilize_discovered_devices(&previous, devices, &mut missed_scans)
+        } else {
+            devices
+        };
         if self.replace_online_devices(&devices) {
-            let _ = app.emit(MONITOR_DEVICES_CHANGED_EVENT, devices);
+            let _ = app.emit(MONITOR_DEVICES_CHANGED_EVENT, devices.clone());
         }
+        devices
     }
 
     fn replace_online_devices(&self, devices: &[DiscoveredMonitorDevice]) -> bool {
@@ -624,15 +681,30 @@ impl MonitorService {
         Ok(data.settings.clone())
     }
 
-    /// 设备发现的主入口：优先使用 mDNS（更快、支持局域网内跨网段发现），
-    /// 找不到结果或出错时回退到向每张网卡发送 UDP 广播。两者都失败才报错。
+    /// 设备发现的主入口：mDNS 和 UDP 广播总是都跑一遍并按设备 id 合并结果，
+    /// 而不是任一路先返回非空结果就跳过另一路——两台设备可能只有其中一台
+    /// 的 mDNS 广播能穿透当前网络（多播被 AP 丢弃、跨 VLAN 等），仅在其中一路
+    /// 发现了设备时就放弃另一路会把只靠 UDP 广播现身的设备从列表里漏掉。
+    /// 只有两路都出错才报错。
     pub(crate) fn discover_device_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
-        match Self::discover_mdns_candidates() {
-            Ok(candidates) if !candidates.is_empty() => Ok(candidates),
-            Ok(_) => discover_udp_candidates(),
-            Err(mdns_error) => discover_udp_candidates().map_err(|udp_error| {
-                format!("mDNS 发现失败：{mdns_error}；UDP 广播发现失败：{udp_error}")
-            }),
+        let (mdns_result, udp_result) = thread::scope(|scope| {
+            let mdns = scope.spawn(Self::discover_mdns_candidates);
+            let udp = scope.spawn(discover_udp_candidates);
+            (
+                mdns.join()
+                    .unwrap_or_else(|_| Err("mDNS 发现线程异常退出".to_owned())),
+                udp.join()
+                    .unwrap_or_else(|_| Err("UDP 发现线程异常退出".to_owned())),
+            )
+        });
+        match (mdns_result, udp_result) {
+            (Ok(mdns_candidates), Ok(udp_candidates)) => {
+                Ok(merge_discovery_candidates(mdns_candidates, udp_candidates))
+            }
+            (Ok(candidates), Err(_)) | (Err(_), Ok(candidates)) => Ok(candidates),
+            (Err(mdns_error), Err(udp_error)) => Err(format!(
+                "mDNS 发现失败：{mdns_error}；UDP 广播发现失败：{udp_error}"
+            )),
         }
     }
 
@@ -1009,6 +1081,10 @@ impl MonitorService {
     }
 
     pub fn write_hook_config(&self, tool: AiTool) -> Result<HookConfigWriteResult, String> {
+        let _write_guard = self
+            .hook_config_write_lock
+            .lock()
+            .map_err(|_| "Hooks 配置写入锁已损坏".to_owned())?;
         let data = self
             .data
             .read()
@@ -1035,25 +1111,6 @@ impl MonitorService {
             filename: merged.filename,
             config_changed,
         })
-    }
-
-    pub fn local_hook_configs(&self) -> Result<Vec<LocalHookConfig>, String> {
-        let data = self
-            .data
-            .read()
-            .map_err(|_| "Hooks 路径读取锁已损坏".to_owned())?;
-        AiTool::ALL
-            .into_iter()
-            .map(|tool| {
-                let config_path = self.hook_config_path(&data, tool);
-                let content = read_optional_config(&config_path)?;
-                Ok(inspect_local_hook_config(
-                    tool,
-                    config_path.to_string_lossy().into_owned(),
-                    content,
-                ))
-            })
-            .collect()
     }
 
     fn hook_config_location(&self, data: &SavedMonitorData, tool: AiTool) -> HookConfigLocation {
@@ -1224,35 +1281,77 @@ fn relay_hook(
         HookTransition::Display(behavior) => Some(behavior),
         HookTransition::Release => None,
     };
+    let (forwarded, errors) = forward_to_all_targets(
+        client,
+        status,
+        tool,
+        transition,
+        &snapshot.settings.username,
+        targets,
+        &online_snapshot,
+    );
+    record_hook_results(status, tool, hook_type, behavior, forwarded, &errors);
+}
+
+/// 并发转发给每台已配置该 AI 的设备：先一次性 spawn 所有目标的转发线程，
+/// 再统一 join，这样单台设备网络慢或不可达时不会拖慢其余设备收到状态更新的
+/// 时间；每台设备的成功/失败互不影响。
+fn forward_to_all_targets(
+    client: &reqwest::blocking::Client,
+    status: &Arc<RwLock<HookRelayStatus>>,
+    tool: AiTool,
+    transition: HookTransition,
+    username: &str,
+    targets: Vec<(&MonitorDeviceRoute, &AiProfile)>,
+    online_snapshot: &[DiscoveredMonitorDevice],
+) -> (u64, Vec<String>) {
+    let outcomes = thread::scope(|scope| {
+        targets
+            .into_iter()
+            .map(|(saved_device, profile)| {
+                let online_device = online_snapshot
+                    .iter()
+                    .find(|device| device.id == saved_device.device_id);
+                let effective_device = online_device.map_or_else(
+                    || saved_device.clone(),
+                    |device| MonitorDeviceRoute {
+                        base_url: device.base_url.clone(),
+                        device_id: device.id.clone(),
+                        device_name: device.name.clone(),
+                    },
+                );
+                scope.spawn(move || {
+                    let result = forward_profile(
+                        client,
+                        status,
+                        tool,
+                        transition,
+                        username,
+                        &effective_device,
+                        profile,
+                    );
+                    (effective_device.device_name, result)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| ("未知设备".to_owned(), Err("转发线程异常终止".to_owned())))
+            })
+            .collect::<Vec<_>>()
+    });
+
     let mut forwarded = 0_u64;
     let mut errors = Vec::new();
-    for (saved_device, profile) in targets {
-        let online_device = online_snapshot
-            .iter()
-            .find(|device| device.id == saved_device.device_id);
-        let effective_device = online_device.map_or_else(
-            || saved_device.clone(),
-            |device| MonitorDeviceRoute {
-                base_url: device.base_url.clone(),
-                device_id: device.id.clone(),
-                device_name: device.name.clone(),
-            },
-        );
-        let result = forward_profile(
-            client,
-            status,
-            tool,
-            transition,
-            &snapshot.settings.username,
-            &effective_device,
-            profile,
-        );
+    for (device_name, result) in outcomes {
         match result {
             Ok(()) => forwarded += 1,
-            Err(error) => errors.push(format!("{}：{error}", effective_device.device_name)),
+            Err(error) => errors.push(format!("{device_name}：{error}")),
         }
     }
-    record_hook_results(status, tool, hook_type, behavior, forwarded, &errors);
+    (forwarded, errors)
 }
 
 fn forward_profile(
@@ -1646,6 +1745,7 @@ mod tests {
                 username: "Manon".to_owned(),
                 device_id: "screen-1".to_owned(),
                 device_name: "Desk".to_owned(),
+                ..MonitorSettings::default()
             },
             devices: vec![MonitorDeviceRoute {
                 base_url: format!("http://{address}"),
@@ -1731,6 +1831,7 @@ mod tests {
                 username: "Desk user".to_owned(),
                 device_id: "screen-1".to_owned(),
                 device_name: "Desk".to_owned(),
+                ..MonitorSettings::default()
             },
             devices: vec![
                 MonitorDeviceRoute {
@@ -1774,6 +1875,106 @@ mod tests {
         assert_eq!(status.forwarded_count, 1);
         assert_eq!(status.failed_count, 1);
         assert!(status.last_error.contains("Desk"));
+    }
+
+    /// 启动一个只接受一次连接、读完完整请求后先睡眠再回 200 的测试服务器，
+    /// 用来验证多设备转发是否真的并发执行（而不是排队等前一台超时/变慢）。
+    fn slow_test_server(delay: Duration) -> (SocketAddr, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            loop {
+                let length = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..length]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let header_end = header_end + 4;
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .split("\r\n")
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                if request.len() >= header_end + content_length {
+                    break;
+                }
+            }
+            thread::sleep(delay);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        (address, handle)
+    }
+
+    #[test]
+    fn relay_forwards_to_multiple_devices_concurrently_instead_of_one_at_a_time() {
+        let delay = Duration::from_millis(400);
+        let (address_one, server_one) = slow_test_server(delay);
+        let (address_two, server_two) = slow_test_server(delay);
+
+        let mut second_profile = test_profile();
+        second_profile.device_id = "screen-2".to_owned();
+        second_profile.slot = 7;
+        let data = Arc::new(RwLock::new(SavedMonitorData {
+            settings: MonitorSettings {
+                base_url: format!("http://{address_one}"),
+                username: "Manon".to_owned(),
+                device_id: "screen-1".to_owned(),
+                device_name: "Desk".to_owned(),
+                ..MonitorSettings::default()
+            },
+            devices: vec![
+                MonitorDeviceRoute {
+                    base_url: format!("http://{address_one}"),
+                    device_id: "screen-1".to_owned(),
+                    device_name: "Desk".to_owned(),
+                },
+                MonitorDeviceRoute {
+                    base_url: format!("http://{address_two}"),
+                    device_id: "screen-2".to_owned(),
+                    device_name: "Studio".to_owned(),
+                },
+            ],
+            profiles: vec![test_profile(), second_profile],
+            hook_config_directories: HookConfigDirectories::default(),
+        }));
+        let status = Arc::new(RwLock::new(HookRelayStatus::default()));
+        let online_devices = Arc::new(RwLock::new(Vec::new()));
+        // Built and warmed up before starting the clock: constructing a
+        // blocking::Client spins up its background runtime, which is a
+        // one-off cost unrelated to what this test measures.
+        let client = reqwest::blocking::Client::new();
+
+        let started = Instant::now();
+        relay_hook(
+            &client,
+            &data,
+            &online_devices,
+            &status,
+            AiTool::Codex,
+            "UserPromptSubmit",
+        );
+        let elapsed = started.elapsed();
+
+        server_one.join().unwrap();
+        server_two.join().unwrap();
+        assert_eq!(status.read().unwrap().forwarded_count, 2);
+        assert!(
+            elapsed < delay * 2,
+            "two devices answering in {delay:?} should overlap, not add up (took {elapsed:?})"
+        );
     }
 
     #[test]
@@ -1890,60 +2091,6 @@ mod tests {
     }
 
     #[test]
-    fn loading_legacy_profiles_uses_their_obsolete_target_device_id() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ai-monitor-route-migration-{}-{unique}",
-            std::process::id()
-        ));
-        let app_data = root.join("app-data");
-        let config_home = root.join("home");
-        fs::create_dir_all(&app_data).unwrap();
-        fs::write(
-            app_data.join(STORE_FILENAME),
-            r#"{
-              "settings": {
-                "baseUrl": "http://192.168.1.77:8080",
-                "username": "Manon",
-                "deviceId": "legacy-screen",
-                "deviceName": "Legacy Screen"
-              },
-              "profiles": [{
-                "tool": "codex",
-                "slot": 7,
-                "targetDeviceId": "obsolete-screen",
-                "targetDeviceName": "Obsolete Screen",
-                "targetBaseUrl": "http://192.168.1.88:8080",
-                "hooks": [
-                  {"behavior":"idle","content":"","image":"idle.png"},
-                  {"behavior":"running","content":"","image":"running.png"},
-                  {"behavior":"asking","content":"","image":"asking.png"},
-                  {"behavior":"error","content":"","image":"error.png"}
-                ]
-              }]
-            }"#,
-        )
-        .unwrap();
-
-        let service = MonitorService::load(&app_data, &config_home).unwrap();
-        assert!(service.profiles().unwrap().is_empty());
-        let saved = service.data.read().unwrap();
-        let profile = saved.profiles[0].clone();
-
-        assert_eq!(profile.device_id, "obsolete-screen");
-        assert_eq!(profile.tool, AiTool::Codex);
-        assert_eq!(profile.slot, 7);
-        assert_eq!(saved.devices.len(), 1);
-        assert_eq!(saved.devices[0].device_id, "legacy-screen");
-        assert_eq!(saved.settings.username, "Manon");
-        drop(saved);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn batch_image_validation_checks_every_file_before_upload() {
         let images = vec![
             ImageUpload {
@@ -1993,6 +2140,144 @@ mod tests {
         urls.sort_by_key(|url| candidate_url_priority(url));
 
         assert_eq!(urls[0], "http://192.168.50.20:8080");
+    }
+
+    fn discovery_candidate(
+        id: &str,
+        name: &str,
+        base_url: &str,
+        source: DiscoverySource,
+    ) -> DiscoveryCandidate {
+        DiscoveryCandidate {
+            device: DiscoveredMonitorDevice {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                api_version: "1".to_owned(),
+                base_url: base_url.to_owned(),
+                path: DEFAULT_DEVICE_API_PATH.to_owned(),
+                discovery_source: source,
+            },
+            base_urls: vec![base_url.to_owned()],
+        }
+    }
+
+    #[test]
+    fn merging_discovery_sources_keeps_devices_only_seen_on_one_protocol() {
+        // Regression test: two physical devices both running the app, but only
+        // one of them answers mDNS reliably (e.g. multicast dropped by the AP)
+        // while both answer UDP broadcast. The old short-circuit logic
+        // (`if mdns non-empty, ignore udp entirely`) silently dropped the
+        // second device from the list.
+        let mdns_only = discovery_candidate(
+            "device-a",
+            "Living Room",
+            "http://192.168.1.10:8080",
+            DiscoverySource::Mdns,
+        );
+        let mdns_and_udp = discovery_candidate(
+            "device-c",
+            "Kitchen",
+            "http://192.168.1.30:8080",
+            DiscoverySource::Mdns,
+        );
+        let udp_only = discovery_candidate(
+            "device-b",
+            "Bedroom",
+            "http://192.168.1.20:8080",
+            DiscoverySource::UdpBroadcast,
+        );
+        let mut udp_duplicate_with_extra_address = discovery_candidate(
+            "device-c",
+            "Kitchen",
+            "http://192.168.1.30:8080",
+            DiscoverySource::UdpBroadcast,
+        );
+        udp_duplicate_with_extra_address.base_urls = vec!["http://192.168.1.31:8080".to_owned()];
+
+        let merged = merge_discovery_candidates(
+            vec![mdns_only, mdns_and_udp],
+            vec![udp_only, udp_duplicate_with_extra_address],
+        );
+
+        let ids = merged
+            .iter()
+            .map(|candidate| candidate.device.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids.len(),
+            3,
+            "mDNS-only, UDP-only and both-source devices must all survive the merge, got {ids:?}"
+        );
+        assert!(ids.contains(&"device-a"));
+        assert!(ids.contains(&"device-b"));
+
+        let kitchen = merged
+            .iter()
+            .find(|candidate| candidate.device.id == "device-c")
+            .unwrap();
+        assert_eq!(
+            kitchen.base_urls,
+            vec![
+                "http://192.168.1.30:8080".to_owned(),
+                "http://192.168.1.31:8080".to_owned(),
+            ],
+            "addresses discovered via both protocols for the same device should be unioned"
+        );
+    }
+
+    #[test]
+    fn online_snapshot_requires_two_consecutive_misses_before_removing_a_device() {
+        let device_a = discovery_candidate(
+            "device-a",
+            "Desk",
+            "http://192.168.1.10:8080",
+            DiscoverySource::Mdns,
+        )
+        .device;
+        let device_b = discovery_candidate(
+            "device-b",
+            "Studio",
+            "http://192.168.1.20:8080",
+            DiscoverySource::UdpBroadcast,
+        )
+        .device;
+        let previous = vec![device_a.clone(), device_b.clone()];
+        let mut missed_scans = HashMap::new();
+
+        let after_one_miss =
+            stabilize_discovered_devices(&previous, vec![device_a.clone()], &mut missed_scans);
+        assert_eq!(after_one_miss.len(), 2);
+
+        let after_two_misses = stabilize_discovered_devices(
+            &after_one_miss,
+            vec![device_a.clone()],
+            &mut missed_scans,
+        );
+        assert_eq!(after_two_misses, vec![device_a]);
+        assert_eq!(missed_scans.get("device-b"), Some(&2));
+    }
+
+    #[test]
+    fn discovery_interval_is_saved_and_read_back_without_restarting_the_service() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-discovery-interval-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("home");
+        fs::create_dir_all(&app_data).unwrap();
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+
+        assert_eq!(service.discovery_interval(), Duration::from_mins(1));
+        assert!(service.save_discovery_interval(0).is_err());
+
+        let updated = service.save_discovery_interval(15).unwrap();
+        assert_eq!(updated.discovery_interval_minutes, 15);
+        assert_eq!(service.discovery_interval(), Duration::from_mins(15));
     }
 
     #[test]
@@ -2122,22 +2407,21 @@ mod tests {
                 claude_code: config_home.join(".claude").to_string_lossy().into_owned(),
                 cursor: config_home.join(".cursor").to_string_lossy().into_owned(),
             },
-            legacy_runner_paths: [
-                root.join(LEGACY_POSIX_RUNNER_FILENAME),
-                root.join(LEGACY_WINDOWS_RUNNER_FILENAME),
-            ],
             data: Arc::new(RwLock::new(SavedMonitorData {
                 settings: MonitorSettings {
                     base_url: "http://127.0.0.1:8080".to_owned(),
                     username: "tester".to_owned(),
                     device_id: "device-1".to_owned(),
                     device_name: "monitor".to_owned(),
+                    ..MonitorSettings::default()
                 },
                 devices: Vec::new(),
                 profiles: Vec::new(),
                 hook_config_directories: HookConfigDirectories::default(),
             })),
             online_devices: Arc::new(RwLock::new(Vec::new())),
+            discovery_missed_scans: Arc::new(Mutex::new(HashMap::new())),
+            hook_config_write_lock: Arc::new(Mutex::new(())),
             relay_status: Arc::new(RwLock::new(HookRelayStatus::default())),
         };
 
@@ -2173,8 +2457,6 @@ mod tests {
                 discovery_source: DiscoverySource::Mdns,
             })
             .unwrap();
-        fs::write(app_data.join(LEGACY_POSIX_RUNNER_FILENAME), "legacy").unwrap();
-        fs::write(app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME), "legacy").unwrap();
         let custom_directory = root.join("custom-codex");
         let detected_directory = service
             .hook_config_locations()
@@ -2198,20 +2480,6 @@ mod tests {
         service.write_hook_config(AiTool::Codex).unwrap();
         assert!(custom_directory.join("hooks.json").exists());
         assert!(!config_home.join(".codex/hooks.json").exists());
-        assert!(app_data.join(LEGACY_POSIX_RUNNER_FILENAME).exists());
-        assert!(app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME).exists());
-        service.start_legacy_hook_cleanup();
-        for _ in 0..100 {
-            if !app_data.join(LEGACY_POSIX_RUNNER_FILENAME).exists()
-                && !app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME).exists()
-            {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!app_data.join(LEGACY_POSIX_RUNNER_FILENAME).exists());
-        assert!(!app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME).exists());
-
         let reloaded = MonitorService::load(&app_data, &config_home).unwrap();
         let reloaded_location = reloaded
             .hook_config_locations()
@@ -2227,61 +2495,6 @@ mod tests {
             .unwrap();
         assert!(!default_location.is_custom);
         assert_eq!(default_location.directory, detected_directory);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn background_cleanup_removes_old_markers_and_preserves_aimonitor_entries() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ai-monitor-background-cleanup-{}-{unique}",
-            std::process::id()
-        ));
-        let app_data = root.join("app-data");
-        let config_home = root.join("home");
-        let codex_dir = config_home.join(".codex");
-        fs::create_dir_all(&app_data).unwrap();
-        fs::create_dir_all(&codex_dir).unwrap();
-        let config_path = codex_dir.join("hooks.json");
-        fs::write(
-            &config_path,
-            r#"{
-              "hooks": {
-                "Stop": [
-                  { "hooks": [{ "type":"command", "command":"custom hook" }] },
-                  { "hooks": [{ "type":"command", "command":": 'aimonitor-managed-hook:v1|target=http://old'; curl old" }] },
-                  { "hooks": [{ "type":"command", "command":": 'aimonitor-managed-hook:v3|tool=codex'; curl old-direct" }] },
-                  { "hooks": [{ "type":"command", "command":": 'AIMonitor|tool=codex'; curl new" }] }
-                ]
-              }
-            }"#,
-        )
-        .unwrap();
-        fs::write(app_data.join(LEGACY_POSIX_RUNNER_FILENAME), "legacy").unwrap();
-        fs::write(app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME), "legacy").unwrap();
-        let service = MonitorService::load(&app_data, &config_home).unwrap();
-
-        service.start_legacy_hook_cleanup();
-
-        let mut cleaned = String::new();
-        for _ in 0..100 {
-            cleaned = fs::read_to_string(&config_path).unwrap();
-            if !cleaned.contains("aimonitor-managed-hook")
-                && !app_data.join(LEGACY_POSIX_RUNNER_FILENAME).exists()
-                && !app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME).exists()
-            {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!cleaned.contains("aimonitor-managed-hook"));
-        assert!(cleaned.contains("custom hook"));
-        assert!(cleaned.contains("AIMonitor|tool=codex"));
-        assert!(!app_data.join(LEGACY_POSIX_RUNNER_FILENAME).exists());
-        assert!(!app_data.join(LEGACY_WINDOWS_RUNNER_FILENAME).exists());
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,50 +1,16 @@
 use std::collections::HashSet;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 const DEFAULT_BASE_URL: &str = "http://192.168.1.100:8080";
-const LEGACY_MANAGED_HOOK_PREFIX: &str = "aimonitor-managed-hook:v1|target=";
-const SCRIPT_MANAGED_HOOK_PREFIX: &str = "aimonitor-managed-hook:v2|tool=";
-const DIRECT_MANAGED_HOOK_PREFIX: &str = "aimonitor-managed-hook:v3|tool=";
 const MANAGED_HOOK_PREFIX: &str = "AIMonitor";
 pub const DEFAULT_HOOK_RELAY_PORT: u16 = 10_240;
-const CODEX_HOOK_EVENTS: [&str; 11] = [
-    "SessionStart",
-    "SessionEnd",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PermissionRequest",
-    "PostToolUse",
-    "PreCompact",
-    "PostCompact",
-    "SubagentStart",
-    "SubagentStop",
-    "Stop",
-];
-const CURSOR_HOOK_EVENTS: [&str; 21] = [
-    "beforeShellExecution",
-    "beforeMCPExecution",
-    "afterShellExecution",
-    "afterMCPExecution",
-    "beforeReadFile",
-    "afterFileEdit",
-    "beforeTabFileRead",
-    "afterTabFileEdit",
-    "stop",
-    "beforeSubmitPrompt",
-    "afterAgentResponse",
-    "afterAgentThought",
-    "sessionStart",
-    "sessionEnd",
-    "preCompact",
-    "subagentStart",
-    "subagentStop",
-    "preToolUse",
-    "postToolUse",
-    "postToolUseFailure",
-    "workspaceOpen",
-];
+/// 在线设备自动检查的默认间隔：启动后立即检查一次，之后每分钟刷新。
+pub const DEFAULT_DISCOVERY_INTERVAL_MINUTES: u64 = 1;
+pub const MIN_DISCOVERY_INTERVAL_MINUTES: u64 = 1;
+pub const MAX_DISCOVERY_INTERVAL_MINUTES: u64 = 60;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +24,13 @@ pub struct MonitorSettings {
     pub device_id: String,
     #[serde(default)]
     pub device_name: String,
+    /// 在线设备自动检查间隔（分钟）。修改后由后台发现循环下一次轮询立即生效。
+    #[serde(default = "default_discovery_interval_minutes")]
+    pub discovery_interval_minutes: u64,
+}
+
+fn default_discovery_interval_minutes() -> u64 {
+    DEFAULT_DISCOVERY_INTERVAL_MINUTES
 }
 
 impl Default for MonitorSettings {
@@ -67,8 +40,20 @@ impl Default for MonitorSettings {
             base_url: DEFAULT_BASE_URL.to_owned(),
             device_id: String::new(),
             device_name: String::new(),
+            discovery_interval_minutes: DEFAULT_DISCOVERY_INTERVAL_MINUTES,
         }
     }
+}
+
+/// 校验用户在设置页填写的自动检查间隔，防止 0（忙轮询）或过大的值
+/// （长时间感知不到设备上下线）。
+pub fn validate_discovery_interval_minutes(minutes: u64) -> Result<u64, String> {
+    if !(MIN_DISCOVERY_INTERVAL_MINUTES..=MAX_DISCOVERY_INTERVAL_MINUTES).contains(&minutes) {
+        return Err(format!(
+            "自动检查间隔必须在 {MIN_DISCOVERY_INTERVAL_MINUTES} 到 {MAX_DISCOVERY_INTERVAL_MINUTES} 分钟之间"
+        ));
+    }
+    Ok(minutes)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -123,16 +108,6 @@ pub enum HookBehavior {
     Running,
     Asking,
     Error,
-    // Legacy variants are accepted so persisted v1 profiles can be migrated.
-    SessionStart,
-    SessionEnd,
-    BeforePrompt,
-    BeforeTool,
-    AfterTool,
-    BeforeCompact,
-    SubagentStart,
-    SubagentStop,
-    Stop,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -148,8 +123,8 @@ pub struct HookContent {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiProfile {
-    /// Profile 所属的 `AIMonitor` 设备。旧版 `targetDeviceId` 会迁移到此字段。
-    #[serde(default, alias = "targetDeviceId")]
+    /// Profile 所属的 `AIMonitor` 设备。
+    #[serde(default)]
     pub device_id: String,
     pub tool: AiTool,
     /// 在展示屏上的显示位置，取值范围 1-25（校验见 `validate_profile`）。
@@ -177,21 +152,6 @@ pub struct HookConfigWriteResult {
     /// 仅当写入的是 Codex 且配置发生变化时为真：需要提示用户重启 Codex
     /// 才能使新的 hooks 配置生效。
     pub restart_required: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalHookConfig {
-    pub tool: AiTool,
-    pub filename: String,
-    pub exists: bool,
-    pub valid: bool,
-    /// 现有托管条目是否直接指向固定的本机中继地址，无需外部 runner。
-    pub direct_relay: bool,
-    pub error: String,
-    /// 从现有配置中解析出的、由本工具托管写入的事件名列表（去重排序）。
-    pub managed_targets: Vec<String>,
-    pub content: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -244,6 +204,66 @@ pub struct SavedMonitorData {
     pub profiles: Vec<AiProfile>,
     #[serde(default)]
     pub hook_config_directories: HookConfigDirectories,
+}
+
+/// 在应用接纳持久化数据前验证跨集合不变量，避免损坏或部分写入的数据让
+/// “当前设备”、设备路由和 Profile 指向不同事实来源。
+pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String> {
+    normalize_base_url(&data.settings.base_url)?;
+    validate_discovery_interval_minutes(data.settings.discovery_interval_minutes)?;
+    if !data.settings.username.is_empty() {
+        validate_username(&data.settings.username)?;
+    }
+
+    let mut device_ids = HashSet::new();
+    for device in &data.devices {
+        if device.device_id.trim().is_empty() || device.device_name.trim().is_empty() {
+            return Err("持久化设备路由缺少设备 ID 或名称".to_owned());
+        }
+        normalize_base_url(&device.base_url)?;
+        if !device_ids.insert(device.device_id.as_str()) {
+            return Err(format!("设备路由重复：{}", device.device_id));
+        }
+    }
+
+    if !data.settings.device_id.is_empty() {
+        let selected = data
+            .devices
+            .iter()
+            .find(|device| device.device_id == data.settings.device_id)
+            .ok_or_else(|| "当前设备缺少对应的持久化路由".to_owned())?;
+        if selected.base_url != data.settings.base_url
+            || selected.device_name != data.settings.device_name
+        {
+            return Err("当前设备设置与持久化路由不一致".to_owned());
+        }
+    }
+
+    let mut profile_keys = HashSet::new();
+    for profile in &data.profiles {
+        if profile.device_id.trim().is_empty() || !device_ids.contains(profile.device_id.as_str()) {
+            return Err("AI 配置关联了不存在的设备".to_owned());
+        }
+        validate_profile(profile.clone())?;
+        if !profile_keys.insert((profile.device_id.as_str(), profile.tool)) {
+            return Err(format!(
+                "设备 {} 的 {} AI 配置重复",
+                profile.device_id,
+                ai_tool_name(profile.tool)
+            ));
+        }
+    }
+
+    for directory in [
+        &data.hook_config_directories.codex,
+        &data.hook_config_directories.claude_code,
+        &data.hook_config_directories.cursor,
+    ] {
+        if !directory.is_empty() && !Path::new(directory).is_absolute() {
+            return Err("持久化 Hooks 配置目录必须使用绝对路径".to_owned());
+        }
+    }
+    Ok(())
 }
 
 pub fn hook_config_filename(tool: AiTool) -> &'static str {
@@ -316,7 +336,7 @@ pub fn validate_profile(mut profile: AiProfile) -> Result<AiProfile, String> {
             return Err("每个行为都必须选择图片".to_owned());
         }
         if !hook.behavior.is_display_behavior() {
-            return Err("配置中包含已停用的旧行为".to_owned());
+            return Err("配置中包含不支持的行为".to_owned());
         }
         if !behaviors.insert(hook.behavior) {
             return Err("同一行为不能重复配置".to_owned());
@@ -445,42 +465,6 @@ pub fn merge_hook_config(
         content: serde_json::to_string_pretty(&existing)
             .map_err(|error| format!("无法生成合并后的 Hooks 配置：{error}"))?,
     })
-}
-
-/// 从一个工具的 Hooks 配置中删除 `AIMonitor` v1/v2/v3 写入的旧条目。
-/// 新的 `AIMonitor` 标识不会被删除，用户和其他应用的条目保持不变。
-pub fn cleanup_legacy_hook_config(content: &str, tool: AiTool) -> Result<Option<String>, String> {
-    let mut value = serde_json::from_str::<Value>(content)
-        .map_err(|error| format!("旧 Hooks 配置格式错误：{error}"))?;
-    let hooks = value
-        .as_object_mut()
-        .and_then(|root| root.get_mut("hooks"))
-        .and_then(Value::as_object_mut);
-    let Some(hooks) = hooks else {
-        return Ok(None);
-    };
-
-    let mut changed = false;
-    let events = hooks.keys().cloned().collect::<Vec<_>>();
-    for event in events {
-        let should_remove = hooks.get_mut(&event).is_some_and(|entries| {
-            let Some(entries) = entries.as_array_mut() else {
-                return false;
-            };
-            let removed = remove_legacy_managed_entries(entries, tool);
-            changed |= removed;
-            removed && entries.is_empty()
-        });
-        if should_remove {
-            hooks.remove(&event);
-        }
-    }
-    if !changed {
-        return Ok(None);
-    }
-    serde_json::to_string_pretty(&value)
-        .map(Some)
-        .map_err(|error| format!("无法序列化清理后的 Hooks 配置：{error}"))
 }
 
 impl HookBehavior {
@@ -689,43 +673,6 @@ fn remove_managed_entries(entries: &mut Vec<Value>, tool: AiTool) {
     });
 }
 
-fn remove_legacy_managed_entries(entries: &mut Vec<Value>, tool: AiTool) -> bool {
-    let before = entries.len();
-    if tool == AiTool::Cursor {
-        entries.retain(|entry| !entry_is_legacy_managed(entry));
-        return entries.len() != before;
-    }
-
-    let mut removed = false;
-    entries.retain_mut(|group| {
-        let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-            return true;
-        };
-        let handler_count = handlers.len();
-        handlers.retain(|handler| !entry_is_legacy_managed(handler));
-        removed |= handlers.len() != handler_count;
-        !handlers.is_empty()
-    });
-    removed
-}
-
-fn entry_is_legacy_managed(entry: &Value) -> bool {
-    ["command", "commandWindows"]
-        .into_iter()
-        .filter_map(|key| entry.get(key).and_then(Value::as_str))
-        .any(|command| {
-            decoded_hook_command(command).is_some_and(|decoded| {
-                [
-                    LEGACY_MANAGED_HOOK_PREFIX,
-                    SCRIPT_MANAGED_HOOK_PREFIX,
-                    DIRECT_MANAGED_HOOK_PREFIX,
-                ]
-                .iter()
-                .any(|prefix| decoded.contains(prefix))
-            })
-        })
-}
-
 fn entry_is_managed(entry: &Value, tool: AiTool) -> bool {
     ["command", "commandWindows"]
         .into_iter()
@@ -785,228 +732,12 @@ const fn ai_tool_slug(tool: AiTool) -> &'static str {
     }
 }
 
-pub fn inspect_local_hook_config(
-    tool: AiTool,
-    filename: String,
-    content: Option<String>,
-) -> LocalHookConfig {
-    let Some(content) = content else {
-        return LocalHookConfig {
-            tool,
-            filename,
-            exists: false,
-            valid: true,
-            direct_relay: false,
-            error: String::new(),
-            managed_targets: Vec::new(),
-            content: String::new(),
-        };
-    };
-
-    match serde_json::from_str::<Value>(&content) {
-        Ok(value) => {
-            let mut managed_targets = Vec::new();
-            collect_managed_targets(&value, &mut managed_targets);
-            let direct_relay = contains_direct_relay(&value);
-            managed_targets.sort();
-            managed_targets.dedup();
-            let error = validate_local_hook_shape(tool, &value)
-                .err()
-                .unwrap_or_default();
-            LocalHookConfig {
-                tool,
-                filename,
-                exists: true,
-                valid: error.is_empty(),
-                direct_relay,
-                error,
-                managed_targets,
-                content,
-            }
-        }
-        Err(error) => LocalHookConfig {
-            tool,
-            filename,
-            exists: true,
-            valid: false,
-            direct_relay: false,
-            error: format!("JSON 格式错误：{error}"),
-            managed_targets: Vec::new(),
-            content,
-        },
-    }
-}
-
-fn contains_direct_relay(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => {
-            ["command", "commandWindows"]
-                .into_iter()
-                .filter_map(|key| object.get(key).and_then(Value::as_str))
-                .any(|command| {
-                    decoded_hook_command(command)
-                        .is_some_and(|decoded| decoded.contains(MANAGED_HOOK_PREFIX))
-                })
-                || object.values().any(contains_direct_relay)
-        }
-        Value::Array(items) => items.iter().any(contains_direct_relay),
-        _ => false,
-    }
-}
-
-fn validate_local_hook_shape(tool: AiTool, value: &Value) -> Result<(), String> {
-    let root = value
-        .as_object()
-        .ok_or_else(|| "配置根节点必须是对象".to_owned())?;
-    let Some(hooks) = root.get("hooks") else {
-        return Ok(());
-    };
-    let hooks = hooks
-        .as_object()
-        .ok_or_else(|| "hooks 必须是对象".to_owned())?;
-
-    for (event, entries) in hooks {
-        let entries = entries
-            .as_array()
-            .ok_or_else(|| format!("{event} 必须是数组"))?;
-        if tool == AiTool::Codex && !CODEX_HOOK_EVENTS.contains(&event.as_str()) {
-            return Err(format!("当前 Codex Desktop 不支持 Hook 事件：{event}"));
-        }
-        if tool == AiTool::Cursor && !CURSOR_HOOK_EVENTS.contains(&event.as_str()) {
-            return Err(format!("不支持的 Cursor Hook 事件：{event}"));
-        }
-        validate_hook_entries(tool, event, entries)?;
-    }
-    Ok(())
-}
-
-fn validate_hook_entries(tool: AiTool, event: &str, entries: &[Value]) -> Result<(), String> {
-    for (index, entry) in entries.iter().enumerate() {
-        let entry = entry
-            .as_object()
-            .ok_or_else(|| format!("{event}[{index}] 必须是对象"))?;
-        if tool == AiTool::Cursor {
-            let command = entry.get("command").and_then(Value::as_str).unwrap_or("");
-            if command.trim().is_empty() {
-                return Err(format!("{event}[{index}].command 必须是非空字符串"));
-            }
-            continue;
-        }
-
-        let handlers = entry
-            .get("hooks")
-            .and_then(Value::as_array)
-            .ok_or_else(|| format!("{event}[{index}].hooks 必须是数组"))?;
-        if handlers.is_empty() {
-            return Err(format!("{event}[{index}].hooks 不能为空"));
-        }
-        for (handler_index, handler) in handlers.iter().enumerate() {
-            let handler = handler
-                .as_object()
-                .ok_or_else(|| format!("{event}[{index}].hooks[{handler_index}] 必须是对象"))?;
-            let handler_type = handler.get("type").and_then(Value::as_str).unwrap_or("");
-            if handler_type.trim().is_empty() {
-                return Err(format!(
-                    "{event}[{index}].hooks[{handler_index}].type 必须是非空字符串"
-                ));
-            }
-            if handler_type == "command" {
-                let command = handler.get("command").and_then(Value::as_str).unwrap_or("");
-                if command.trim().is_empty() {
-                    return Err(format!(
-                        "{event}[{index}].hooks[{handler_index}].command 必须是非空字符串"
-                    ));
-                }
-                if let Some(command_windows) = handler.get("commandWindows")
-                    && command_windows.as_str().is_none_or(str::is_empty)
-                {
-                    return Err(format!(
-                        "{event}[{index}].hooks[{handler_index}].commandWindows 必须是非空字符串"
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn collect_managed_targets(value: &Value, targets: &mut Vec<String>) {
-    match value {
-        Value::Object(object) => {
-            for key in ["command", "commandWindows"] {
-                if let Some(command) = object.get(key).and_then(Value::as_str)
-                    && let Some(decoded) = decoded_hook_command(command)
-                    && let Some(marker_start) = decoded.find(LEGACY_MANAGED_HOOK_PREFIX)
-                {
-                    let target_start = marker_start + LEGACY_MANAGED_HOOK_PREFIX.len();
-                    let target = decoded[target_start..]
-                        .split_once('\'')
-                        .map_or(&decoded[target_start..], |(target, _)| target);
-                    if !target.is_empty() {
-                        targets.push(target.to_owned());
-                    }
-                }
-            }
-            for nested in object.values() {
-                collect_managed_targets(nested, targets);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_managed_targets(item, targets);
-            }
-        }
-        _ => {}
-    }
-}
-
 pub const fn ai_tool_name(tool: AiTool) -> &'static str {
     match tool {
         AiTool::Codex => "Codex",
         AiTool::ClaudeCode => "Claude Code",
         AiTool::Cursor => "Cursor",
     }
-}
-
-pub fn migrate_legacy_profile(profile: &mut AiProfile) {
-    profile.hooks = HookBehavior::DISPLAY_BEHAVIORS
-        .into_iter()
-        .map(|behavior| HookContent {
-            behavior,
-            content: find_migration_source(&profile.hooks, behavior)
-                .map_or_else(String::new, |hook| hook.content.clone()),
-            image: find_migration_source(&profile.hooks, behavior)
-                .map_or_else(String::new, |hook| hook.image.clone()),
-        })
-        .collect();
-}
-
-/// 为旧版（v1）细粒度行为找到对应的新版展示行为迁移来源，按优先级取第一个
-/// 已配置的旧行为内容；找不到则该展示行为迁移后为空，需要用户重新配置。
-fn find_migration_source(hooks: &[HookContent], behavior: HookBehavior) -> Option<&HookContent> {
-    let fallbacks: &[HookBehavior] = match behavior {
-        HookBehavior::Idle => &[
-            HookBehavior::Idle,
-            HookBehavior::Stop,
-            HookBehavior::SessionEnd,
-            HookBehavior::SessionStart,
-        ],
-        HookBehavior::Running => &[
-            HookBehavior::Running,
-            HookBehavior::BeforePrompt,
-            HookBehavior::BeforeTool,
-            HookBehavior::AfterTool,
-            HookBehavior::BeforeCompact,
-            HookBehavior::SubagentStart,
-            HookBehavior::SubagentStop,
-        ],
-        HookBehavior::Asking => &[HookBehavior::Asking],
-        HookBehavior::Error => &[HookBehavior::Error],
-        _ => &[],
-    };
-    fallbacks
-        .iter()
-        .find_map(|candidate| hooks.iter().find(|hook| hook.behavior == *candidate))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1026,11 +757,7 @@ fn command_has_marker(command: &str, marker: &str) -> bool {
 }
 
 fn decoded_hook_command(command: &str) -> Option<String> {
-    if command.contains(MANAGED_HOOK_PREFIX)
-        || command.contains(DIRECT_MANAGED_HOOK_PREFIX)
-        || command.contains(SCRIPT_MANAGED_HOOK_PREFIX)
-        || command.contains(LEGACY_MANAGED_HOOK_PREFIX)
-    {
+    if command.contains(MANAGED_HOOK_PREFIX) {
         return Some(command.to_owned());
     }
     let encoded = command
@@ -1119,11 +846,13 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        AiProfile, AiTool, DEFAULT_BASE_URL, HookBehavior, HookConfigPreview, HookContent,
-        HookTransition, LEGACY_MANAGED_HOOK_PREFIX, MANAGED_HOOK_PREFIX,
-        cleanup_legacy_hook_config, command_has_marker, decoded_hook_command, generate_hook_config,
-        hook_transition, inspect_local_hook_config, managed_hook_marker, merge_hook_config,
-        migrate_legacy_profile, normalize_base_url, validate_profile, validate_username,
+        AiProfile, AiTool, DEFAULT_BASE_URL, DEFAULT_DISCOVERY_INTERVAL_MINUTES, HookBehavior,
+        HookConfigDirectories, HookConfigPreview, HookContent, HookTransition, MANAGED_HOOK_PREFIX,
+        MAX_DISCOVERY_INTERVAL_MINUTES, MonitorDeviceRoute, MonitorSettings, SavedMonitorData,
+        command_has_marker, decoded_hook_command, generate_hook_config, hook_transition,
+        managed_hook_marker, merge_hook_config, normalize_base_url,
+        validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
+        validate_username,
     };
 
     fn profile(tool: AiTool) -> AiProfile {
@@ -1171,6 +900,21 @@ mod tests {
     }
 
     #[test]
+    fn discovery_interval_defaults_to_one_minute_and_rejects_out_of_range_values() {
+        assert_eq!(
+            MonitorSettings::default().discovery_interval_minutes,
+            DEFAULT_DISCOVERY_INTERVAL_MINUTES
+        );
+        assert_eq!(DEFAULT_DISCOVERY_INTERVAL_MINUTES, 1);
+        assert!(validate_discovery_interval_minutes(0).is_err());
+        assert!(validate_discovery_interval_minutes(MAX_DISCOVERY_INTERVAL_MINUTES + 1).is_err());
+        assert_eq!(
+            validate_discovery_interval_minutes(DEFAULT_DISCOVERY_INTERVAL_MINUTES).unwrap(),
+            DEFAULT_DISCOVERY_INTERVAL_MINUTES
+        );
+    }
+
+    #[test]
     fn profile_allows_empty_content_but_requires_an_image() {
         let mut invalid = profile(AiTool::Codex);
         invalid.hooks[0].image.clear();
@@ -1179,6 +923,36 @@ mod tests {
         let mut valid = profile(AiTool::Codex);
         valid.hooks[0].content.clear();
         assert!(validate_profile(valid).is_ok());
+    }
+
+    #[test]
+    fn persisted_data_rejects_duplicate_or_cross_device_profiles() {
+        let route = MonitorDeviceRoute {
+            base_url: "http://192.168.1.10:8080".to_owned(),
+            device_id: "device-1".to_owned(),
+            device_name: "Desk".to_owned(),
+        };
+        let settings = MonitorSettings {
+            base_url: route.base_url.clone(),
+            device_id: route.device_id.clone(),
+            device_name: route.device_name.clone(),
+            ..MonitorSettings::default()
+        };
+        let valid = SavedMonitorData {
+            settings,
+            devices: vec![route],
+            profiles: vec![profile(AiTool::Codex)],
+            hook_config_directories: HookConfigDirectories::default(),
+        };
+        assert!(validate_saved_monitor_data(&valid).is_ok());
+
+        let mut duplicate = valid.clone();
+        duplicate.profiles.push(profile(AiTool::Codex));
+        assert!(validate_saved_monitor_data(&duplicate).is_err());
+
+        let mut orphaned = valid;
+        orphaned.profiles[0].device_id = "unknown-device".to_owned();
+        assert!(validate_saved_monitor_data(&orphaned).is_err());
     }
 
     #[test]
@@ -1253,62 +1027,29 @@ mod tests {
             windows,
             &managed_hook_marker(AiTool::Codex)
         ));
-        assert!(!command_has_marker(
-            windows,
-            "aimonitor-managed-hook:v1|target=http://192.168.1.100:80800"
-        ));
     }
 
     #[test]
-    fn codex_local_config_rejects_events_not_supported_by_desktop() {
-        let inspected = inspect_local_hook_config(
-            AiTool::Codex,
-            ".codex/hooks.json".to_owned(),
-            Some(r#"{"hooks":{"Error":[]}}"#.to_owned()),
-        );
-
-        assert!(inspected.exists);
-        assert!(!inspected.valid);
-        assert!(inspected.error.contains("Codex Desktop"));
-    }
-
-    #[test]
-    fn legacy_cleanup_then_new_merge_preserves_other_commands() {
+    fn codex_merge_is_idempotent_and_preserves_other_commands() {
         let generated = generate_hook_config(profile(AiTool::Codex)).unwrap();
-        let existing = r#"{
-          "permissions": { "allow": ["Bash"] },
-          "hooks": {
-            "Stop": [
-              { "hooks": [{ "type": "command", "command": "other-app notify" }] },
-              { "hooks": [{ "type": "command", "command": ": 'aimonitor-managed-hook:v1|target=http://192.168.1.100:8080'; curl old" }] },
-              { "hooks": [{ "type": "command", "command": ": 'aimonitor-managed-hook:v1|target=http://10.0.0.5:8080'; curl other-network" }] },
-              { "hooks": [{ "type": "command", "command": ": 'aimonitor-managed-hook:v1|target=http://192.168.1.100:80800'; curl prefix-network" }] }
-            ],
-            "CustomEvent": [
-              { "hooks": [{ "type": "command", "command": "keep custom" }] }
-            ]
-          }
-        }"#;
-
-        let cleaned = cleanup_legacy_hook_config(existing, AiTool::Codex)
+        let first = merge_hook_config(None, &generated, AiTool::Codex).unwrap();
+        let mut value: Value = serde_json::from_str(&first.content).unwrap();
+        value["permissions"] = serde_json::json!({ "allow": ["Bash"] });
+        value["hooks"]["Stop"]
+            .as_array_mut()
             .unwrap()
-            .unwrap();
-        let merged = merge_hook_config(Some(&cleaned), &generated, AiTool::Codex).unwrap();
+            .push(serde_json::json!({
+                "hooks": [{ "type": "command", "command": "other-app notify" }]
+            }));
+        let existing = serde_json::to_string_pretty(&value).unwrap();
+        let merged = merge_hook_config(Some(&existing), &generated, AiTool::Codex).unwrap();
         let value: Value = serde_json::from_str(&merged.content).unwrap();
         let stop = value["hooks"]["Stop"].as_array().unwrap();
         let serialized = serde_json::to_string(stop).unwrap();
 
         assert_eq!(serialized.matches("other-app notify").count(), 1);
-        assert_eq!(serialized.matches("curl old").count(), 0);
-        assert_eq!(serialized.matches("curl other-network").count(), 0);
-        assert_eq!(serialized.matches("curl prefix-network").count(), 0);
         assert_eq!(serialized.matches(MANAGED_HOOK_PREFIX).count(), 1);
-        assert_eq!(serialized.matches(LEGACY_MANAGED_HOOK_PREFIX).count(), 0);
         assert_eq!(value["permissions"]["allow"][0], "Bash");
-        assert_eq!(
-            value["hooks"]["CustomEvent"][0]["hooks"][0]["command"],
-            "keep custom"
-        );
     }
 
     #[test]
@@ -1319,31 +1060,18 @@ mod tests {
           "hooks": {
             "stop": [
               { "command": "other-app stop" },
-              { "command": ": 'aimonitor-managed-hook:v2|tool=cursor'; /bin/sh '/tmp/aimonitor-hook.sh' cursor stop" }
-            ],
-            "notification": [
-              { "command": ": 'aimonitor-managed-hook:v1|target=http://192.168.1.100:8080'; curl old-invalid-event" }
+              { "command": ": 'AIMonitor|tool=cursor'; curl current" }
             ]
           }
         }"#;
 
-        let cleaned = cleanup_legacy_hook_config(existing, AiTool::Cursor)
-            .unwrap()
-            .unwrap();
-        let first = merge_hook_config(Some(&cleaned), &generated, AiTool::Cursor).unwrap();
+        let first = merge_hook_config(Some(existing), &generated, AiTool::Cursor).unwrap();
         let second = merge_hook_config(Some(&first.content), &generated, AiTool::Cursor).unwrap();
         let value: Value = serde_json::from_str(&second.content).unwrap();
         let stop = serde_json::to_string(&value["hooks"]["stop"]).unwrap();
 
         assert_eq!(stop.matches("other-app stop").count(), 1);
-        assert_eq!(stop.matches("aimonitor-hook.sh").count(), 0);
-        assert_eq!(
-            stop.matches("aimonitor-managed-hook:v2|tool=cursor")
-                .count(),
-            0
-        );
         assert_eq!(stop.matches("AIMonitor|tool=cursor").count(), 1);
-        assert!(value["hooks"].get("notification").is_none());
     }
 
     #[test]
@@ -1398,115 +1126,5 @@ mod tests {
             Some(HookTransition::Release)
         );
         assert_eq!(hook_transition(AiTool::Codex, "Unknown"), None);
-    }
-
-    #[test]
-    fn local_config_inspection_lists_managed_targets() {
-        let inspected = inspect_local_hook_config(
-            AiTool::Cursor,
-            ".cursor/hooks.json".to_owned(),
-            Some(
-                r#"{
-                  "hooks": {
-                    "stop": [
-                      { "command": ": 'aimonitor-managed-hook:v1|target=http://10.0.0.5:8080'; curl one" },
-                      { "command": ": 'aimonitor-managed-hook:v1|target=http://192.168.1.8:8080'; curl two" },
-                      { "command": "other-app" }
-                    ]
-                  }
-                }"#
-                .to_owned(),
-            ),
-        );
-
-        assert!(inspected.exists);
-        assert!(inspected.valid);
-        assert_eq!(
-            inspected.managed_targets,
-            vec![
-                "http://10.0.0.5:8080".to_owned(),
-                "http://192.168.1.8:8080".to_owned()
-            ]
-        );
-    }
-
-    #[test]
-    fn local_cursor_config_reports_unknown_events() {
-        let inspected = inspect_local_hook_config(
-            AiTool::Cursor,
-            ".cursor/hooks.json".to_owned(),
-            Some(r#"{"version":1,"hooks":{"notification":[]}}"#.to_owned()),
-        );
-
-        assert!(!inspected.valid);
-        assert_eq!(inspected.error, "不支持的 Cursor Hook 事件：notification");
-    }
-
-    #[test]
-    fn local_config_inspection_rejects_malformed_handler_shapes() {
-        let cursor = inspect_local_hook_config(
-            AiTool::Cursor,
-            ".cursor/hooks.json".to_owned(),
-            Some(r#"{"version":1,"hooks":{"stop":[{"command":""}]}}"#.to_owned()),
-        );
-        assert!(!cursor.valid);
-        assert!(cursor.error.contains("command"));
-
-        let codex = inspect_local_hook_config(
-            AiTool::Codex,
-            ".codex/hooks.json".to_owned(),
-            Some(r#"{"hooks":{"Stop":[{"hooks":[{"type":"command"}]}]}}"#.to_owned()),
-        );
-        assert!(!codex.valid);
-        assert!(codex.error.contains("command"));
-
-        let claude = inspect_local_hook_config(
-            AiTool::ClaudeCode,
-            ".claude/settings.json".to_owned(),
-            Some(r#"{"hooks":{"Stop":[42]}}"#.to_owned()),
-        );
-        assert!(!claude.valid);
-        assert!(claude.error.contains("必须是对象"));
-    }
-
-    #[test]
-    fn legacy_profile_migration_preserves_representative_content_and_images() {
-        let mut legacy = AiProfile {
-            device_id: "device-1".to_owned(),
-            tool: AiTool::Codex,
-            slot: 2,
-            hooks: vec![
-                HookContent {
-                    behavior: HookBehavior::Stop,
-                    content: "已完成".to_owned(),
-                    image: "idle-old.png".to_owned(),
-                },
-                HookContent {
-                    behavior: HookBehavior::BeforePrompt,
-                    content: "处理中".to_owned(),
-                    image: "running-old.gif".to_owned(),
-                },
-                HookContent {
-                    behavior: HookBehavior::Asking,
-                    content: "请确认".to_owned(),
-                    image: "asking-old.png".to_owned(),
-                },
-                HookContent {
-                    behavior: HookBehavior::Error,
-                    content: "出错了".to_owned(),
-                    image: "error-old.png".to_owned(),
-                },
-            ],
-        };
-
-        migrate_legacy_profile(&mut legacy);
-
-        assert_eq!(legacy.hooks.len(), 4);
-        assert_eq!(legacy.hooks[0].behavior, HookBehavior::Idle);
-        assert_eq!(legacy.hooks[0].image, "idle-old.png");
-        assert_eq!(legacy.hooks[1].behavior, HookBehavior::Running);
-        assert_eq!(legacy.hooks[1].content, "处理中");
-        assert_eq!(legacy.hooks[2].image, "asking-old.png");
-        assert_eq!(legacy.hooks[3].image, "error-old.png");
     }
 }

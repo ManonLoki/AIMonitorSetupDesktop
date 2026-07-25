@@ -1,6 +1,7 @@
 import {
   Alert,
   Badge,
+  Button,
   Card,
   Code,
   Group,
@@ -10,25 +11,92 @@ import {
   Title,
 } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
-import { runtimeOverviewQuery } from "../queries/monitor";
+import type { DiscoveredMonitorDevice } from "../api/monitor";
+import {
+  monitorDevicesQuery,
+  monitorSettingsQuery,
+  runtimeOverviewQuery,
+} from "../queries/monitor";
+import { LineIcon } from "../../../shared/ui/LineIcon";
+
+const discoverySourceLabel: Record<DiscoveredMonitorDevice["discoverySource"], string> = {
+  mdns: "mDNS 发现",
+  udpBroadcast: "UDP 广播",
+  savedAddress: "已保存地址",
+};
 
 export function WorkbenchPage() {
   const runtime = useQuery(runtimeOverviewQuery);
+  const settings = useQuery(monitorSettingsQuery);
+  const devices = useQuery(monitorDevicesQuery);
   const relay = runtime.data?.hookRelay;
 
   return (
-    <Stack gap="lg">
-      <div>
-        <Title order={2}>工作台</Title>
-        <Text size="sm" c="dimmed" mt={4}>
-          查看本机 Hook 中继状态及多设备转发结果。
-        </Text>
-      </div>
-
+    <Stack gap="md">
       {runtime.error && <Alert color="red">{runtime.error.message}</Alert>}
 
-      <Card withBorder radius="lg" p="xl" className="surface-card">
-        <Stack gap="lg">
+      <Card withBorder radius="lg" p="md" className="surface-card">
+        <Stack gap="md">
+          <Group justify="space-between" align="flex-start">
+            <div>
+              <Title order={3}>在线设备</Title>
+              <Text size="sm" c="dimmed" mt={4}>
+                按设置页配置的间隔自动刷新，也可以立即强制重新检查一次。
+              </Text>
+            </div>
+            <Button
+              variant="default"
+              leftSection={<LineIcon name="refresh" size={17} />}
+              onClick={() => devices.refetch()}
+              loading={devices.isFetching}
+            >
+              强制重新检查
+            </Button>
+          </Group>
+
+          {devices.error && <Alert color="red">{devices.error.message}</Alert>}
+
+          {!devices.isPending && devices.data?.length === 0 && (
+            <Alert color="yellow" variant="light">
+              暂未发现在线设备，请确认设备已开机并接入同一局域网。
+            </Alert>
+          )}
+
+          {(devices.data?.length ?? 0) > 0 && (
+            <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm">
+              {devices.data?.map((device) => (
+                <div className="endpoint-preview" key={device.id}>
+                  <Group justify="space-between" wrap="nowrap">
+                    <Group gap="sm" wrap="nowrap">
+                      <span className="device-status-dot" />
+                      <div className="min-width-zero">
+                        <Text size="sm" fw={600} truncate>
+                          {device.name}
+                          {device.id === settings.data?.deviceId && (
+                            <Text component="span" size="xs" c="dimmed">
+                              {" "}
+                              · 当前连接
+                            </Text>
+                          )}
+                        </Text>
+                        <Text size="xs" c="dimmed" truncate>
+                          {device.baseUrl} · API v{device.apiVersion}
+                        </Text>
+                      </div>
+                    </Group>
+                    <Badge variant="light" color="teal">
+                      {discoverySourceLabel[device.discoverySource]}
+                    </Badge>
+                  </Group>
+                </div>
+              ))}
+            </SimpleGrid>
+          )}
+        </Stack>
+      </Card>
+
+      <Card withBorder radius="lg" p="md" className="surface-card">
+        <Stack gap="md">
           <Group justify="space-between" align="flex-start">
             <div>
               <Title order={3}>本机 Hook 中继</Title>
@@ -40,20 +108,6 @@ export function WorkbenchPage() {
               {relay?.listening ? "监听中" : "未运行"}
             </Badge>
           </Group>
-
-          <div className="endpoint-preview">
-            <Text size="xs" c="dimmed" mb={6}>
-              本机入口
-            </Text>
-            <Code>
-              http://{relay?.bindAddress ?? "127.0.0.1"}:
-              {relay?.port ?? 10240}/api/hooks/{"{tool}"}
-            </Code>
-            <Text size="xs" c="dimmed" mt={8}>
-              请求体仅包含 <Code>{`{"type":"HookType"}`}</Code>，AI
-              标识由 URL 路径提供。
-            </Text>
-          </div>
 
           <SimpleGrid cols={{ base: 2, sm: 3 }}>
             <RelayMetric label="已接收事件" value={relay?.receivedCount ?? 0} />

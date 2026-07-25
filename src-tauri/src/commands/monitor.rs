@@ -8,7 +8,7 @@ use crate::{
     application::monitor::{ConnectionStatus, ImageUpload, MonitorService, RemoteImage},
     domain::monitor::{
         AiProfile, AiTool, DiscoveredMonitorDevice, HookConfigLocation, HookConfigWriteResult,
-        LocalHookConfig, MonitorSettings,
+        MonitorSettings,
     },
 };
 
@@ -34,6 +34,14 @@ pub fn save_monitor_username(
 }
 
 #[tauri::command]
+pub fn save_discovery_interval(
+    service: State<'_, MonitorService>,
+    minutes: u64,
+) -> Result<MonitorSettings, String> {
+    service.save_discovery_interval(minutes)
+}
+
+#[tauri::command]
 pub async fn discover_monitor_devices(
     app: AppHandle,
     service: State<'_, MonitorService>,
@@ -43,8 +51,7 @@ pub async fn discover_monitor_devices(
             .await
             .map_err(|error| format!("设备发现任务失败：{error}"))??;
     let devices = service.finish_device_discovery(candidates).await?;
-    service.publish_online_devices(&app, devices.clone());
-    Ok(devices)
+    Ok(service.publish_online_devices(&app, devices))
 }
 
 #[tauri::command]
@@ -113,11 +120,4 @@ pub fn write_hook_config(
     tool: AiTool,
 ) -> Result<HookConfigWriteResult, String> {
     service.write_hook_config(tool)
-}
-
-#[tauri::command]
-pub fn list_local_hook_configs(
-    service: State<'_, MonitorService>,
-) -> Result<Vec<LocalHookConfig>, String> {
-    service.local_hook_configs()
 }

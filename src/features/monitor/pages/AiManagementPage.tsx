@@ -152,7 +152,7 @@ export function AiManagementPage() {
   }
 
   return (
-    <Stack gap="lg">
+    <Stack gap="md">
       {error && <Alert color="red">{error.message}</Alert>}
 
       <Tabs
@@ -173,9 +173,9 @@ export function AiManagementPage() {
         </Tabs.List>
 
         {tools.map((tool) => (
-          <Tabs.Panel key={tool.value} value={tool.value} pt="lg">
-            <Card withBorder className="surface-card" p="lg">
-              <Stack gap="lg">
+          <Tabs.Panel key={tool.value} value={tool.value} pt="md">
+            <Card withBorder className="surface-card" p="md">
+              <Stack gap="md">
                 <SlotPicker
                   value={draft.slot}
                   onChange={(slot) => updateDraft({ ...draft, slot })}
@@ -208,9 +208,9 @@ export function AiManagementPage() {
                         key={behavior.value}
                         withBorder
                         className="behavior-card"
-                        p="md"
+                        p="sm"
                       >
-                        <Stack gap="md">
+                        <Stack gap="sm">
                           <Badge
                             color={behavior.color}
                             variant="light"
@@ -251,7 +251,7 @@ export function AiManagementPage() {
                             }
                             placeholder="输入设备上显示的补充内容"
                             autosize
-                            minRows={2}
+                            minRows={1}
                             value={hook.content}
                             onChange={(event) =>
                               updateDraft({

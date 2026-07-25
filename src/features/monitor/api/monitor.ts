@@ -6,6 +6,8 @@ export interface MonitorSettings {
   username: string;
   deviceId: string;
   deviceName: string;
+  /** 在线设备自动检查间隔（分钟），默认 1 分钟；保存后后台发现循环立即生效。 */
+  discoveryIntervalMinutes: number;
 }
 
 export interface DiscoveredMonitorDevice {
@@ -59,19 +61,6 @@ export interface HookConfigWriteResult {
   restartRequired: boolean;
 }
 
-export interface LocalHookConfig {
-  tool: AiTool;
-  filename: string;
-  exists: boolean;
-  valid: boolean;
-  /** 现有配置是否直接请求固定的本机中继地址，不依赖 runner。 */
-  directRelay: boolean;
-  error: string;
-  /** 现有配置中由本工具托管写入的事件名列表。 */
-  managedTargets: string[];
-  content: string;
-}
-
 export interface HookConfigLocation {
   tool: AiTool;
   directory: string;
@@ -115,6 +104,14 @@ export function selectMonitorDevice(
 
 export function saveMonitorUsername(username: string): Promise<MonitorSettings> {
   return invokeCommand<MonitorSettings>("save_monitor_username", { username });
+}
+
+export function saveDiscoveryInterval(
+  minutes: number,
+): Promise<MonitorSettings> {
+  return invokeCommand<MonitorSettings>("save_discovery_interval", {
+    minutes,
+  });
 }
 
 export function discoverMonitorDevices(): Promise<DiscoveredMonitorDevice[]> {
@@ -188,9 +185,6 @@ export function writeHookConfig(
   return invokeCommand<HookConfigWriteResult>("write_hook_config", { tool });
 }
 
-export function listLocalHookConfigs(): Promise<LocalHookConfig[]> {
-  return invokeCommand<LocalHookConfig[]>("list_local_hook_configs");
-}
 
 export function getRuntimeOverview(): Promise<RuntimeOverview> {
   return invokeCommand<RuntimeOverview>("get_runtime_overview");

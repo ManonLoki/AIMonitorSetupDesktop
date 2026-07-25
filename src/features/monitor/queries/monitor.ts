@@ -5,7 +5,6 @@ import {
   discoverMonitorDevices,
   listAiProfiles,
   listHookConfigLocations,
-  listLocalHookConfigs,
   listRemoteImages,
 } from "../api/monitor";
 
@@ -17,8 +16,6 @@ export const monitorKeys = {
   profiles: () => [...monitorKeys.all, "profiles"] as const,
   hookConfigLocations: () =>
     [...monitorKeys.all, "hook-config-locations"] as const,
-  localHookConfigs: () =>
-    [...monitorKeys.all, "local-hook-configs"] as const,
   runtime: () => [...monitorKeys.all, "runtime"] as const,
 };
 
@@ -48,11 +45,6 @@ export const hookConfigLocationsQuery = queryOptions({
   queryKey: monitorKeys.hookConfigLocations(),
   queryFn: listHookConfigLocations,
   staleTime: Number.POSITIVE_INFINITY,
-});
-
-export const localHookConfigsQuery = queryOptions({
-  queryKey: monitorKeys.localHookConfigs(),
-  queryFn: listLocalHookConfigs,
 });
 
 export const runtimeOverviewQuery = queryOptions({

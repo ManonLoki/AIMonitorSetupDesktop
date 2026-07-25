@@ -48,7 +48,7 @@ export function ImagesPage() {
     useImageCategoryFilter(imageList);
 
   return (
-    <Stack gap="lg">
+    <Stack gap="md">
       <Group justify="flex-end" gap="sm">
         <Button
           variant="default"
@@ -113,7 +113,7 @@ export function ImagesPage() {
           {filteredImages.length ? (
             <SimpleGrid
               cols={{ base: 1, xs: 2, md: 3, xl: 4 }}
-              spacing="lg"
+              spacing="md"
             >
               {filteredImages.map((image) => (
                 <Card
@@ -133,7 +133,7 @@ export function ImagesPage() {
                       {image.mimeType.replace("image/", "").toUpperCase()}
                     </Badge>
                   </div>
-                  <Group p="md" justify="space-between" wrap="nowrap">
+                  <Group p="sm" justify="space-between" wrap="nowrap">
                     <div className="min-width-zero">
                       <Text fw={600} size="sm" truncate>
                         {image.filename}

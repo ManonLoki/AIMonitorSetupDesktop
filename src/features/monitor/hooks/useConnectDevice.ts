@@ -9,6 +9,12 @@ export function useConnectDevice() {
   return useMutation({
     mutationFn: (device: DiscoveredMonitorDevice) =>
       selectMonitorDevice(device),
+    onMutate: async () => {
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: monitorKeys.profiles() }),
+        queryClient.cancelQueries({ queryKey: monitorKeys.images() }),
+      ]);
+    },
     onSuccess: (data) => {
       queryClient.setQueryData(monitorKeys.profiles(), []);
       queryClient.setQueryData(monitorKeys.images(), []);

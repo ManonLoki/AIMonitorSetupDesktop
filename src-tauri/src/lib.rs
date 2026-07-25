@@ -40,7 +40,6 @@ pub fn run() {
             let config_home = app.path().home_dir()?;
             let service =
                 MonitorService::load(&app_data_dir, &config_home).map_err(std::io::Error::other)?;
-            service.start_legacy_hook_cleanup();
             service.start_hook_listener();
             service.start_background_device_discovery(app.handle().clone());
             app.manage(service);
@@ -56,6 +55,7 @@ pub fn run() {
             commands::monitor::get_monitor_settings,
             commands::monitor::select_monitor_device,
             commands::monitor::save_monitor_username,
+            commands::monitor::save_discovery_interval,
             commands::monitor::discover_monitor_devices,
             commands::monitor::check_monitor_connection,
             commands::monitor::list_remote_images,
@@ -66,7 +66,6 @@ pub fn run() {
             commands::monitor::save_hook_config_directory,
             commands::monitor::save_ai_profile,
             commands::monitor::write_hook_config,
-            commands::monitor::list_local_hook_configs,
             commands::runtime::get_runtime_overview,
             commands::runtime::update_autostart,
         ])

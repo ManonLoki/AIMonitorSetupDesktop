@@ -40,7 +40,7 @@ export function AppShellLayout() {
         breakpoint: "sm",
         collapsed: { mobile: !opened },
       }}
-      padding={{ base: "md", sm: 32 }}
+      padding={{ base: "xs", sm: "md" }}
       className="app-shell"
     >
       <AppShell.Navbar
