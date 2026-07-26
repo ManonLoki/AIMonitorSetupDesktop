@@ -1418,6 +1418,16 @@ fn forward_profile(
     }
 }
 
+/// 把设备的非 2xx 响应转成对用户有意义的错误：优先使用设备返回的
+/// `ErrorResponse.error`，解析不到（包括 204 无正文的情况）时退回到
+/// HTTP 状态码文案。供阻塞版和异步版 `ensure_success*` 共用。
+fn device_error_message(status: StatusCode, parsed_body: Option<ErrorResponse>) -> String {
+    parsed_body.map_or_else(
+        || format!("设备请求失败（HTTP {}）", status.as_u16()),
+        |body| body.error,
+    )
+}
+
 fn ensure_success_blocking(
     response: reqwest::blocking::Response,
 ) -> Result<reqwest::blocking::Response, String> {
@@ -1425,14 +1435,12 @@ fn ensure_success_blocking(
     if status.is_success() {
         return Ok(response);
     }
-    let fallback = format!("设备请求失败（HTTP {}）", status.as_u16());
-    if status == StatusCode::NO_CONTENT {
-        return Err(fallback);
-    }
-    let message = response
-        .json::<ErrorResponse>()
-        .map_or(fallback, |body| body.error);
-    Err(message)
+    let parsed_body = if status == StatusCode::NO_CONTENT {
+        None
+    } else {
+        response.json::<ErrorResponse>().ok()
+    };
+    Err(device_error_message(status, parsed_body))
 }
 
 /// 记录一次 Hook 事件已处理完成的公共字段，成功/抑制两条路径在此基础上
@@ -1598,15 +1606,12 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
     if status.is_success() {
         return Ok(response);
     }
-    let fallback = format!("设备请求失败（HTTP {}）", status.as_u16());
-    if status == StatusCode::NO_CONTENT {
-        return Err(fallback);
-    }
-    let message = response
-        .json::<ErrorResponse>()
-        .await
-        .map_or(fallback, |body| body.error);
-    Err(message)
+    let parsed_body = if status == StatusCode::NO_CONTENT {
+        None
+    } else {
+        response.json::<ErrorResponse>().await.ok()
+    };
+    Err(device_error_message(status, parsed_body))
 }
 
 #[cfg(test)]

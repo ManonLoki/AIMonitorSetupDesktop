@@ -335,9 +335,6 @@ pub fn validate_profile(mut profile: AiProfile) -> Result<AiProfile, String> {
         if hook.image.is_empty() {
             return Err("每个行为都必须选择图片".to_owned());
         }
-        if !hook.behavior.is_display_behavior() {
-            return Err("配置中包含不支持的行为".to_owned());
-        }
         if !behaviors.insert(hook.behavior) {
             return Err("同一行为不能重复配置".to_owned());
         }
@@ -469,13 +466,6 @@ pub fn merge_hook_config(
 
 impl HookBehavior {
     const DISPLAY_BEHAVIORS: [Self; 4] = [Self::Idle, Self::Running, Self::Asking, Self::Error];
-
-    const fn is_display_behavior(self) -> bool {
-        matches!(
-            self,
-            Self::Idle | Self::Running | Self::Asking | Self::Error
-        )
-    }
 }
 
 struct NativeStateEvent {
