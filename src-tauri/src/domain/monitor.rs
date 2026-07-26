@@ -12,7 +12,10 @@ use hooks::{
     MANAGED_HOOK_PREFIX, command_has_marker, decoded_hook_command, hook_transition,
     managed_hook_marker,
 };
-pub use hooks::{ai_tool_name, generate_hook_config, hook_config_filename, merge_hook_config};
+pub use hooks::{
+    ai_tool_name, generate_hook_auxiliary_configs, generate_hook_config, hook_config_filename,
+    hook_requires_review, hook_restart_required, merge_hook_config, tool_from_slug,
+};
 
 // 未配置设备时的占位基地址，仅用于默认值展示。
 const DEFAULT_BASE_URL: &str = "http://192.168.1.100:8080";
@@ -42,11 +45,19 @@ pub struct MonitorSettings {
     /// 在线设备自动检查间隔（分钟）。修改后由后台发现循环下一次轮询立即生效。
     #[serde(default = "default_discovery_interval_minutes")]
     pub discovery_interval_minutes: u64,
+    /// 设置页选中的 AI 客户端；监控管理与 Hooks 管理共用这份可见范围。
+    #[serde(default = "default_enabled_ai_tools")]
+    pub enabled_ai_tools: Vec<AiTool>,
 }
 
 // 供 serde default 属性调用，反序列化时缺省该字段则填入默认间隔。
 fn default_discovery_interval_minutes() -> u64 {
     DEFAULT_DISCOVERY_INTERVAL_MINUTES
+}
+
+/// 首次启动及旧版本配置升级时默认展示的三个 AI 客户端。
+pub fn default_enabled_ai_tools() -> Vec<AiTool> {
+    vec![AiTool::Codex, AiTool::ClaudeCode, AiTool::Cursor]
 }
 
 // 手动实现 Default，为各字段指定初始值（而不是全部用类型默认值）。
@@ -58,6 +69,7 @@ impl Default for MonitorSettings {
             device_id: String::new(),
             device_name: String::new(),
             discovery_interval_minutes: DEFAULT_DISCOVERY_INTERVAL_MINUTES,
+            enabled_ai_tools: default_enabled_ai_tools(),
         }
     }
 }
@@ -110,18 +122,40 @@ pub enum DiscoverySource {
     SavedAddress,
 }
 
-// 应用支持接入的三种 AI 编程工具；Hash 派生用于放入 HashSet 做去重校验。
+// 应用支持接入的 AI 工具；Hash 派生用于放入 HashSet 做去重校验。
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub enum AiTool {
     Codex,
     ClaudeCode,
     Cursor,
+    OpenCode,
+    WorkBuddy,
+    Harness,
+    OpenClaw,
+    CodeBuddy,
 }
 
 impl AiTool {
     // 遍历全部工具时使用的固定顺序数组。
-    pub const ALL: [Self; 3] = [Self::Codex, Self::ClaudeCode, Self::Cursor];
+    pub const ALL: [Self; 8] = [
+        Self::Codex,
+        Self::ClaudeCode,
+        Self::Cursor,
+        Self::OpenCode,
+        Self::WorkBuddy,
+        Self::Harness,
+        Self::OpenClaw,
+        Self::CodeBuddy,
+    ];
+}
+
+/// 按应用固定顺序规范化用户选择，并消除重复项。
+pub fn normalize_enabled_ai_tools(selected: &[AiTool]) -> Vec<AiTool> {
+    AiTool::ALL
+        .into_iter()
+        .filter(|tool| selected.contains(tool))
+        .collect()
 }
 
 /// AI 实例在展示屏上呈现的状态。`Idle`/`Running`/`Asking`/`Error` 是当前
@@ -178,11 +212,9 @@ pub struct HookConfigWriteResult {
     pub tool: AiTool,
     pub filename: String,
     pub config_changed: bool,
-    /// 仅当写入的是 Codex 且配置发生变化时为真：Codex 不会热加载
-    /// hooks.json，需要提示用户手动确认写入内容。
+    /// 工具要求用户审核新 Hook 且配置发生变化时为真。
     pub requires_review: bool,
-    /// 仅当写入的是 Codex 且配置发生变化时为真：需要提示用户重启 Codex
-    /// 才能使新的 hooks 配置生效。
+    /// 工具需要重启当前会话或守护进程才能加载新配置时为真。
     pub restart_required: bool,
 }
 
@@ -196,6 +228,16 @@ pub struct HookConfigDirectories {
     pub claude_code: String,
     #[serde(default)]
     pub cursor: String,
+    #[serde(default)]
+    pub open_code: String,
+    #[serde(default)]
+    pub work_buddy: String,
+    #[serde(default)]
+    pub harness: String,
+    #[serde(default)]
+    pub open_claw: String,
+    #[serde(default)]
+    pub code_buddy: String,
 }
 
 impl HookConfigDirectories {
@@ -205,6 +247,11 @@ impl HookConfigDirectories {
             AiTool::Codex => &self.codex,
             AiTool::ClaudeCode => &self.claude_code,
             AiTool::Cursor => &self.cursor,
+            AiTool::OpenCode => &self.open_code,
+            AiTool::WorkBuddy => &self.work_buddy,
+            AiTool::Harness => &self.harness,
+            AiTool::OpenClaw => &self.open_claw,
+            AiTool::CodeBuddy => &self.code_buddy,
         }
     }
 
@@ -214,6 +261,11 @@ impl HookConfigDirectories {
             AiTool::Codex => self.codex = directory,
             AiTool::ClaudeCode => self.claude_code = directory,
             AiTool::Cursor => self.cursor = directory,
+            AiTool::OpenCode => self.open_code = directory,
+            AiTool::WorkBuddy => self.work_buddy = directory,
+            AiTool::Harness => self.harness = directory,
+            AiTool::OpenClaw => self.open_claw = directory,
+            AiTool::CodeBuddy => self.code_buddy = directory,
         }
     }
 }
@@ -250,6 +302,10 @@ pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String
     normalize_base_url(&data.settings.base_url)?;
     // 自动检查间隔必须在允许范围内。
     validate_discovery_interval_minutes(data.settings.discovery_interval_minutes)?;
+    if normalize_enabled_ai_tools(&data.settings.enabled_ai_tools) != data.settings.enabled_ai_tools
+    {
+        return Err("AI 客户端设置包含重复项或顺序无效".to_owned());
+    }
     // 用户名非空时才校验（允许尚未设置用户名的初始状态）。
     if !data.settings.username.is_empty() {
         validate_username(&data.settings.username)?;
@@ -304,11 +360,16 @@ pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String
         }
     }
 
-    // 依次检查三个工具的自定义 Hooks 配置目录：非空时必须是绝对路径。
+    // 依次检查所有工具的自定义 Hooks 配置目录：非空时必须是绝对路径。
     for directory in [
         &data.hook_config_directories.codex,
         &data.hook_config_directories.claude_code,
         &data.hook_config_directories.cursor,
+        &data.hook_config_directories.open_code,
+        &data.hook_config_directories.work_buddy,
+        &data.hook_config_directories.harness,
+        &data.hook_config_directories.open_claw,
+        &data.hook_config_directories.code_buddy,
     ] {
         if !directory.is_empty() && !Path::new(directory).is_absolute() {
             return Err("持久化 Hooks 配置目录必须使用绝对路径".to_owned());
@@ -725,8 +786,9 @@ mod tests {
         HookConfigDirectories, HookConfigPreview, HookContent, HookEventDecision, HookStateMachine,
         HookTransition, MANAGED_HOOK_PREFIX, MAX_DISCOVERY_INTERVAL_MINUTES, MAX_UPLOAD_IMAGE_EDGE,
         MonitorDeviceRoute, MonitorSettings, SavedMonitorData, command_has_marker,
-        decoded_hook_command, generate_hook_config, hook_transition, managed_hook_marker,
-        merge_hook_config, normalize_base_url, resize_and_compress_image,
+        decoded_hook_command, default_enabled_ai_tools, generate_hook_auxiliary_configs,
+        generate_hook_config, hook_transition, managed_hook_marker, merge_hook_config,
+        normalize_base_url, normalize_enabled_ai_tools, resize_and_compress_image,
         validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
         validate_username,
     };
@@ -776,6 +838,23 @@ mod tests {
     fn settings_require_a_username() {
         assert!(validate_username(" ").is_err());
         assert_eq!(validate_username(" Manon ").unwrap(), "Manon");
+    }
+
+    #[test]
+    fn ai_client_selection_defaults_to_primary_tools_and_is_normalized() {
+        assert_eq!(
+            default_enabled_ai_tools(),
+            vec![AiTool::Codex, AiTool::ClaudeCode, AiTool::Cursor]
+        );
+        assert_eq!(
+            normalize_enabled_ai_tools(&[
+                AiTool::Cursor,
+                AiTool::Codex,
+                AiTool::Cursor,
+                AiTool::OpenClaw,
+            ]),
+            vec![AiTool::Codex, AiTool::Cursor, AiTool::OpenClaw]
+        );
     }
 
     // 验证自动检查间隔的默认值为 1 分钟，且 0 和超过上限的值都会被拒绝，
@@ -943,6 +1022,101 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn work_buddy_preview_targets_its_independent_settings_file() {
+        let preview = generate_hook_config(profile(AiTool::WorkBuddy)).unwrap();
+
+        assert_eq!(preview.filename, ".workbuddy/settings.json");
+        assert!(preview.content.contains("\"SessionStart\""));
+        assert!(preview.content.contains("\"PermissionRequest\""));
+        assert!(preview.content.contains("AIMonitor|tool=workbuddy"));
+    }
+
+    #[test]
+    fn open_code_preview_is_a_managed_global_plugin() {
+        let preview = generate_hook_config(profile(AiTool::OpenCode)).unwrap();
+
+        assert_eq!(preview.filename, ".config/opencode/plugins/aimonitor.js");
+        assert!(preview.content.contains("AIMonitor|tool=opencode"));
+        assert!(preview.content.contains("session.status"));
+        assert!(preview.content.contains("permission.asked"));
+        assert!(preview.content.contains("/api/hooks/opencode"));
+
+        let merged = merge_hook_config(None, &preview, AiTool::OpenCode).unwrap();
+        assert_eq!(merged.content, preview.content);
+        let merged_again =
+            merge_hook_config(Some(&merged.content), &preview, AiTool::OpenCode).unwrap();
+        assert_eq!(merged_again.content, preview.content);
+        assert!(
+            merge_hook_config(
+                Some("export const unrelated = true\n"),
+                &preview,
+                AiTool::OpenCode,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn code_buddy_preview_uses_its_native_config_and_posix_hook_command() {
+        let preview = generate_hook_config(profile(AiTool::CodeBuddy)).unwrap();
+
+        assert_eq!(preview.filename, ".codebuddy/settings.json");
+        assert!(preview.content.contains("\"PermissionRequest\""));
+        assert!(preview.content.contains("AIMonitor|tool=codebuddy"));
+        assert!(preview.content.contains("/api/hooks/codebuddy"));
+        assert!(!preview.content.contains("powershell.exe"));
+    }
+
+    #[test]
+    fn harness_preview_merges_with_existing_daemon_hooks() {
+        let preview = generate_hook_config(profile(AiTool::Harness)).unwrap();
+        assert!(preview.content.contains("agent-state-changed"));
+        assert!(preview.content.contains("list-agents --json"));
+        assert!(preview.content.contains("AIMonitor|tool=harness"));
+
+        let existing = r#"[{
+          "id": "11111111-1111-1111-1111-111111111111",
+          "event": "after-new-tab",
+          "command": {"displayMessage": {"format": "hello"}},
+          "conditionFormat": null
+        }]"#;
+        let merged = merge_hook_config(Some(existing), &preview, AiTool::Harness).unwrap();
+        assert!(merged.content.contains("after-new-tab"));
+        assert_eq!(merged.content.matches("AIMonitor|tool=harness").count(), 1);
+        let merged_again =
+            merge_hook_config(Some(&merged.content), &preview, AiTool::Harness).unwrap();
+        assert_eq!(
+            merged_again
+                .content
+                .matches("AIMonitor|tool=harness")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn open_claw_preview_contains_a_complete_managed_plugin() {
+        let preview = generate_hook_config(profile(AiTool::OpenClaw)).unwrap();
+        let auxiliary = generate_hook_auxiliary_configs(AiTool::OpenClaw);
+
+        assert!(preview.content.contains("AIMonitor|tool=openclaw"));
+        assert!(preview.content.contains("before_agent_run"));
+        assert!(preview.content.contains("agent_end"));
+        assert!(preview.content.contains("/api/hooks/openclaw"));
+        assert_eq!(auxiliary.len(), 2);
+        assert!(
+            auxiliary
+                .iter()
+                .any(|file| file.filename.ends_with("openclaw.plugin.json"))
+        );
+        assert!(
+            auxiliary
+                .iter()
+                .all(|file| file.content.contains("AIMonitor|tool=openclaw"))
+        );
+    }
+
     // 验证 Codex 的合并逻辑是幂等的：重复合并不会让托管条目累积，
     // 且用户手工添加的其他命令、其他顶层字段（如 permissions）会被保留。
     #[test]
@@ -1054,7 +1228,8 @@ mod tests {
 
     // 验证 hook_transition 对不同工具、不同事件名能返回正确的状态迁移：
     // Claude 的 Notification 对应 Idle 展示，Codex 的 PermissionRequest 对应 Asking 展示，
-    // Cursor 的 sessionEnd 对应释放展示位，未知事件返回 None。
+    // Cursor 的 sessionEnd 对应释放展示位，OpenCode/WorkBuddy 的原生事件也由
+    // 各自协议归一化，未知事件返回 None。
     #[test]
     fn hook_transitions_keep_state_rules_in_the_desktop_backend() {
         assert_eq!(
@@ -1069,7 +1244,54 @@ mod tests {
             hook_transition(AiTool::Cursor, "sessionEnd"),
             Some(HookTransition::Release)
         );
+        assert_eq!(
+            hook_transition(AiTool::OpenCode, "session.busy"),
+            Some(HookTransition::Display(HookBehavior::Running))
+        );
+        assert_eq!(
+            hook_transition(AiTool::WorkBuddy, "PermissionRequest"),
+            Some(HookTransition::Display(HookBehavior::Asking))
+        );
         assert_eq!(hook_transition(AiTool::Codex, "Unknown"), None);
+    }
+
+    #[test]
+    fn status_driven_protocols_map_native_states() {
+        let mut harness = HookStateMachine::default();
+        assert_eq!(
+            harness.apply_event_with_status(
+                AiTool::Harness,
+                "agent-state-changed",
+                None,
+                None,
+                Some("working"),
+            ),
+            HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
+        );
+        assert_eq!(
+            harness.apply_event_with_status(
+                AiTool::Harness,
+                "agent-state-changed",
+                None,
+                None,
+                Some("awaiting"),
+            ),
+            HookEventDecision::Forward(HookTransition::Display(HookBehavior::Asking))
+        );
+
+        let mut open_claw = HookStateMachine::default();
+        open_claw.apply_event(AiTool::OpenClaw, "session_start", Some("s1"), None);
+        open_claw.apply_event(AiTool::OpenClaw, "before_agent_run", Some("s1"), Some("r1"));
+        assert_eq!(
+            open_claw.apply_event_with_status(
+                AiTool::OpenClaw,
+                "agent_end",
+                Some("s1"),
+                Some("r1"),
+                Some("failed"),
+            ),
+            HookEventDecision::Forward(HookTransition::Display(HookBehavior::Error))
+        );
     }
 
     #[test]

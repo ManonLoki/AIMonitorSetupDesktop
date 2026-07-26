@@ -64,6 +64,15 @@ pub fn save_discovery_interval(
     service.save_discovery_interval(minutes)
 }
 
+#[tauri::command]
+// 保存设置页勾选的 AI 客户端列表
+pub fn save_enabled_ai_tools(
+    service: State<'_, MonitorService>,
+    tools: Vec<AiTool>,
+) -> Result<MonitorSettings, String> {
+    service.save_enabled_ai_tools(&tools)
+}
+
 // 声明这是一个可被前端通过 invoke 调用的 Tauri 命令
 #[tauri::command]
 // 异步发现局域网内的监控设备

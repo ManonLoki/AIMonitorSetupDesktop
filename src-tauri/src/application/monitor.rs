@@ -26,10 +26,11 @@ use crate::domain::monitor::{
     AiProfile, AiTool, DEFAULT_HOOK_RELAY_PORT, DiscoveredMonitorDevice, DiscoverySource,
     HookBehavior, HookConfigDirectories, HookConfigLocation, HookConfigWriteResult,
     HookEventDecision, HookStateMachine, HookTransition, MonitorDeviceRoute, MonitorSettings,
-    SavedMonitorData, ai_tool_name, encode_base64, generate_hook_config, hook_config_filename,
-    merge_hook_config, normalize_base_url, resize_and_compress_image, validate_device_route,
-    validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
-    validate_username,
+    SavedMonitorData, ai_tool_name, encode_base64, generate_hook_auxiliary_configs,
+    generate_hook_config, hook_config_filename, hook_requires_review, hook_restart_required,
+    merge_hook_config, normalize_base_url, normalize_enabled_ai_tools, resize_and_compress_image,
+    tool_from_slug, validate_device_route, validate_discovery_interval_minutes, validate_profile,
+    validate_saved_monitor_data, validate_username,
 };
 
 // 本地持久化存储文件名（保存监控配置数据的 JSON 文件）。
@@ -69,8 +70,13 @@ const DISCOVERY_POLL_GRANULARITY: Duration = Duration::from_secs(1);
 // 设备列表发生变化时向前端发送的 Tauri 事件名称。
 pub const MONITOR_DEVICES_CHANGED_EVENT: &str = "monitor-devices-changed";
 
-// 根据用户主目录，探测各 AI 工具（Codex/Claude Code/Cursor）的 Hook 配置目录。
+// 根据用户主目录与工具公开的环境变量，探测各 AI 工具的 Hook 配置目录。
 fn detect_hook_config_directories(config_home: &Path) -> HookConfigDirectories {
+    let open_code_fallback = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| config_home.join(".config"))
+        .join("opencode");
     HookConfigDirectories {
         // Codex 配置目录：优先读取环境变量 CODEX_HOME，否则回退到 ~/.codex。
         codex: detected_config_directory("CODEX_HOME", &config_home.join(".codex")),
@@ -78,7 +84,37 @@ fn detect_hook_config_directories(config_home: &Path) -> HookConfigDirectories {
         claude_code: detected_config_directory("CLAUDE_CONFIG_DIR", &config_home.join(".claude")),
         // Cursor 配置目录固定为 ~/.cursor（没有对应的环境变量覆盖）。
         cursor: config_home.join(".cursor").to_string_lossy().into_owned(),
+        // OpenCode 支持 OPENCODE_CONFIG_DIR；否则遵循 XDG_CONFIG_HOME/opencode。
+        open_code: detected_config_directory("OPENCODE_CONFIG_DIR", &open_code_fallback),
+        // WorkBuddy 自 v2.48 起与 CodeBuddy CLI 分离，使用 ~/.workbuddy。
+        work_buddy: config_home
+            .join(".workbuddy")
+            .to_string_lossy()
+            .into_owned(),
+        // Harness 支持 HARNESS_HOME；默认位置按其 macOS/Linux 公开路径选择。
+        harness: detected_config_directory("HARNESS_HOME", &default_harness_home(config_home)),
+        // OpenClaw 的可变状态目录可由 OPENCLAW_STATE_DIR 覆盖。
+        open_claw: detected_config_directory("OPENCLAW_STATE_DIR", &config_home.join(".openclaw")),
+        // CodeBuddy 官方通过 CODEBUDDY_CONFIG_DIR 覆盖 ~/.codebuddy。
+        code_buddy: detected_config_directory(
+            "CODEBUDDY_CONFIG_DIR",
+            &config_home.join(".codebuddy"),
+        ),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn default_harness_home(config_home: &Path) -> PathBuf {
+    config_home.join("Library/Application Support/Harness")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_harness_home(config_home: &Path) -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| config_home.join(".local/share"))
+        .join("harness")
 }
 
 // 读取指定环境变量作为配置目录，若变量不存在或不是绝对路径则使用回退路径。
@@ -90,6 +126,21 @@ fn detected_config_directory(variable: &str, fallback: &Path) -> String {
         .unwrap_or_else(|| fallback.to_owned())
         .to_string_lossy()
         .into_owned()
+}
+
+/// 从系统环境与主目录名中取得当前本机用户名。环境变量在桌面启动环境缺失时，
+/// 主目录末级名称仍可覆盖 macOS/Linux/Windows 的常见用户目录布局。
+fn detect_system_username(config_home: &Path) -> Option<String> {
+    ["USER", "USERNAME", "LOGNAME"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .chain(
+            config_home
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned),
+        )
+        .find_map(|candidate| validate_username(&candidate).ok())
 }
 
 /// 一次发现命中的设备，可能同时拥有多个候选地址（IPv4/IPv6、多网卡）；
@@ -585,7 +636,7 @@ impl MonitorService {
         // 应用数据目录不存在则递归创建。
         fs::create_dir_all(app_data_dir).map_err(|error| format!("无法创建配置目录：{error}"))?;
         let data_path = app_data_dir.join(STORE_FILENAME);
-        let data = if data_path.exists() {
+        let mut data = if data_path.exists() {
             // 存储文件已存在：读取内容并反序列化为 SavedMonitorData。
             let contents =
                 fs::read_to_string(&data_path).map_err(|error| format!("无法读取配置：{error}"))?;
@@ -594,6 +645,11 @@ impl MonitorService {
             // 首次启动：使用默认空数据。
             SavedMonitorData::default()
         };
+        if data.settings.username.trim().is_empty()
+            && let Some(username) = detect_system_username(config_home)
+        {
+            data.settings.username = username;
+        }
         // 无论是读取到的还是默认数据，都要过一遍领域层校验，防止带着非法数据启动。
         validate_saved_monitor_data(&data).map_err(|error| format!("配置数据校验失败：{error}"))?;
         Ok(Self {
@@ -747,6 +803,20 @@ impl MonitorService {
             .map_err(|_| "配置写入锁已损坏".to_owned())?;
         let mut next_data = data.clone();
         next_data.settings.discovery_interval_minutes = minutes;
+        self.persist(&next_data)?;
+        *data = next_data;
+        Ok(data.settings.clone())
+    }
+
+    /// 保存设置页勾选的 AI 客户端，按固定顺序去重后供两个管理页面共同使用。
+    pub fn save_enabled_ai_tools(&self, tools: &[AiTool]) -> Result<MonitorSettings, String> {
+        let tools = normalize_enabled_ai_tools(tools);
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| "配置写入锁已损坏".to_owned())?;
+        let mut next_data = data.clone();
+        next_data.settings.enabled_ai_tools = tools;
         self.persist(&next_data)?;
         *data = next_data;
         Ok(data.settings.clone())
@@ -1352,25 +1422,42 @@ impl MonitorService {
             .find(|profile| profile.device_id == data.settings.device_id && profile.tool == tool)
             .cloned()
             .ok_or_else(|| "请先在监控管理中保存该工具的展示配置".to_owned())?;
-        // 根据 Profile 生成该工具期望的 Hook 配置片段。
+        // 根据 Profile 生成该工具期望的主配置和可选辅助文件（例如 OpenClaw 插件）。
         let generated = generate_hook_config(profile)?;
-        let config_path = self.hook_config_path(&data, tool);
-        // 读取磁盘上已有的配置内容（若文件不存在则为 None）。
-        let existing = read_optional_config(&config_path)?;
-        // 将生成的配置与已有配置合并（保留用户手工添加的其他内容，只替换本应用管理的部分）。
-        let mut merged = merge_hook_config(existing.as_deref(), &generated, tool)?;
-        merged.filename = config_path.to_string_lossy().into_owned();
-        // 只有合并后的内容与磁盘现有内容不同才需要写入。
-        let config_changed = existing.as_deref() != Some(merged.content.as_str());
-        if config_changed {
-            write_config(&config_path, &merged.content)?;
+        let location = self.hook_config_location(&data, tool);
+        let config_path = PathBuf::from(&location.config_path);
+        let mut generated_files = vec![(config_path.clone(), generated)];
+        generated_files.extend(
+            generate_hook_auxiliary_configs(tool)
+                .into_iter()
+                .map(|preview| {
+                    (
+                        Path::new(&location.directory).join(&preview.filename),
+                        preview,
+                    )
+                }),
+        );
+
+        // 所有目标先读取并完成冲突/格式校验，再统一写入；任一文件不安全时不留下半套配置。
+        let mut writes = Vec::with_capacity(generated_files.len());
+        for (path, generated) in generated_files {
+            let existing = read_optional_config(&path)?;
+            let merged = merge_hook_config(existing.as_deref(), &generated, tool)?;
+            let changed = existing.as_deref() != Some(merged.content.as_str());
+            writes.push((path, merged, changed));
+        }
+        let config_changed = writes.iter().any(|(_, _, changed)| *changed);
+        for (path, merged, changed) in &writes {
+            if *changed {
+                write_config(path, &merged.content)?;
+            }
         }
         Ok(HookConfigWriteResult {
-            // Codex 配置发生变化时，需要用户复核并重启 Codex 才能生效。
-            requires_review: tool == AiTool::Codex && config_changed,
-            restart_required: tool == AiTool::Codex && config_changed,
+            // 是否需要审核/重启由各工具的 HookProtocol 实现声明，避免在此处按工具硬编码特判。
+            requires_review: hook_requires_review(tool) && config_changed,
+            restart_required: hook_restart_required(tool) && config_changed,
             tool,
-            filename: merged.filename,
+            filename: config_path.to_string_lossy().into_owned(),
             config_changed,
         })
     }
@@ -1390,11 +1477,6 @@ impl MonitorService {
             config_path: config_path.to_string_lossy().into_owned(),
             is_custom: !custom_directory.is_empty(),
         }
-    }
-
-    // 便捷方法：直接取出某工具 Hook 配置文件的完整路径。
-    fn hook_config_path(&self, data: &SavedMonitorData, tool: AiTool) -> PathBuf {
-        PathBuf::from(self.hook_config_location(data, tool).config_path)
     }
 
     // 将内存中的数据序列化为格式化 JSON 并原子写入磁盘存储文件。
@@ -1502,13 +1584,12 @@ fn read_hook_request(stream: &mut TcpStream) -> Result<IncomingHookEvent, String
     let path = request_parts
         .next()
         .ok_or_else(|| "Hook 请求缺少路径".to_owned())?;
-    // 根据路径后缀确定是哪个 AI 工具发来的 Hook 请求。
-    let tool = match path.strip_prefix("/api/hooks/") {
-        Some("codex") => AiTool::Codex,
-        Some("claude-code") => AiTool::ClaudeCode,
-        Some("cursor") => AiTool::Cursor,
-        _ => return Err("Hook 请求中的 AI 工具无效".to_owned()),
-    };
+    // 根据路径后缀确定是哪个 AI 工具发来的 Hook 请求；slug 与工具的映射统一由
+    // 各 HookProtocol 的 slug() 提供，此处不再重复维护一份镜像表。
+    let tool = path
+        .strip_prefix("/api/hooks/")
+        .and_then(tool_from_slug)
+        .ok_or_else(|| "Hook 请求中的 AI 工具无效".to_owned())?;
     // 同时读取正文长度与配置生成时写入的可信事件头。原始 Hook JSON 中通常
     // 自带 hook_event_name；事件头用于 Cursor 等协议字段不一致时兜底。
     let mut content_length = None;
@@ -2016,6 +2097,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn empty_username_defaults_to_the_local_system_username() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-default-username-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("fallback-user");
+        let expected = detect_system_username(&config_home).unwrap();
+
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+
+        assert_eq!(service.settings().unwrap().username, expected);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     // 验证 read_hook_request 能正确解析一个合法的最小 Hook 请求：
     // 只有工具路径和 type 字段的请求体应被成功解析出 (工具, 事件类型)。
     #[test]
@@ -2083,6 +2184,33 @@ mod tests {
                 status: Some("cancelled".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn local_hook_request_routes_new_tool_slugs() {
+        for (slug, tool) in [
+            ("harness", AiTool::Harness),
+            ("openclaw", AiTool::OpenClaw),
+            ("codebuddy", AiTool::CodeBuddy),
+        ] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let body = r#"{"hook_event_name":"probe"}"#;
+            let request = format!(
+                "POST /api/hooks/{slug} HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let sender = thread::spawn(move || {
+                let mut stream = TcpStream::connect(address).unwrap();
+                stream.write_all(request.as_bytes()).unwrap();
+            });
+            let (mut stream, _) = listener.accept().unwrap();
+            let parsed = read_hook_request(&mut stream).unwrap();
+            sender.join().unwrap();
+            assert_eq!(parsed.tool, tool);
+            assert_eq!(parsed.hook_type, "probe");
+        }
     }
 
     // 验证 relay_hook 能根据事件类型计算出正确的行为状态，并转发到已配置的设备路由，
@@ -2840,6 +2968,23 @@ mod tests {
                 codex: config_home.join(".codex").to_string_lossy().into_owned(),
                 claude_code: config_home.join(".claude").to_string_lossy().into_owned(),
                 cursor: config_home.join(".cursor").to_string_lossy().into_owned(),
+                open_code: config_home
+                    .join(".config/opencode")
+                    .to_string_lossy()
+                    .into_owned(),
+                work_buddy: config_home
+                    .join(".workbuddy")
+                    .to_string_lossy()
+                    .into_owned(),
+                harness: config_home
+                    .join("Library/Application Support/Harness")
+                    .to_string_lossy()
+                    .into_owned(),
+                open_claw: config_home.join(".openclaw").to_string_lossy().into_owned(),
+                code_buddy: config_home
+                    .join(".codebuddy")
+                    .to_string_lossy()
+                    .into_owned(),
             },
             data: Arc::new(RwLock::new(SavedMonitorData {
                 settings: MonitorSettings {
@@ -2939,6 +3084,66 @@ mod tests {
             .unwrap();
         assert!(!default_location.is_custom);
         assert_eq!(default_location.directory, detected_directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn open_claw_plugin_files_are_validated_as_one_managed_set() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-openclaw-plugin-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("home");
+        fs::create_dir_all(&app_data).unwrap();
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+        service
+            .select_device(&DiscoveredMonitorDevice {
+                id: "screen-1".to_owned(),
+                name: "Desk".to_owned(),
+                api_version: "1".to_owned(),
+                base_url: "http://127.0.0.1:8080".to_owned(),
+                path: "/api/device".to_owned(),
+                discovery_source: DiscoverySource::Mdns,
+            })
+            .unwrap();
+        let mut profile = test_profile();
+        profile.tool = AiTool::OpenClaw;
+        service.save_profile(profile).unwrap();
+        let plugin_root = root.join("openclaw");
+        service
+            .save_hook_config_directory(AiTool::OpenClaw, &plugin_root.to_string_lossy())
+            .unwrap();
+
+        // 任一辅助文件已被用户占用时，主入口和其他文件都不应提前写入。
+        let package_path = plugin_root.join("extensions/aimonitor/package.json");
+        fs::create_dir_all(package_path.parent().unwrap()).unwrap();
+        fs::write(&package_path, r#"{"name":"unrelated"}"#).unwrap();
+        assert!(service.write_hook_config(AiTool::OpenClaw).is_err());
+        assert!(!plugin_root.join("extensions/aimonitor/index.mjs").exists());
+        assert!(
+            !plugin_root
+                .join("extensions/aimonitor/openclaw.plugin.json")
+                .exists()
+        );
+
+        fs::remove_file(&package_path).unwrap();
+        let result = service.write_hook_config(AiTool::OpenClaw).unwrap();
+        assert!(result.config_changed);
+        assert!(result.requires_review);
+        assert!(result.restart_required);
+        assert!(plugin_root.join("extensions/aimonitor/index.mjs").exists());
+        assert!(
+            plugin_root
+                .join("extensions/aimonitor/openclaw.plugin.json")
+                .exists()
+        );
+        assert!(package_path.exists());
+
         fs::remove_dir_all(root).unwrap();
     }
 

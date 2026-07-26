@@ -1,12 +1,16 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands};
+use super::{
+    HookEvent, HookEventKind, HookProtocol, ManagedCommands, command_group, platform_command,
+};
 use crate::domain::monitor::{AiTool, HookBehavior};
 
-pub(super) static CODEX: CodexProtocol = CodexProtocol;
+pub(super) static WORK_BUDDY: WorkBuddyProtocol = WorkBuddyProtocol;
 
-pub(super) struct CodexProtocol;
+pub(super) struct WorkBuddyProtocol;
 
+// WorkBuddy 内置 CodeBuddy Agent 引擎，并从 v2.48 起使用独立的
+// ~/.workbuddy/settings.json；其 hooks 结构与 CodeBuddy/Claude Code 兼容。
 const EVENTS: &[HookEvent] = &[
     HookEvent::new("SessionStart", HookEventKind::SessionStart),
     HookEvent::new("UserPromptSubmit", HookEventKind::WorkStart),
@@ -19,10 +23,16 @@ const EVENTS: &[HookEvent] = &[
         HookEventKind::WorkCompletion(HookBehavior::Running),
     ),
     HookEvent::new(
+        "PostToolUseFailure",
+        HookEventKind::State(HookBehavior::Error),
+    ),
+    HookEvent::new(
         "PermissionRequest",
         HookEventKind::State(HookBehavior::Asking),
     ),
+    HookEvent::new("Elicitation", HookEventKind::State(HookBehavior::Asking)),
     HookEvent::new("Stop", HookEventKind::Stop),
+    HookEvent::new("StopFailure", HookEventKind::State(HookBehavior::Error)),
     HookEvent::new(
         "SubagentStart",
         HookEventKind::WorkProgress(HookBehavior::Running),
@@ -39,48 +49,36 @@ const EVENTS: &[HookEvent] = &[
         "PostCompact",
         HookEventKind::WorkCompletion(HookBehavior::Running),
     ),
+    HookEvent::with_matcher("Notification", "idle_prompt", HookEventKind::Stop),
     HookEvent::new("SessionEnd", HookEventKind::SessionEnd),
 ];
 
-impl HookProtocol for CodexProtocol {
+impl HookProtocol for WorkBuddyProtocol {
     fn tool(&self) -> AiTool {
-        AiTool::Codex
+        AiTool::WorkBuddy
     }
     fn name(&self) -> &'static str {
-        "Codex"
+        "WorkBuddy"
     }
     fn slug(&self) -> &'static str {
-        "codex"
+        "workbuddy"
     }
     fn config_filename(&self) -> &'static str {
-        "hooks.json"
+        "settings.json"
     }
     fn preview_filename(&self) -> &'static str {
-        ".codex/hooks.json"
+        ".workbuddy/settings.json"
     }
     fn events(&self) -> &'static [HookEvent] {
         EVENTS
     }
 
     fn handler(&self, event: &HookEvent, commands: &ManagedCommands) -> Value {
-        let mut command = json!({
-            "type": "command",
-            "command": commands.posix,
-            "commandWindows": commands.windows,
-        });
-        if event.name == "SessionEnd" {
-            command["timeout"] = json!(3);
-        }
-        json!([{ "hooks": [command] }])
+        command_group(platform_command(commands), event.matcher)
     }
 
-    // Codex 需要在 CLI 中运行 /hooks 审核并信任新增规则。
+    // WorkBuddy 需要在 Hooks 配置面板中审核并信任新增规则。
     fn requires_review(&self) -> bool {
-        true
-    }
-
-    // Codex 启动时会快照 Hooks 配置，需重启 App 或新建任务才能生效。
-    fn restart_required(&self) -> bool {
         true
     }
 }

@@ -15,6 +15,8 @@ export interface MonitorSettings {
   deviceName: string;
   /** 在线设备自动检查间隔（分钟），默认 1 分钟；保存后后台发现循环立即生效。 */
   discoveryIntervalMinutes: number;
+  /** 在监控管理和 Hooks 管理中显示的 AI 客户端。 */
+  enabledAiTools: AiTool[];
 }
 
 // 局域网内被发现的一台 AiMonitor 设备，对应 Rust 侧 DiscoveredMonitorDevice DTO
@@ -54,7 +56,15 @@ export interface RemoteImage {
 }
 
 // 支持接入的 AI 工具类型
-export type AiTool = "codex" | "claudeCode" | "cursor";
+export type AiTool =
+  | "codex"
+  | "claudeCode"
+  | "cursor"
+  | "openCode"
+  | "workBuddy"
+  | "harness"
+  | "openClaw"
+  | "codeBuddy";
 
 // hook 触发时对应的行为状态
 export type HookBehavior = "idle" | "running" | "asking" | "error";
@@ -89,9 +99,9 @@ export interface HookConfigWriteResult {
   filename: string;
   // 本次写入是否实际改变了配置内容
   configChanged: boolean;
-  /** 仅 Codex 且配置发生变化时为真：Codex 不会热加载 hooks.json，需提示用户手动确认。 */
+  /** 工具要求用户审核新 Hook 且配置发生变化时为真。 */
   requiresReview: boolean;
-  /** 仅 Codex 且配置发生变化时为真：需提示用户重启 Codex 才能生效。 */
+  /** 工具需要重启当前会话或守护进程才能加载新配置时为真。 */
   restartRequired: boolean;
 }
 
@@ -171,6 +181,11 @@ export function saveDiscoveryInterval(
   return invokeCommand<MonitorSettings>("save_discovery_interval", {
     minutes,
   });
+}
+
+// 保存要在监控管理与 Hooks 管理中显示的 AI 客户端
+export function saveEnabledAiTools(tools: AiTool[]): Promise<MonitorSettings> {
+  return invokeCommand<MonitorSettings>("save_enabled_ai_tools", { tools });
 }
 
 // 触发一次局域网内 AiMonitor 设备发现，返回发现到的设备列表

@@ -109,7 +109,7 @@ Rust DTO 使用 `serde` 的 `camelCase` 输出以匹配 TypeScript。Command
 AI 工具的 Hooks 不再直接访问监控屏。桌面端是状态计算与转发的唯一事实来源：
 
 ```text
-Codex / Claude Code / Cursor Hook
+Codex / Claude Code / Cursor / OpenCode / WorkBuddy / Harness / OpenClaw / CodeBuddy Hook
   ↓ POST 127.0.0.1:10240/api/hooks/{tool}，原始 Hook JSON + 受配置控制的事件头
 Rust 本机 Hook listener
   ↓ 根据 tool + Hook type 推进纯 Rust 生命周期状态机
@@ -133,13 +133,18 @@ AIMonitor APK（单台失败不终止后续设备）
   慢或不可达时拖慢其余设备收到状态更新的时间）；单台失败不阻止其余设备。
   未配置的新设备从空 Profile 开始，不继承或转移上一台设备的配置。Hooks
   JSON 仍只连接固定本机中继，因此切换设备时无需重写。
-- 监控管理页保存 Profile、各 AI 工具配置目录并写入 Hooks 配置。“工作台”展示 Hook listener、队列及中继统计
+- 监控管理页只保存所选 AI 客户端的 Profile；设置页持久化 AI 客户端多选范围，
+  默认启用 Codex、Claude Code、Cursor，并由该范围共同控制监控管理和 Hooks 管理
+  的选项卡。各 AI 工具配置目录与写入 Hooks 配置集中在设置页独立的“Hooks 管理”
+  卡片。“工作台”展示 Hook listener、队列及中继统计
   （收到/转发成功/失败/待处理/时序抑制次数，以及最近一次事件与错误——均为跨设备的聚合计数，不含逐设备明细），
   以及当前在线设备列表（复用发现设备的 TanStack Query 缓存），并提供“强制
-  重新检查”按钮立即触发一次设备发现，不等待后台定时器。设置页管理共享用户名、
+  重新检查”按钮立即触发一次设备发现，不等待后台定时器。设置页卡片依次为
+  “AI 客户端”“Hooks 管理”“通用设置”；通用设置管理共享用户名、
   开机自启和在线设备自动检查间隔；写入时
-  Rust 读取当前编辑设备对应的已保存 Profile，只生成固定本机中继规则。配置
-  配置目录仍由 Rust 校验并持久化。完全没有在线设备时，监控管理和图片管理
+  Rust 读取当前编辑设备对应的已保存 Profile，只生成固定本机中继规则。Hooks
+  配置目录仍由 Rust 校验并持久化。用户名缺省时由 Rust 使用本机系统用户名。
+  完全没有在线设备时，监控管理和图片管理
   入口禁用，页面也不发起设备业务请求；侧栏明确显示“无可用设备”。
 - Hook 命令把工具写入 stdin 的原始 JSON 原样转发，因此 session、turn、退出
   原因等上下文不会在传输层丢失；`X-AIMonitor-Hook-Type` 仅作为不含
@@ -151,11 +156,22 @@ AIMonitor APK（单台失败不终止后续设备）
   `UserPromptSubmit` 等真实工作起点进入运行，`Stop`（包括用户中断后的轮次
   停止）回到空闲，`SessionEnd` 释放展示位；Stop 后的 `PostToolUse`、
   `SubagentStop`、`PostCompact` 不会重新激活状态，直到出现新的工作起点。
-- Codex、Claude Code、Cursor 的协议实现分别位于 `domain/monitor/hooks/`
+- Codex、Claude Code、Cursor、OpenCode、WorkBuddy、Harness、OpenClaw、CodeBuddy
+  的协议实现分别位于 `domain/monitor/hooks/`
   下的独立文件，并统一实现 `HookProtocol`。Trait 负责约束工具元数据、事件语义、
   原生 handler/config 结构、stdout 约定和托管条目清理；公共生成、合并和状态机
   不得按工具硬编码事件字符串。Cursor 的 `conversation_id`/`generation_id` 在
   listener 边界归一化为 session/turn，`stop.status=error` 归一化为异常展示。
+  OpenCode 使用官方自动发现的全局插件文件订阅公开事件流，独立文件只允许覆盖
+  带 AIMonitor 标识的内容；WorkBuddy 使用其内置 CodeBuddy Agent 引擎自 v2.48
+  起独立的 `~/.workbuddy/settings.json`，不与 CodeBuddy CLI 配置混用。
+  Harness 使用守护进程的 `agent-state-changed` 事件，并通过官方
+  `harness-cli list-agents --json` 聚合所有 pane 的状态；CodeBuddy 使用
+  `CODEBUDDY_CONFIG_DIR`（默认 `~/.codebuddy/settings.json`）及其 Git Bash/POSIX
+  command Hook 约定。OpenClaw 作为全局原生插件安装到状态目录的
+  `extensions/aimonitor/`，主入口、manifest 与 package metadata 在写入前统一校验，
+  任一既有文件不是 AIMonitor 管理时整组拒绝覆盖；安装后由用户显式启用插件、
+  授予 conversation lifecycle Hook 权限并重启 Gateway。
 - listener 与转发 worker 通过内存队列解耦，按接收顺序处理。每个目标设备
   只转发一次，失败后不重试，避免积压事件形成请求风暴；状态机还会消除
   不改变展示状态的重复事件，减少不必要的设备请求。

@@ -95,6 +95,8 @@ pub fn run() {
             commands::monitor::save_monitor_username,
             // 监控模块：保存设备发现轮询间隔
             commands::monitor::save_discovery_interval,
+            // 监控模块：保存设置页选中的 AI 客户端
+            commands::monitor::save_enabled_ai_tools,
             // 监控模块：发现局域网内的监控设备
             commands::monitor::discover_monitor_devices,
             // 监控模块：检查监控设备连接状态

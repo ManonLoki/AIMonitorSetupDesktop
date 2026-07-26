@@ -4,6 +4,11 @@
   --app-border: light-dark(#e8e9ee, #2c2e35);
   --app-muted: light-dark(#f7f7f9, #1d1f24);
   --app-canvas: light-dark(#fbfbfc, #15161a);
+  --app-surface: light-dark(#fff, #1d1f24);
+  --app-card-border: light-dark(#dcdee6, #383b45);
+  --app-card-shadow:
+    0 1px 2px rgba(20, 20, 30, 0.04),
+    0 8px 24px rgba(20, 20, 30, 0.045);
 }
 
 html,
@@ -283,8 +288,36 @@ body {
 .profile-row,
 .tool-summary-card,
 .empty-state {
-  border-color: var(--app-border);
-  box-shadow: 0 1px 2px rgba(20, 20, 30, 0.025);
+  border: 1px solid var(--app-card-border);
+  border-radius: 14px;
+  background: var(--app-surface);
+  box-shadow: var(--app-card-shadow);
+}
+
+.surface-card {
+  overflow: hidden;
+}
+
+.settings-page .settings-card {
+  line-height: 1.3;
+}
+
+.settings-page .mantine-InputWrapper-label {
+  font-size: var(--mantine-font-size-sm);
+  line-height: 1.25;
+}
+
+.settings-page .mantine-InputWrapper-description,
+.settings-page .mantine-Switch-description {
+  font-size: var(--mantine-font-size-xs);
+  line-height: 1.25;
+}
+
+.settings-page .mantine-Tabs-tab {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: var(--mantine-font-size-sm);
+  line-height: 1.2;
 }
 
 .empty-state-icon {
@@ -298,10 +331,11 @@ body {
 }
 
 .endpoint-preview {
-  padding: 10px 12px;
-  border: 1px solid var(--app-border);
-  border-radius: var(--mantine-radius-md);
-  background: var(--app-muted);
+  padding: 12px 14px;
+  border: 1px solid light-dark(#e1e3e9, #3b3e48);
+  border-radius: 11px;
+  background: light-dark(#fafaff, #26282f);
+  box-shadow: 0 1px 3px rgba(20, 20, 30, 0.035);
 }
 
 .device-status-dot {
@@ -322,12 +356,16 @@ body {
   overflow: hidden;
   transition:
     transform 160ms ease,
+    border-color 160ms ease,
     box-shadow 160ms ease;
 }
 
 .image-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 10px 30px rgba(20, 20, 30, 0.08);
+  border-color: light-dark(#c8cbd5, #515563);
+  box-shadow:
+    0 2px 5px rgba(20, 20, 30, 0.05),
+    0 14px 32px rgba(20, 20, 30, 0.09);
 }
 
 .image-preview {
@@ -363,7 +401,6 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: light-dark(#fff, #18191d);
 }
 
 .empty-state.compact {
@@ -385,7 +422,7 @@ body {
 }
 
 .profile-row {
-  background: light-dark(#fff, #18191d);
+  background: var(--app-surface);
 }
 
 .ai-tool-tabs .mantine-Tabs-list {
@@ -430,8 +467,94 @@ body {
 }
 
 .behavior-card {
-  border-color: var(--app-border);
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--app-card-border);
+  border-radius: 16px;
+  background: var(--app-surface);
+  box-shadow:
+    0 2px 4px rgba(20, 20, 30, 0.04),
+    0 12px 32px rgba(20, 20, 30, 0.065);
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.behavior-card::before {
+  position: absolute;
+  z-index: 1;
+  inset: 0 0 auto;
+  height: 4px;
+  content: "";
+  background: var(--behavior-accent);
+}
+
+.behavior-card[data-behavior="idle"] {
+  --behavior-accent: var(--mantine-color-gray-6);
+}
+
+.behavior-card[data-behavior="running"] {
+  --behavior-accent: var(--mantine-color-violet-6);
+}
+
+.behavior-card[data-behavior="asking"] {
+  --behavior-accent: var(--mantine-color-yellow-7);
+}
+
+.behavior-card[data-behavior="error"] {
+  --behavior-accent: var(--mantine-color-red-7);
+}
+
+.behavior-card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--behavior-accent) 45%, var(--app-border));
+  box-shadow:
+    0 2px 5px rgba(20, 20, 30, 0.06),
+    0 14px 32px rgba(20, 20, 30, 0.09);
+}
+
+.behavior-card-header {
+  padding: 18px 18px 14px;
+  border-bottom: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--behavior-accent) 6%, var(--app-surface));
+}
+
+.behavior-card-status {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--behavior-accent);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--behavior-accent) 14%, transparent);
+}
+
+.behavior-card-content {
+  padding: 18px;
+}
+
+.behavior-card .image-picker-trigger {
+  height: 132px;
+  border-radius: 11px;
   background: var(--app-muted);
+}
+
+.slot-section-card {
+  border-top: 3px solid var(--mantine-color-violet-5);
+}
+
+.profile-save-bar {
+  position: sticky;
+  z-index: 5;
+  bottom: 12px;
+  border: 1px solid var(--app-card-border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--app-surface) 92%, transparent);
+  box-shadow:
+    0 2px 5px rgba(20, 20, 30, 0.06),
+    0 14px 36px rgba(20, 20, 30, 0.1);
+  backdrop-filter: blur(14px);
 }
 
 .slot-picker {
@@ -449,7 +572,9 @@ body {
 }
 
 .slot-cell {
-  aspect-ratio: 1;
+  width: 40px;
+  height: 40px;
+  justify-self: center;
   display: grid;
   place-items: center;
   border: 1px solid var(--app-border);
@@ -614,5 +739,10 @@ body {
 
   .slot-grid {
     grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .slot-cell {
+    width: 38px;
+    height: 38px;
   }
 }
