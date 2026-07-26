@@ -20,6 +20,7 @@
 | 用途 | 选择 | 当前版本 | 使用边界 |
 | --- | --- | --- | --- |
 | UI | Mantine Core / Hooks | 9.4.2 | 组件、主题、响应式 UI |
+| 动效 | ReactBits `AnimatedContent` / GSAP | ReactBits 源码组件（2026-07-26）/ 3.15.0 | ReactBits 按官方源码组件模式放入 `shared/ui/react-bits/`；GSAP 只负责页面与内容入场，必须尊重系统减少动态效果设置 |
 | 路由 | TanStack Router | 1.170.18 | 页面、导航、URL 状态 |
 | 异步状态 | TanStack Query | 5.101.4 | Rust command 的生命周期、缓存和失效 |
 | 客户端状态 | Jotai | 2.20.2 | 主题、面板开关等纯 UI 状态 |

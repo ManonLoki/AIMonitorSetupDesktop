@@ -29,6 +29,7 @@ import { systemOverviewQuery } from "../../features/system/queries/system";
 import { DeviceSwitchMenu } from "../../features/monitor/components/DeviceSwitchMenu";
 // 引入监控连接状态 hook，用于判断当前是否有可用设备
 import { useMonitorConnection } from "../../features/monitor/hooks/useMonitorConnection";
+import { AnimatedContent } from "./react-bits/AnimatedContent";
 
 // 侧边导航菜单项配置：标签、目标路由、图标名、是否需要设备才可点击
 const navigation = [
@@ -184,8 +185,19 @@ export function AppShellLayout() {
           className="mobile-nav-trigger"
         />
         <main className="page-container">
-          {/* 路由出口：根据当前路径渲染对应的业务页面组件 */}
-          <Outlet />
+          {/* 路径变化时重新挂载 ReactBits 动效，让每个业务页面获得一致的入场过渡 */}
+          <AnimatedContent
+            key={pathname}
+            distance={18}
+            duration={0.48}
+            ease="power3.out"
+            initialOpacity={0.2}
+            scale={0.995}
+            threshold={0.01}
+            className="react-bits-page"
+          >
+            <Outlet />
+          </AnimatedContent>
         </main>
       </AppShell.Main>
     </AppShell>

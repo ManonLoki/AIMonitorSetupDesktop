@@ -1,6 +1,7 @@
 // 标准库：HashMap/HashSet 用于生命周期聚合与去重校验，Path 用于校验目录。
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::Duration;
 
 // serde：结构体/枚举的序列化与反序列化派生宏。
 use serde::{Deserialize, Serialize};
@@ -492,6 +493,10 @@ pub enum HookEventDecision {
     Unsupported,
 }
 
+/// 单个工具最多保留的 Hook 会话数。结束墓碑也计入上限，避免缺失
+/// `SessionEnd` 或监控进程中途启动时，无界积累会话状态。
+pub(crate) const MAX_TRACKED_HOOK_SESSIONS: usize = 256;
+
 /// 单个 AI 工具的生命周期状态。它不依赖墙上时钟，因此迟到多久的完成事件都
 /// 不会越过已经收到的 Stop/SessionEnd，把监控屏错误地切回运行中。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -504,6 +509,10 @@ struct HookSessionState {
     phase: HookPhase,
     turn_active: bool,
     turn_id: Option<String>,
+    /// 已收到 `SessionEnd` 的会话保留为空墓碑，用于拒绝随后迟到的事件。
+    ended: bool,
+    /// 由应用层注入的进程内单调经过时间，领域层不直接读取系统时钟。
+    last_seen_at: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -538,6 +547,7 @@ impl HookStateMachine {
 
     /// Cursor 的 `stop` 通过 `status` 区分正常完成和异常结束；其他工具当前由
     /// 独立事件表达错误。协议差异由工具适配器解析，状态机只消费归一化类别。
+    #[cfg(test)]
     pub fn apply_event_with_status(
         &mut self,
         tool: AiTool,
@@ -545,6 +555,20 @@ impl HookStateMachine {
         session_id: Option<&str>,
         turn_id: Option<&str>,
         status: Option<&str>,
+    ) -> HookEventDecision {
+        self.apply_event_with_status_at(tool, event, session_id, turn_id, status, Duration::ZERO)
+    }
+
+    /// 使用调用方提供的单调经过时间推进状态机。只有被接纳的事件会刷新
+    /// `last_seen_at`；被墓碑或轮次时序拒绝的迟到事件不能延长记录寿命。
+    pub(crate) fn apply_event_with_status_at(
+        &mut self,
+        tool: AiTool,
+        event: &str,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+        status: Option<&str>,
+        observed_at: Duration,
     ) -> HookEventDecision {
         let Some(event_kind) = event_kind(tool, event, status) else {
             return HookEventDecision::Unsupported;
@@ -554,34 +578,50 @@ impl HookStateMachine {
         let session_key = session_id.unwrap_or("__default__").to_owned();
 
         if event_kind == HookEventKind::SessionEnd {
-            self.sessions.remove(&session_key);
-            return phase_decision(previous, self.aggregate_phase());
+            return self.apply_session_end(session_key, observed_at, previous);
         }
 
         if event_kind == HookEventKind::SessionStart {
-            // Cursor 的 workspaceOpen 不带 conversation_id，先以默认占位展示空闲；
-            // 真正的 sessionStart 到来后必须替换该占位，否则 sessionEnd 后会残留
-            // 一个永远无法释放的“工作区会话”。
-            if session_id.is_some() {
-                self.sessions.remove("__default__");
-            }
-            self.sessions.insert(
+            return self.apply_session_start(
                 session_key,
-                HookSessionState {
-                    phase: HookPhase::Idle,
-                    turn_active: false,
-                    turn_id: None,
-                },
+                session_id.is_some(),
+                observed_at,
+                previous,
             );
-            return phase_decision(previous, self.aggregate_phase());
         }
 
-        let session = self.sessions.entry(session_key).or_default();
+        // 结束墓碑只允许显式 SessionStart 覆盖；任何迟到事件（包括重复 Stop
+        // 和新的工作事件）均不刷新墓碑时间，也不能隐式复活会话。
+        if self
+            .sessions
+            .get(&session_key)
+            .is_some_and(|session| session.ended)
+        {
+            return HookEventDecision::Ignore;
+        }
+
+        // 完成类事件不是可靠的工作起点。Monitor 若中途启动、没有见过对应
+        // 会话或工作开始，则直接忽略且不留下幽灵记录。
+        if matches!(event_kind, HookEventKind::WorkCompletion(_))
+            && !self.sessions.contains_key(&session_key)
+        {
+            return HookEventDecision::Ignore;
+        }
+
+        self.ensure_capacity_for(&session_key);
+        let session = self
+            .sessions
+            .entry(session_key)
+            .or_insert_with(|| HookSessionState {
+                last_seen_at: observed_at,
+                ..HookSessionState::default()
+            });
 
         if event_kind == HookEventKind::WorkStart {
             session.turn_active = true;
             session.turn_id = turn_id.map(str::to_owned);
             session.phase = HookPhase::Running;
+            session.last_seen_at = observed_at;
             return phase_decision(previous, self.aggregate_phase());
         }
 
@@ -591,6 +631,7 @@ impl HookStateMachine {
             }
             session.turn_active = false;
             session.phase = HookPhase::Idle;
+            session.last_seen_at = observed_at;
             return phase_decision(previous, self.aggregate_phase());
         }
 
@@ -626,13 +667,118 @@ impl HookStateMachine {
             }
         };
         session.phase = next;
+        session.last_seen_at = observed_at;
         phase_decision(previous, self.aggregate_phase())
     }
 
-    fn aggregate_phase(&self) -> HookPhase {
-        if self.sessions.is_empty() {
-            return HookPhase::Released;
+    fn apply_session_end(
+        &mut self,
+        session_key: String,
+        observed_at: Duration,
+        previous: HookPhase,
+    ) -> HookEventDecision {
+        if self
+            .sessions
+            .get(&session_key)
+            .is_some_and(|session| session.ended)
+        {
+            return HookEventDecision::Ignore;
         }
+
+        self.ensure_capacity_for(&session_key);
+        self.sessions.insert(
+            session_key,
+            HookSessionState {
+                phase: HookPhase::Released,
+                turn_active: false,
+                turn_id: None,
+                ended: true,
+                last_seen_at: observed_at,
+            },
+        );
+        let next = self.aggregate_phase();
+        // 即使 Monitor 在会话开始后才启动，也要让首次结束事件向目标设备
+        // 幂等释放一次。墓碑保证同一结束事件重放时不会形成请求风暴。
+        if next == HookPhase::Released {
+            return HookEventDecision::Forward(HookTransition::Release);
+        }
+        phase_decision(previous, next)
+    }
+
+    fn apply_session_start(
+        &mut self,
+        session_key: String,
+        has_session_id: bool,
+        observed_at: Duration,
+        previous: HookPhase,
+    ) -> HookEventDecision {
+        // Cursor 的 workspaceOpen 不带 conversation_id，先以默认占位展示空闲；
+        // 真正的 sessionStart 到来后必须替换该占位，否则 SessionEnd 后会残留
+        // 一个永远无法释放的“工作区会话”。
+        if has_session_id {
+            self.sessions.remove("__default__");
+        }
+        // 同一会话的重复或迟到 SessionStart 只算作存活信号，不能把已经
+        // Running/Asking/Error 的状态倒退回 Idle；真正结束后的 tombstone
+        // 仍允许由显式 SessionStart 覆盖，支持会话 ID 被上游重新使用。
+        if let Some(existing) = self.sessions.get_mut(&session_key)
+            && !existing.ended
+        {
+            existing.last_seen_at = observed_at;
+            return phase_decision(previous, self.aggregate_phase());
+        }
+        self.ensure_capacity_for(&session_key);
+        self.sessions.insert(
+            session_key,
+            HookSessionState {
+                phase: HookPhase::Idle,
+                turn_active: false,
+                turn_id: None,
+                ended: false,
+                last_seen_at: observed_at,
+            },
+        );
+        phase_decision(previous, self.aggregate_phase())
+    }
+
+    /// 一次性清理所有到期记录，并只根据清理前后的最终聚合状态返回一个决定。
+    /// 使用 `saturating_sub` 防御调用方意外传入较小时间值，避免下溢。
+    pub(crate) fn expire_inactive_sessions(
+        &mut self,
+        observed_at: Duration,
+        timeout: Duration,
+    ) -> HookEventDecision {
+        let previous = self.aggregate_phase();
+        self.sessions
+            .retain(|_, session| observed_at.saturating_sub(session.last_seen_at) < timeout);
+        phase_decision(previous, self.aggregate_phase())
+    }
+
+    /// 为新会话腾出一个位置：优先淘汰最旧墓碑，其次最旧非活跃会话，
+    /// 最后才淘汰最旧活跃会话。相同时间以会话键排序，保证行为可复现。
+    fn ensure_capacity_for(&mut self, session_key: &str) {
+        if self.sessions.contains_key(session_key) {
+            return;
+        }
+        while self.sessions.len() >= MAX_TRACKED_HOOK_SESSIONS {
+            let Some(eviction_key) = self
+                .sessions
+                .iter()
+                .min_by(|(left_key, left), (right_key, right)| {
+                    session_eviction_priority(left)
+                        .cmp(&session_eviction_priority(right))
+                        .then_with(|| left.last_seen_at.cmp(&right.last_seen_at))
+                        .then_with(|| left_key.cmp(right_key))
+                })
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.sessions.remove(&eviction_key);
+        }
+    }
+
+    fn aggregate_phase(&self) -> HookPhase {
         [
             HookPhase::Asking,
             HookPhase::Error,
@@ -643,9 +789,24 @@ impl HookStateMachine {
         .find(|phase| {
             self.sessions
                 .values()
-                .any(|session| session.phase == *phase)
+                .any(|session| !session.ended && session.phase == *phase)
         })
-        .unwrap_or(HookPhase::Idle)
+        .unwrap_or(HookPhase::Released)
+    }
+
+    #[cfg(test)]
+    fn tracked_session_count(&self) -> usize {
+        self.sessions.len()
+    }
+}
+
+fn session_eviction_priority(session: &HookSessionState) -> u8 {
+    if session.ended {
+        0
+    } else if !session.turn_active {
+        1
+    } else {
+        2
     }
 }
 
@@ -778,19 +939,21 @@ pub fn resize_and_compress_image(bytes: &[u8], mime_type: &str) -> Result<Vec<u8
 // 仅在测试构建中编译的单元测试模块，覆盖本文件内的纯业务逻辑。
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde_json::Value;
 
     // 引入被测的类型与函数（父模块中的公开/私有项）。
     use super::{
         AiProfile, AiTool, DEFAULT_BASE_URL, DEFAULT_DISCOVERY_INTERVAL_MINUTES, HookBehavior,
-        HookConfigDirectories, HookConfigPreview, HookContent, HookEventDecision, HookStateMachine,
-        HookTransition, MANAGED_HOOK_PREFIX, MAX_DISCOVERY_INTERVAL_MINUTES, MAX_UPLOAD_IMAGE_EDGE,
-        MonitorDeviceRoute, MonitorSettings, SavedMonitorData, command_has_marker,
-        decoded_hook_command, default_enabled_ai_tools, generate_hook_auxiliary_configs,
-        generate_hook_config, hook_transition, managed_hook_marker, merge_hook_config,
-        normalize_base_url, normalize_enabled_ai_tools, resize_and_compress_image,
-        validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
-        validate_username,
+        HookConfigDirectories, HookConfigPreview, HookContent, HookEventDecision, HookPhase,
+        HookStateMachine, HookTransition, MANAGED_HOOK_PREFIX, MAX_DISCOVERY_INTERVAL_MINUTES,
+        MAX_TRACKED_HOOK_SESSIONS, MAX_UPLOAD_IMAGE_EDGE, MonitorDeviceRoute, MonitorSettings,
+        SavedMonitorData, command_has_marker, decoded_hook_command, default_enabled_ai_tools,
+        generate_hook_auxiliary_configs, generate_hook_config, hook_transition,
+        managed_hook_marker, merge_hook_config, normalize_base_url, normalize_enabled_ai_tools,
+        resize_and_compress_image, validate_discovery_interval_minutes, validate_profile,
+        validate_saved_monitor_data, validate_username,
     };
 
     // 测试用的工厂函数：构造一个四种行为齐全、校验可通过的合法 Profile。
@@ -1353,6 +1516,42 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_session_start_does_not_regress_an_active_session() {
+        let mut machine = HookStateMachine::default();
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "SessionStart",
+            Some("s1"),
+            None,
+            None,
+            Duration::from_secs(1),
+        );
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "UserPromptSubmit",
+            Some("s1"),
+            Some("t1"),
+            None,
+            Duration::from_secs(2),
+        );
+
+        assert_eq!(
+            machine.apply_event_with_status_at(
+                AiTool::Codex,
+                "SessionStart",
+                Some("s1"),
+                None,
+                None,
+                Duration::from_secs(3),
+            ),
+            HookEventDecision::Ignore
+        );
+        assert_eq!(machine.sessions["s1"].phase, HookPhase::Running);
+        assert!(machine.sessions["s1"].turn_active);
+        assert_eq!(machine.sessions["s1"].last_seen_at, Duration::from_secs(3));
+    }
+
+    #[test]
     fn cursor_stop_status_distinguishes_failure_from_completion() {
         let mut machine = HookStateMachine::default();
 
@@ -1468,6 +1667,263 @@ mod tests {
             machine.apply_event(AiTool::Codex, "Stop", Some("s1"), Some("new-turn")),
             HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
         );
+    }
+
+    #[test]
+    fn orphan_completion_is_ignored_without_leaving_a_ghost_session() {
+        let mut machine = HookStateMachine::default();
+
+        assert_eq!(
+            machine.apply_event_with_status_at(
+                AiTool::Codex,
+                "PostToolUse",
+                Some("late-session"),
+                Some("turn-1"),
+                None,
+                Duration::from_secs(10),
+            ),
+            HookEventDecision::Ignore
+        );
+        assert_eq!(machine.tracked_session_count(), 0);
+
+        // 与完成事件不同，真实工作进展可以作为 Monitor 中途启动后的首个事件。
+        assert_eq!(
+            machine.apply_event_with_status_at(
+                AiTool::Codex,
+                "PreToolUse",
+                Some("live-session"),
+                Some("turn-1"),
+                None,
+                Duration::from_secs(11),
+            ),
+            HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
+        );
+        assert_eq!(machine.tracked_session_count(), 1);
+    }
+
+    #[test]
+    fn ended_tombstone_rejects_late_events_until_explicit_restart() {
+        let mut machine = HookStateMachine::default();
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "UserPromptSubmit",
+            Some("s1"),
+            Some("t1"),
+            None,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            machine.apply_event_with_status_at(
+                AiTool::Codex,
+                "SessionEnd",
+                Some("s1"),
+                None,
+                None,
+                Duration::from_secs(2),
+            ),
+            HookEventDecision::Forward(HookTransition::Release)
+        );
+
+        for event in [
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "PermissionRequest",
+            "Stop",
+        ] {
+            assert_eq!(
+                machine.apply_event_with_status_at(
+                    AiTool::Codex,
+                    event,
+                    Some("s1"),
+                    Some("t1"),
+                    None,
+                    Duration::from_secs(100),
+                ),
+                HookEventDecision::Ignore,
+                "墓碑应拒绝迟到事件 {event}"
+            );
+        }
+        assert_eq!(machine.sessions["s1"].last_seen_at, Duration::from_secs(2));
+
+        assert_eq!(
+            machine.apply_event_with_status_at(
+                AiTool::Codex,
+                "SessionStart",
+                Some("s1"),
+                None,
+                None,
+                Duration::from_secs(101),
+            ),
+            HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+        );
+        assert!(!machine.sessions["s1"].ended);
+    }
+
+    #[test]
+    fn unknown_session_end_releases_once_without_overriding_other_live_sessions() {
+        let mut machine = HookStateMachine::default();
+
+        assert_eq!(
+            machine.apply_event_with_status_at(
+                AiTool::Codex,
+                "SessionEnd",
+                Some("unknown"),
+                None,
+                None,
+                Duration::from_secs(1),
+            ),
+            HookEventDecision::Forward(HookTransition::Release)
+        );
+        assert_eq!(
+            machine.apply_event_with_status_at(
+                AiTool::Codex,
+                "SessionEnd",
+                Some("unknown"),
+                None,
+                None,
+                Duration::from_secs(2),
+            ),
+            HookEventDecision::Ignore
+        );
+        assert_eq!(
+            machine.sessions["unknown"].last_seen_at,
+            Duration::from_secs(1)
+        );
+
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "UserPromptSubmit",
+            Some("live"),
+            Some("turn"),
+            None,
+            Duration::from_secs(3),
+        );
+        assert_eq!(
+            machine.apply_event_with_status_at(
+                AiTool::Codex,
+                "SessionEnd",
+                Some("another-unknown"),
+                None,
+                None,
+                Duration::from_secs(4),
+            ),
+            HookEventDecision::Ignore
+        );
+    }
+
+    #[test]
+    fn expiring_sessions_batches_changes_into_one_final_aggregate_transition() {
+        let mut machine = HookStateMachine::default();
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "UserPromptSubmit",
+            Some("asking"),
+            Some("t1"),
+            None,
+            Duration::ZERO,
+        );
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "PermissionRequest",
+            Some("asking"),
+            Some("t1"),
+            None,
+            Duration::ZERO,
+        );
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "UserPromptSubmit",
+            Some("running"),
+            Some("t2"),
+            None,
+            Duration::from_secs(5),
+        );
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "SessionStart",
+            Some("idle"),
+            None,
+            None,
+            Duration::from_secs(15),
+        );
+
+        // Asking 和 Running 同批到期；对外只暴露最终仍存活的 Idle 聚合态。
+        assert_eq!(
+            machine.expire_inactive_sessions(Duration::from_secs(20), Duration::from_secs(10),),
+            HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+        );
+        assert_eq!(machine.tracked_session_count(), 1);
+        assert_eq!(
+            machine.expire_inactive_sessions(Duration::from_secs(26), Duration::from_secs(10),),
+            HookEventDecision::Forward(HookTransition::Release)
+        );
+        assert_eq!(machine.tracked_session_count(), 0);
+    }
+
+    #[test]
+    fn session_tracking_stays_bounded_and_uses_eviction_priority() {
+        let mut machine = HookStateMachine::default();
+        for index in 0..MAX_TRACKED_HOOK_SESSIONS {
+            let session_id = format!("session-{index:03}");
+            machine.apply_event_with_status_at(
+                AiTool::Codex,
+                "UserPromptSubmit",
+                Some(&session_id),
+                Some("turn"),
+                None,
+                Duration::from_secs(index as u64),
+            );
+        }
+        assert_eq!(machine.tracked_session_count(), MAX_TRACKED_HOOK_SESSIONS);
+
+        // 即使墓碑较新，也应先于任何活跃会话淘汰。
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "SessionEnd",
+            Some("session-000"),
+            None,
+            None,
+            Duration::from_mins(5),
+        );
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "UserPromptSubmit",
+            Some("overflow-1"),
+            Some("turn"),
+            None,
+            Duration::from_secs(301),
+        );
+        assert!(!machine.sessions.contains_key("session-000"));
+
+        // 非活跃会话其次；只有两类都不存在时才淘汰最旧活跃会话。
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "Stop",
+            Some("session-001"),
+            Some("turn"),
+            None,
+            Duration::from_secs(302),
+        );
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "UserPromptSubmit",
+            Some("overflow-2"),
+            Some("turn"),
+            None,
+            Duration::from_secs(303),
+        );
+        assert!(!machine.sessions.contains_key("session-001"));
+        machine.apply_event_with_status_at(
+            AiTool::Codex,
+            "UserPromptSubmit",
+            Some("overflow-3"),
+            Some("turn"),
+            None,
+            Duration::from_secs(304),
+        );
+        assert!(!machine.sessions.contains_key("session-002"));
+        assert_eq!(machine.tracked_session_count(), MAX_TRACKED_HOOK_SESSIONS);
     }
 
     // 测试辅助函数：生成指定宽高、指定格式的纯色测试图片字节数据。

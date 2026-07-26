@@ -62,6 +62,22 @@ const HOOK_BIND_ADDRESS: &str = "127.0.0.1";
 const MAX_HOOK_BODY_BYTES: usize = 4 * 1024 * 1024;
 // 完整 HTTP 请求额外为请求头预留 8 KiB。
 const MAX_HOOK_REQUEST_BYTES: usize = MAX_HOOK_BODY_BYTES + 8 * 1024;
+// listener 到状态机 worker 的队列使用固定容量；状态机推进不再等待设备网络，
+// 正常情况下会很快腾出空间，极端洪峰则通过短暂背压保护进程内存。
+const HOOK_EVENT_QUEUE_CAPACITY: usize = 256;
+// 每个工具在自己的投递 worker 前最多只需要一个唤醒令牌：若该工具已经有
+// 一个待发送的最新状态，后续事件只覆盖 mailbox，不再重复排队唤醒。
+const HOOK_RELAY_WAKE_QUEUE_CAPACITY: usize = 1;
+// 会话长时间没有任何事件时视为孤儿并回收。新事件仍可按当前事件语义重新建立
+// 隐式会话，因此超时不会让后续真实状态永久丢失。
+const HOOK_SESSION_INACTIVITY_TIMEOUT: Duration = Duration::from_mins(30);
+// 即使没有新 Hook，也按此粒度清扫一次超时会话。
+const HOOK_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+// 会进入队列或状态机长期保存的上下文字段使用独立上限，避免单个合法 4 MiB
+// JSON 里的超长标识在洪峰时放大内存占用。
+const MAX_HOOK_SESSION_ID_BYTES: usize = 512;
+const MAX_HOOK_TURN_ID_BYTES: usize = 512;
+const MAX_HOOK_STATUS_BYTES: usize = 64;
 // 连续多少次发现轮询未命中某设备后，才将其判定为离线并移除。
 const DISCOVERY_MISSES_BEFORE_REMOVAL: u8 = 2;
 /// 后台发现循环的轮询粒度：每次醒来都会重新读取当前配置的检查间隔，
@@ -701,12 +717,20 @@ impl MonitorService {
                     return;
                 }
             };
-            // 建立一个 mpsc 通道：监听线程只负责快速接收连接、解析请求后扔进队列，
-            // 真正耗时的转发工作交给独立的 worker 线程串行处理，避免阻塞新连接的接收。
-            let (sender, receiver) = mpsc::channel::<IncomingHookEvent>();
+            // 建立一个有界 mpsc 通道：listener 只负责接收、解析并交给状态机 worker。
+            // 状态推进与设备网络投递已拆成两个阶段，worker 不会被慢设备阻塞；容量
+            // 仍设为固定值，为异常洪峰提供背压并从根源上避免原始事件无界堆积。
+            let (sender, receiver) =
+                mpsc::sync_channel::<IncomingHookEvent>(HOOK_EVENT_QUEUE_CAPACITY);
             let worker_data = Arc::clone(&data);
             let worker_status = Arc::clone(&status);
-            spawn_hook_worker(client, receiver, worker_data, online_devices, worker_status);
+            spawn_hook_worker(
+                &client,
+                receiver,
+                &worker_data,
+                &online_devices,
+                worker_status,
+            );
 
             // 主循环：逐个接受 TCP 连接（阻塞式监听器，来一个处理一个）。
             for connection in listener.incoming() {
@@ -1487,57 +1511,254 @@ impl MonitorService {
     }
 }
 
+// 状态机已经按接收顺序算出的目标状态。`counts_as_hook` 区分真实入队事件与
+// 会话超时产生的内部转换，避免内部 GC 污染 received/pending 统计。
+#[derive(Debug)]
+struct PendingHookRelay {
+    tool: AiTool,
+    hook_type: String,
+    transition: HookTransition,
+    counts_as_hook: bool,
+}
+
+type PendingHookRelays = Arc<Mutex<HashMap<AiTool, PendingHookRelay>>>;
+type HookRelayWakeSenders = HashMap<AiTool, mpsc::SyncSender<()>>;
+
 fn spawn_hook_worker(
-    client: reqwest::blocking::Client,
+    client: &reqwest::blocking::Client,
     receiver: mpsc::Receiver<IncomingHookEvent>,
+    data: &Arc<RwLock<SavedMonitorData>>,
+    online_devices: &Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
+    status: Arc<RwLock<HookRelayStatus>>,
+) {
+    // 网络投递使用 latest-wins mailbox：每个工具至多一个正在发送的状态和一个
+    // 尚未发送的最新状态。旧的待发送中间态会被覆盖，但所有原始事件仍先按序推进
+    // 状态机，因此 Stop/SessionEnd 等时序屏障不会被跳过。
+    let pending_relays = Arc::new(Mutex::new(HashMap::<AiTool, PendingHookRelay>::new()));
+    let relay_wake_senders =
+        spawn_hook_delivery_workers(client, &pending_relays, data, online_devices, &status);
+
+    thread::spawn(move || {
+        // 每个工具拥有独立生命周期状态机。状态机线程只执行纯内存计算，不等待
+        // 设备网络，因此有界 ingress 队列在正常洪峰下也能快速被消费。
+        let mut state_machines = HashMap::<AiTool, HookStateMachine>::new();
+        let clock_started_at = Instant::now();
+        let mut last_sweep_at = Instant::now();
+
+        loop {
+            match receiver.recv_timeout(HOOK_SESSION_SWEEP_INTERVAL) {
+                Ok(event) => {
+                    let observed_at = clock_started_at.elapsed();
+                    // 持续有流量时 recv_timeout 不会进入 Timeout 分支，所以仍需按
+                    // 固定粒度主动清扫，确保洪峰本身不能阻止会话过期。
+                    if last_sweep_at.elapsed() >= HOOK_SESSION_SWEEP_INTERVAL {
+                        expire_inactive_hook_sessions(
+                            &mut state_machines,
+                            observed_at,
+                            &pending_relays,
+                            &relay_wake_senders,
+                            &status,
+                        );
+                        last_sweep_at = Instant::now();
+                    }
+
+                    let IncomingHookEvent {
+                        tool,
+                        hook_type,
+                        session_id,
+                        turn_id,
+                        status: event_status,
+                    } = event;
+                    let decision = state_machines
+                        .entry(tool)
+                        .or_default()
+                        .apply_event_with_status_at(
+                            tool,
+                            &hook_type,
+                            session_id.as_deref(),
+                            turn_id.as_deref(),
+                            event_status.as_deref(),
+                            observed_at,
+                        );
+                    match decision {
+                        HookEventDecision::Forward(transition) => enqueue_latest_hook_relay(
+                            &pending_relays,
+                            &relay_wake_senders,
+                            &status,
+                            PendingHookRelay {
+                                tool,
+                                hook_type,
+                                transition,
+                                counts_as_hook: true,
+                            },
+                        ),
+                        HookEventDecision::Ignore => {
+                            record_suppressed_hook(&status, tool, &hook_type);
+                        }
+                        HookEventDecision::Unsupported => record_hook_results(
+                            &status,
+                            tool,
+                            &hook_type,
+                            None,
+                            0,
+                            &[format!("不支持的 Hook 类型：{hook_type}")],
+                        ),
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    expire_inactive_hook_sessions(
+                        &mut state_machines,
+                        clock_started_at.elapsed(),
+                        &pending_relays,
+                        &relay_wake_senders,
+                        &status,
+                    );
+                    last_sweep_at = Instant::now();
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+}
+
+fn spawn_hook_delivery_workers(
+    client: &reqwest::blocking::Client,
+    pending_relays: &PendingHookRelays,
+    data: &Arc<RwLock<SavedMonitorData>>,
+    online_devices: &Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
+    status: &Arc<RwLock<HookRelayStatus>>,
+) -> HookRelayWakeSenders {
+    let mut wake_senders = HashMap::with_capacity(AiTool::ALL.len());
+    for tool in AiTool::ALL {
+        let (sender, receiver) = mpsc::sync_channel::<()>(HOOK_RELAY_WAKE_QUEUE_CAPACITY);
+        spawn_hook_delivery_worker(
+            tool,
+            client.clone(),
+            receiver,
+            Arc::clone(pending_relays),
+            Arc::clone(data),
+            Arc::clone(online_devices),
+            Arc::clone(status),
+        );
+        wake_senders.insert(tool, sender);
+    }
+    wake_senders
+}
+
+fn spawn_hook_delivery_worker(
+    tool: AiTool,
+    client: reqwest::blocking::Client,
+    receiver: mpsc::Receiver<()>,
+    pending_relays: PendingHookRelays,
     data: Arc<RwLock<SavedMonitorData>>,
     online_devices: Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
     status: Arc<RwLock<HookRelayStatus>>,
 ) {
     thread::spawn(move || {
-        // 每个工具拥有独立的纯生命周期状态机；它根据事件顺序而不是时间窗口
-        // 决定是否转发，因此用户中断后的迟到完成事件不会让状态反弹。
-        let mut state_machines = HashMap::<AiTool, HookStateMachine>::new();
-        while let Ok(event) = receiver.recv() {
-            let IncomingHookEvent {
-                tool,
-                hook_type,
-                session_id,
-                turn_id,
-                status: event_status,
-            } = event;
-            let decision = state_machines
-                .entry(tool)
-                .or_default()
-                .apply_event_with_status(
-                    tool,
-                    &hook_type,
-                    session_id.as_deref(),
-                    turn_id.as_deref(),
-                    event_status.as_deref(),
-                );
-            match decision {
-                HookEventDecision::Forward(transition) => relay_hook(
-                    &client,
-                    &data,
-                    &online_devices,
-                    &status,
-                    tool,
-                    &hook_type,
-                    transition,
-                ),
-                HookEventDecision::Ignore => record_suppressed_hook(&status, tool, &hook_type),
-                HookEventDecision::Unsupported => record_hook_results(
-                    &status,
-                    tool,
-                    &hook_type,
-                    None,
-                    0,
-                    &[format!("不支持的 Hook 类型：{hook_type}")],
-                ),
-            }
+        while receiver.recv().is_ok() {
+            let pending = pending_relays
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&tool));
+            let Some(pending) = pending else {
+                continue;
+            };
+            relay_hook_with_accounting(&client, &data, &online_devices, &status, &pending);
         }
     });
+}
+
+fn enqueue_latest_hook_relay(
+    pending_relays: &PendingHookRelays,
+    wake_senders: &HookRelayWakeSenders,
+    status: &Arc<RwLock<HookRelayStatus>>,
+    relay: PendingHookRelay,
+) {
+    let tool = relay.tool;
+    let (should_wake, displaced) = if let Ok(mut pending) = pending_relays.lock() {
+        let displaced = pending.insert(tool, relay);
+        (displaced.is_none(), displaced)
+    } else {
+        record_relay_failure(status, "Hook 最新状态队列不可用".to_owned());
+        return;
+    };
+
+    // 被覆盖的真实 Hook 已经不需要设备投递，但仍必须完成其 pending/received
+    // 记账；把它计入 suppressed 可让工作台准确反映 latest-wins 的合并次数。
+    if let Some(displaced) = displaced
+        && displaced.counts_as_hook
+    {
+        record_suppressed_hook(status, displaced.tool, &displaced.hook_type);
+    }
+
+    let Some(wake_sender) = wake_senders.get(&tool) else {
+        let dropped = pending_relays
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(&tool));
+        if let Some(dropped) = dropped {
+            if dropped.counts_as_hook {
+                record_hook_results(
+                    status,
+                    dropped.tool,
+                    &dropped.hook_type,
+                    None,
+                    0,
+                    &["Hook 工具投递 worker 未启动".to_owned()],
+                );
+            } else {
+                record_relay_failure(status, "Hook 工具投递 worker 未启动".to_owned());
+            }
+        }
+        return;
+    };
+
+    if should_wake && wake_sender.send(()).is_err() {
+        let dropped = pending_relays
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(&tool));
+        if let Some(dropped) = dropped {
+            if dropped.counts_as_hook {
+                record_hook_results(
+                    status,
+                    dropped.tool,
+                    &dropped.hook_type,
+                    None,
+                    0,
+                    &["Hook 设备投递线程已停止".to_owned()],
+                );
+            } else {
+                record_relay_failure(status, "Hook 设备投递线程已停止".to_owned());
+            }
+        }
+    }
+}
+
+fn expire_inactive_hook_sessions(
+    state_machines: &mut HashMap<AiTool, HookStateMachine>,
+    observed_at: Duration,
+    pending_relays: &PendingHookRelays,
+    wake_senders: &HookRelayWakeSenders,
+    status: &Arc<RwLock<HookRelayStatus>>,
+) {
+    for (&tool, machine) in state_machines.iter_mut() {
+        if let HookEventDecision::Forward(transition) =
+            machine.expire_inactive_sessions(observed_at, HOOK_SESSION_INACTIVITY_TIMEOUT)
+        {
+            enqueue_latest_hook_relay(
+                pending_relays,
+                wake_senders,
+                status,
+                PendingHookRelay {
+                    tool,
+                    hook_type: "SessionTimeout".to_owned(),
+                    transition,
+                    counts_as_hook: false,
+                },
+            );
+        }
+    }
 }
 
 // 从 Hook 中继监听收到的 TCP 连接里读取并解析出一个 Hook 请求，返回涉及的 AI 工具与事件类型。
@@ -1643,17 +1864,40 @@ fn read_hook_request(stream: &mut TcpStream) -> Result<IncomingHookEvent, String
     if hook_type.is_empty() || hook_type.len() > 128 {
         return Err("Hook 类型不能为空且不能超过 128 个字符".to_owned());
     }
+    let session_id =
+        normalize_hook_context_field(body.session_id, "session_id", MAX_HOOK_SESSION_ID_BYTES)?;
+    let turn_id = normalize_hook_context_field(body.turn_id, "turn_id", MAX_HOOK_TURN_ID_BYTES)?;
+    let status = normalize_hook_context_field(body.status, "status", MAX_HOOK_STATUS_BYTES)?;
     Ok(IncomingHookEvent {
         tool,
         hook_type: hook_type.to_owned(),
-        session_id: body.session_id,
-        turn_id: body.turn_id,
-        status: body.status,
+        session_id,
+        turn_id,
+        status,
     })
+}
+
+fn normalize_hook_context_field(
+    value: Option<String>,
+    field: &str,
+    max_bytes: usize,
+) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > max_bytes {
+        return Err(format!("Hook {field} 不能超过 {max_bytes} 个 UTF-8 字节"));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 // 处理一个已通过去抖判定的 Hook 事件：转换为业务行为、找出所有配置了该工具的
 // 在线优先设备，并发转发过去，最终把结果（成功数/错误列表）记录进中继状态。
+#[cfg(test)]
 fn relay_hook(
     client: &reqwest::blocking::Client,
     data: &Arc<RwLock<SavedMonitorData>>,
@@ -1663,15 +1907,36 @@ fn relay_hook(
     hook_type: &str,
     transition: HookTransition,
 ) {
+    let pending = PendingHookRelay {
+        tool,
+        hook_type: hook_type.to_owned(),
+        transition,
+        counts_as_hook: true,
+    };
+    relay_hook_with_accounting(client, data, online_devices, status, &pending);
+}
+
+fn relay_hook_with_accounting(
+    client: &reqwest::blocking::Client,
+    data: &Arc<RwLock<SavedMonitorData>>,
+    online_devices: &Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
+    status: &Arc<RwLock<HookRelayStatus>>,
+    pending: &PendingHookRelay,
+) {
+    let tool = pending.tool;
+    let hook_type = pending.hook_type.as_str();
+    let transition = pending.transition;
+    let counts_as_hook = pending.counts_as_hook;
     // 读取共享配置数据；锁损坏则记录失败并返回。
     let Ok(data) = data.read() else {
-        record_hook_results(
+        record_hook_results_with_accounting(
             status,
             tool,
             hook_type,
             None,
             0,
             &["转发配置读取锁已损坏".to_owned()],
+            counts_as_hook,
         );
         return;
     };
@@ -1704,13 +1969,14 @@ fn relay_hook(
     targets.sort_by_key(|(device, _)| !online_ids.contains(device.device_id.as_str()));
     // 没有任何目标设备配置了该工具，记录提示信息并返回。
     if targets.is_empty() {
-        record_hook_results(
+        record_hook_results_with_accounting(
             status,
             tool,
             hook_type,
             None,
             0,
             &["尚未配置该 AI 的转发位置".to_owned()],
+            counts_as_hook,
         );
         return;
     }
@@ -1730,7 +1996,15 @@ fn relay_hook(
         &online_snapshot,
     );
     // 把本次转发的结果写入中继状态，供前端查询展示。
-    record_hook_results(status, tool, hook_type, behavior, forwarded, &errors);
+    record_hook_results_with_accounting(
+        status,
+        tool,
+        hook_type,
+        behavior,
+        forwarded,
+        &errors,
+        counts_as_hook,
+    );
 }
 
 /// 并发转发给每台已配置该 AI 的设备：先一次性 spawn 所有目标的转发线程，
@@ -1909,8 +2183,27 @@ fn record_hook_results(
     forwarded: u64,
     errors: &[String],
 ) {
+    record_hook_results_with_accounting(status, tool, hook_type, behavior, forwarded, errors, true);
+}
+
+fn record_hook_results_with_accounting(
+    status: &Arc<RwLock<HookRelayStatus>>,
+    tool: AiTool,
+    hook_type: &str,
+    behavior: Option<HookBehavior>,
+    forwarded: u64,
+    errors: &[String],
+    counts_as_hook: bool,
+) {
     if let Ok(mut current) = status.write() {
-        begin_hook_completion(&mut current, tool, hook_type);
+        if counts_as_hook {
+            begin_hook_completion(&mut current, tool, hook_type);
+        } else {
+            // 超时清扫产生的是内部状态转换，不凭空增加收到数，也不消耗一个
+            // pending；仍更新最近工具/类型，让自动释放在工作台中可解释。
+            current.last_tool = Some(tool);
+            hook_type.clone_into(&mut current.last_hook_type);
+        }
         current.forwarded_count += forwarded;
         current.failed_count += errors.len() as u64;
         current.last_behavior = behavior;
@@ -2097,6 +2390,39 @@ mod tests {
         }
     }
 
+    fn two_tool_delivery_data(
+        codex_address: SocketAddr,
+        claude_address: SocketAddr,
+    ) -> SavedMonitorData {
+        let mut claude_profile = test_profile();
+        claude_profile.tool = AiTool::ClaudeCode;
+        claude_profile.device_id = "screen-2".to_owned();
+        claude_profile.slot = 2;
+        SavedMonitorData {
+            settings: MonitorSettings {
+                base_url: format!("http://{codex_address}"),
+                username: "Manon".to_owned(),
+                device_id: "screen-1".to_owned(),
+                device_name: "Desk".to_owned(),
+                ..MonitorSettings::default()
+            },
+            devices: vec![
+                MonitorDeviceRoute {
+                    base_url: format!("http://{codex_address}"),
+                    device_id: "screen-1".to_owned(),
+                    device_name: "Desk".to_owned(),
+                },
+                MonitorDeviceRoute {
+                    base_url: format!("http://{claude_address}"),
+                    device_id: "screen-2".to_owned(),
+                    device_name: "Studio".to_owned(),
+                },
+            ],
+            profiles: vec![test_profile(), claude_profile],
+            hook_config_directories: HookConfigDirectories::default(),
+        }
+    }
+
     #[test]
     fn empty_username_defaults_to_the_local_system_username() {
         let unique = SystemTime::now()
@@ -2184,6 +2510,329 @@ mod tests {
                 status: Some("cancelled".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn local_hook_request_rejects_context_identifiers_that_could_bloat_the_queue() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let oversized_session_id = "s".repeat(MAX_HOOK_SESSION_ID_BYTES + 1);
+        let body = format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","session_id":"{oversized_session_id}"}}"#
+        );
+        let request = format!(
+            "POST /api/hooks/codex HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let sender = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+
+        let error = read_hook_request(&mut stream).unwrap_err();
+
+        sender.join().unwrap();
+        assert!(error.contains("session_id"));
+        assert!(error.contains(&MAX_HOOK_SESSION_ID_BYTES.to_string()));
+    }
+
+    #[test]
+    fn latest_relay_mailbox_keeps_only_the_newest_state_per_tool() {
+        let pending_relays = Arc::new(Mutex::new(HashMap::new()));
+        let (wake_sender, wake_receiver) = mpsc::sync_channel::<()>(HOOK_RELAY_WAKE_QUEUE_CAPACITY);
+        let wake_senders = HashMap::from([(AiTool::Codex, wake_sender)]);
+        let status = Arc::new(RwLock::new(HookRelayStatus {
+            pending_count: 2,
+            ..HookRelayStatus::default()
+        }));
+
+        enqueue_latest_hook_relay(
+            &pending_relays,
+            &wake_senders,
+            &status,
+            PendingHookRelay {
+                tool: AiTool::Codex,
+                hook_type: "UserPromptSubmit".to_owned(),
+                transition: HookTransition::Display(HookBehavior::Running),
+                counts_as_hook: true,
+            },
+        );
+        enqueue_latest_hook_relay(
+            &pending_relays,
+            &wake_senders,
+            &status,
+            PendingHookRelay {
+                tool: AiTool::Codex,
+                hook_type: "PermissionRequest".to_owned(),
+                transition: HookTransition::Display(HookBehavior::Asking),
+                counts_as_hook: true,
+            },
+        );
+
+        assert_eq!(wake_receiver.try_recv(), Ok(()));
+        assert_eq!(wake_receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+        let pending = pending_relays.lock().unwrap();
+        let latest = pending.get(&AiTool::Codex).unwrap();
+        assert_eq!(latest.hook_type, "PermissionRequest");
+        assert_eq!(
+            latest.transition,
+            HookTransition::Display(HookBehavior::Asking)
+        );
+        let status = status.read().unwrap();
+        assert_eq!(status.received_count, 1);
+        assert_eq!(status.suppressed_count, 1);
+        assert_eq!(status.pending_count, 1);
+    }
+
+    #[test]
+    fn hook_delivery_workers_are_isolated_per_tool() {
+        let codex_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let codex_address = codex_listener.local_addr().unwrap();
+        let claude_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let claude_address = claude_listener.local_addr().unwrap();
+        let (started_sender, started_receiver) = mpsc::channel::<&'static str>();
+        let (release_sender, release_receiver) = mpsc::channel::<()>();
+
+        let codex_started_sender = started_sender.clone();
+        let codex_server = thread::spawn(move || {
+            let (mut stream, _) = codex_listener.accept().unwrap();
+            read_test_http_request(&mut stream);
+            codex_started_sender.send("codex").unwrap();
+            release_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let claude_server = thread::spawn(move || {
+            let (mut stream, _) = claude_listener.accept().unwrap();
+            read_test_http_request(&mut stream);
+            started_sender.send("claude").unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        let data = Arc::new(RwLock::new(two_tool_delivery_data(
+            codex_address,
+            claude_address,
+        )));
+        let online_devices = Arc::new(RwLock::new(Vec::new()));
+        let status = Arc::new(RwLock::new(HookRelayStatus {
+            pending_count: 2,
+            ..HookRelayStatus::default()
+        }));
+        let pending_relays = Arc::new(Mutex::new(HashMap::new()));
+        let wake_senders = spawn_hook_delivery_workers(
+            &reqwest::blocking::Client::new(),
+            &pending_relays,
+            &data,
+            &online_devices,
+            &status,
+        );
+
+        enqueue_latest_hook_relay(
+            &pending_relays,
+            &wake_senders,
+            &status,
+            PendingHookRelay {
+                tool: AiTool::Codex,
+                hook_type: "UserPromptSubmit".to_owned(),
+                transition: HookTransition::Display(HookBehavior::Running),
+                counts_as_hook: true,
+            },
+        );
+        assert_eq!(
+            started_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            "codex"
+        );
+
+        enqueue_latest_hook_relay(
+            &pending_relays,
+            &wake_senders,
+            &status,
+            PendingHookRelay {
+                tool: AiTool::ClaudeCode,
+                hook_type: "UserPromptSubmit".to_owned(),
+                transition: HookTransition::Display(HookBehavior::Running),
+                counts_as_hook: true,
+            },
+        );
+        assert_eq!(
+            started_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            "claude"
+        );
+
+        release_sender.send(()).unwrap();
+        codex_server.join().unwrap();
+        claude_server.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if status.read().unwrap().forwarded_count == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let status = status.read().unwrap();
+        assert_eq!(status.forwarded_count, 2);
+        assert!(status.last_error.is_empty());
+    }
+
+    #[test]
+    fn latest_relay_mailbox_allows_one_in_flight_and_one_newest_pending_state() {
+        let pending_relays = Arc::new(Mutex::new(HashMap::new()));
+        let (wake_sender, wake_receiver) = mpsc::sync_channel::<()>(HOOK_RELAY_WAKE_QUEUE_CAPACITY);
+        let wake_senders = HashMap::from([(AiTool::Codex, wake_sender)]);
+        let status = Arc::new(RwLock::new(HookRelayStatus {
+            pending_count: 3,
+            ..HookRelayStatus::default()
+        }));
+
+        enqueue_latest_hook_relay(
+            &pending_relays,
+            &wake_senders,
+            &status,
+            PendingHookRelay {
+                tool: AiTool::Codex,
+                hook_type: "UserPromptSubmit".to_owned(),
+                transition: HookTransition::Display(HookBehavior::Running),
+                counts_as_hook: true,
+            },
+        );
+        assert_eq!(wake_receiver.try_recv(), Ok(()));
+        // 模拟 delivery worker 已取走 Running 并正在等待设备响应。
+        let in_flight = pending_relays
+            .lock()
+            .unwrap()
+            .remove(&AiTool::Codex)
+            .unwrap();
+        assert_eq!(
+            in_flight.transition,
+            HookTransition::Display(HookBehavior::Running)
+        );
+
+        enqueue_latest_hook_relay(
+            &pending_relays,
+            &wake_senders,
+            &status,
+            PendingHookRelay {
+                tool: AiTool::Codex,
+                hook_type: "PermissionRequest".to_owned(),
+                transition: HookTransition::Display(HookBehavior::Asking),
+                counts_as_hook: true,
+            },
+        );
+        enqueue_latest_hook_relay(
+            &pending_relays,
+            &wake_senders,
+            &status,
+            PendingHookRelay {
+                tool: AiTool::Codex,
+                hook_type: "Stop".to_owned(),
+                transition: HookTransition::Display(HookBehavior::Idle),
+                counts_as_hook: true,
+            },
+        );
+
+        assert_eq!(wake_receiver.try_recv(), Ok(()));
+        assert_eq!(wake_receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+        let pending = pending_relays.lock().unwrap();
+        let latest = pending.get(&AiTool::Codex).unwrap();
+        assert_eq!(latest.hook_type, "Stop");
+        assert_eq!(
+            latest.transition,
+            HookTransition::Display(HookBehavior::Idle)
+        );
+        let status = status.read().unwrap();
+        assert_eq!(status.received_count, 1);
+        assert_eq!(status.suppressed_count, 1);
+        // Running 仍在发送，Idle 仍待发送；被覆盖的 Asking 已完成记账。
+        assert_eq!(status.pending_count, 2);
+    }
+
+    #[test]
+    fn timeout_and_real_hook_mailbox_replacements_keep_hook_metrics_exact() {
+        let timeout = || PendingHookRelay {
+            tool: AiTool::Codex,
+            hook_type: "SessionTimeout".to_owned(),
+            transition: HookTransition::Release,
+            counts_as_hook: false,
+        };
+        let real_hook = || PendingHookRelay {
+            tool: AiTool::Codex,
+            hook_type: "UserPromptSubmit".to_owned(),
+            transition: HookTransition::Display(HookBehavior::Running),
+            counts_as_hook: true,
+        };
+
+        // 内部超时覆盖真实待投递事件时，真实事件必须完成 pending/received 记账。
+        let pending_relays = Arc::new(Mutex::new(HashMap::new()));
+        let (wake_sender, _wake_receiver) =
+            mpsc::sync_channel::<()>(HOOK_RELAY_WAKE_QUEUE_CAPACITY);
+        let wake_senders = HashMap::from([(AiTool::Codex, wake_sender)]);
+        let status = Arc::new(RwLock::new(HookRelayStatus {
+            pending_count: 1,
+            ..HookRelayStatus::default()
+        }));
+        enqueue_latest_hook_relay(&pending_relays, &wake_senders, &status, real_hook());
+        enqueue_latest_hook_relay(&pending_relays, &wake_senders, &status, timeout());
+        {
+            let status = status.read().unwrap();
+            assert_eq!(status.received_count, 1);
+            assert_eq!(status.suppressed_count, 1);
+            assert_eq!(status.pending_count, 0);
+        }
+
+        // 真实事件覆盖内部超时时，不应为被覆盖的内部转换虚增任何 Hook 指标。
+        let pending_relays = Arc::new(Mutex::new(HashMap::new()));
+        let (wake_sender, _wake_receiver) =
+            mpsc::sync_channel::<()>(HOOK_RELAY_WAKE_QUEUE_CAPACITY);
+        let wake_senders = HashMap::from([(AiTool::Codex, wake_sender)]);
+        let status = Arc::new(RwLock::new(HookRelayStatus {
+            pending_count: 1,
+            ..HookRelayStatus::default()
+        }));
+        enqueue_latest_hook_relay(&pending_relays, &wake_senders, &status, timeout());
+        enqueue_latest_hook_relay(&pending_relays, &wake_senders, &status, real_hook());
+        let status = status.read().unwrap();
+        assert_eq!(status.received_count, 0);
+        assert_eq!(status.suppressed_count, 0);
+        assert_eq!(status.pending_count, 1);
+        assert_eq!(
+            pending_relays.lock().unwrap()[&AiTool::Codex].hook_type,
+            "UserPromptSubmit"
+        );
+    }
+
+    #[test]
+    fn synthetic_timeout_delivery_does_not_consume_a_hook_metric() {
+        let status = Arc::new(RwLock::new(HookRelayStatus {
+            pending_count: 7,
+            ..HookRelayStatus::default()
+        }));
+
+        record_hook_results_with_accounting(
+            &status,
+            AiTool::Codex,
+            "SessionTimeout",
+            None,
+            2,
+            &[],
+            false,
+        );
+
+        let status = status.read().unwrap();
+        assert_eq!(status.received_count, 0);
+        assert_eq!(status.pending_count, 7);
+        assert_eq!(status.forwarded_count, 2);
+        assert_eq!(status.last_hook_type, "SessionTimeout");
     }
 
     #[test]

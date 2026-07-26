@@ -150,12 +150,18 @@ AIMonitor APK（单台失败不终止后续设备）
   原因等上下文不会在传输层丢失；`X-AIMonitor-Hook-Type` 仅作为不含
   `hook_event_name` 的工具协议兜底，若正文与事件头同时存在但不一致则拒绝。
   事件到状态的归一化、重复事件消除、迟到完成事件抑制和会话释放全部由
-  `domain/monitor.rs` 的无时间依赖状态机决定。状态机按 `session_id` 隔离任务、
-  按 `turn_id` 拒绝旧轮次事件，再聚合为工具的唯一展示状态，因此一个任务的
-  Stop/退出不会覆盖另一个仍在工作的任务：`SessionStart` 建立空闲展示，
-  `UserPromptSubmit` 等真实工作起点进入运行，`Stop`（包括用户中断后的轮次
-  停止）回到空闲，`SessionEnd` 释放展示位；Stop 后的 `PostToolUse`、
-  `SubagentStop`、`PostCompact` 不会重新激活状态，直到出现新的工作起点。
+  `domain/monitor.rs` 的状态机决定。事件先后与迟到判断不依赖时间窗口：状态机按
+  `session_id` 隔离任务、按 `turn_id` 拒绝旧轮次事件，再聚合为工具的唯一展示
+  状态，因此一个任务的 Stop/退出不会覆盖另一个仍在工作的任务。时间只用于
+  有界回收：调用方注入单调时间，连续 30 分钟没有事件的会话或终止 tombstone
+  会被批量清理；每个工具同时最多跟踪 256 个会话，洪峰超过上限时优先淘汰最旧
+  tombstone 和非活跃会话。`SessionStart` 建立空闲展示，`UserPromptSubmit`
+  等真实工作起点进入运行，`Stop`（包括用户中断后的轮次停止）回到空闲；
+  `SessionEnd` 清空会话内容并留下有时限的终止 tombstone，重算剩余会话后仅在
+  确实没有其他任务时释放展示位。Stop/End 后的 `PostToolUse`、`SubagentStop`、
+  `PostCompact` 不会重新激活状态，直到出现新的明确工作起点。桌面端晚于 AI
+  会话启动时，真实工作起点、进度、询问、异常或停止事件可以建立隐式会话并立即
+  更新展示；单独到达的完成类事件没有足够信息证明仍在运行，直接忽略且不留记录。
 - Codex、Claude Code、Cursor、OpenCode、WorkBuddy、Harness、OpenClaw、CodeBuddy
   的协议实现分别位于 `domain/monitor/hooks/`
   下的独立文件，并统一实现 `HookProtocol`。Trait 负责约束工具元数据、事件语义、
@@ -172,9 +178,13 @@ AIMonitor APK（单台失败不终止后续设备）
   `extensions/aimonitor/`，主入口、manifest 与 package metadata 在写入前统一校验，
   任一既有文件不是 AIMonitor 管理时整组拒绝覆盖；安装后由用户显式启用插件、
   授予 conversation lifecycle Hook 权限并重启 Gateway。
-- listener 与转发 worker 通过内存队列解耦，按接收顺序处理。每个目标设备
-  只转发一次，失败后不重试，避免积压事件形成请求风暴；状态机还会消除
-  不改变展示状态的重复事件，减少不必要的设备请求。
+- listener、状态机 worker 与设备投递 workers 分为两个阶段：原始 Hook 先进入
+  容量 256 的有界队列并按接收顺序推进状态机，不会因设备网络慢而停止计算当前
+  状态；投递层按 AI 工具拆成独立 worker 和 latest-wins mailbox，每个工具
+  最多保留一个发送中状态和一个待发送的最新状态。尚未发送的中间态被新状态覆盖
+  并计入时序抑制，因此同一工具对应的配置位置不会形成网络请求长队；不同工具
+  之间也不会因为某一个慢请求而彼此串行阻塞。每个目标设备每次转换只转发一次，
+  失败后不重试；状态机仍会消除不改变聚合展示状态的重复事件。
 - Rust 在启动后立即执行一次在线设备发现，之后按设置页以“分钟”为单位配置的
   间隔（默认一分钟）持续刷新在线设备快照；后台循环以 1 秒粒度醒来并重新读取当前
   间隔，因此在设置页修改间隔后无需重启即可立即生效。设备发现同时执行

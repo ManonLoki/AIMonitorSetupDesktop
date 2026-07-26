@@ -1,7 +1,7 @@
 {
   "name": "ai-monitor-setup",
   "private": true,
-  "version": "2.0.4",
+  "version": "2.0.5",
   "license": "SEE LICENSE IN LICENSE",
   "repository": "https://github.com/ManonLoki/AIMonitorSetupDesktop.git",
   "type": "module",
@@ -27,6 +27,7 @@
     "@tanstack/react-router": "^1.170.18",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.2",
+    "gsap": "^3.15.0",
     "jotai": "^2.20.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
