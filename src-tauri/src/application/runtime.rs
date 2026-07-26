@@ -124,7 +124,7 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
     }
 }
 
-fn toggle_main_window<R: Runtime>(app: &AppHandle<R>, item: &MenuItem<R>) {
+fn toggle_main_window(app: &AppHandle, item: &MenuItem<tauri::Wry>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -132,10 +132,7 @@ fn toggle_main_window<R: Runtime>(app: &AppHandle<R>, item: &MenuItem<R>) {
         let _ = window.hide();
         let _ = item.set_text("显示窗口");
     } else {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        let _ = item.set_text("隐藏窗口");
+        show_main_window(app);
     }
 }
 

@@ -18,5 +18,7 @@ export function useMonitorConnection() {
     connectedDevice,
     otherDevices,
     isPending: settings.isPending || devices.isPending,
+    hasConfiguredDevice: Boolean(settings.data?.deviceId),
+    hasAvailableDevice: (devices.data?.length ?? 0) > 0,
   };
 }

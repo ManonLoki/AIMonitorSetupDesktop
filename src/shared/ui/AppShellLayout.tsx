@@ -33,8 +33,7 @@ export function AppShellLayout() {
   const setColorScheme = useSetAtom(colorSchemeAtom);
   const [collapsed, setCollapsed] = useAtom(sidebarCollapsedAtom);
   const overview = useQuery(systemOverviewQuery);
-  const { devices } = useMonitorConnection();
-  const hasAvailableDevice = (devices.data?.length ?? 0) > 0;
+  const { hasAvailableDevice } = useMonitorConnection();
 
   return (
     <AppShell

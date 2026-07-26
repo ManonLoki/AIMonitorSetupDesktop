@@ -18,23 +18,22 @@ import {
   deleteRemoteImage,
   uploadRemoteImages,
 } from "../api/monitor";
-import {
-  monitorKeys,
-  monitorDevicesQuery,
-  monitorSettingsQuery,
-  remoteImagesQuery,
-} from "../queries/monitor";
+import { monitorKeys, remoteImagesQuery } from "../queries/monitor";
 import { useImageCategoryFilter } from "../hooks/useImageCategoryFilter";
 import { LineIcon } from "../../../shared/ui/LineIcon";
-import { DeviceConnectPanel } from "../components/DeviceConnectPanel";
+import { useMonitorConnection } from "../hooks/useMonitorConnection";
+import { monitorDeviceGate } from "../components/MonitorDeviceGate";
 
 export function ImagesPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
-  const settings = useQuery(monitorSettingsQuery);
-  const devices = useQuery(monitorDevicesQuery);
-  const hasConfiguredDevice = Boolean(settings.data?.deviceId);
-  const hasAvailableDevice = (devices.data?.length ?? 0) > 0;
+  const {
+    settings,
+    devices,
+    hasConfiguredDevice,
+    hasAvailableDevice,
+    isPending: monitorPending,
+  } = useMonitorConnection();
   const images = useQuery({
     ...remoteImagesQuery,
     enabled: hasConfiguredDevice && hasAvailableDevice,
@@ -58,24 +57,13 @@ export function ImagesPage() {
   const { category, setCategory, filteredImages, counts } =
     useImageCategoryFilter(imageList);
 
-  if (settings.isPending || devices.isPending) {
-    return (
-      <Center py={80}>
-        <Loader />
-      </Center>
-    );
-  }
-
-  if (!hasAvailableDevice || !hasConfiguredDevice) {
-    return (
-      <Stack gap="lg" maw={860}>
-        <Alert color="yellow" title="无可用设备">
-          当前未发现在线的 AIMonitor 设备，图片管理暂不可用。请确认设备已开机并接入同一局域网。
-        </Alert>
-        <DeviceConnectPanel />
-      </Stack>
-    );
-  }
+  const deviceGate = monitorDeviceGate({
+    isPending: monitorPending,
+    hasConfiguredDevice,
+    hasAvailableDevice,
+    featureLabel: "图片管理",
+  });
+  if (deviceGate) return deviceGate;
 
   return (
     <Stack gap="md">

@@ -31,13 +31,9 @@ export function SettingsPage() {
   const [discoveryIntervalMinutes, setDiscoveryIntervalMinutes] = useState(1);
 
   useEffect(() => {
-    if (settings.data) setUsername(settings.data.username);
-  }, [settings.data]);
-
-  useEffect(() => {
-    if (settings.data) {
-      setDiscoveryIntervalMinutes(settings.data.discoveryIntervalMinutes);
-    }
+    if (!settings.data) return;
+    setUsername(settings.data.username);
+    setDiscoveryIntervalMinutes(settings.data.discoveryIntervalMinutes);
   }, [settings.data]);
 
   const autostart = useMutation({

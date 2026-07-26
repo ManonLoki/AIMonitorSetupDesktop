@@ -1240,22 +1240,24 @@ fn relay_hook(
     hook_type: &str,
 ) {
     let Some(transition) = hook_transition(tool, hook_type) else {
-        record_hook_result(
+        record_hook_results(
             status,
             tool,
             hook_type,
             None,
-            Err(format!("不支持的 Hook 类型：{hook_type}")),
+            0,
+            &[format!("不支持的 Hook 类型：{hook_type}")],
         );
         return;
     };
     let Ok(data) = data.read() else {
-        record_hook_result(
+        record_hook_results(
             status,
             tool,
             hook_type,
             None,
-            Err("转发配置读取锁已损坏".to_owned()),
+            0,
+            &["转发配置读取锁已损坏".to_owned()],
         );
         return;
     };
@@ -1283,12 +1285,13 @@ fn relay_hook(
         .collect::<Vec<_>>();
     targets.sort_by_key(|(device, _)| !online_ids.contains(device.device_id.as_str()));
     if targets.is_empty() {
-        record_hook_result(
+        record_hook_results(
             status,
             tool,
             hook_type,
             None,
-            Err("尚未配置该 AI 的转发位置".to_owned()),
+            0,
+            &["尚未配置该 AI 的转发位置".to_owned()],
         );
         return;
     }
@@ -1398,8 +1401,7 @@ fn forward_profile(
                     .send()
                     .map_err(|error| format!("转发到监控屏失败：{error}"))
                     .and_then(|response| {
-                        response
-                            .error_for_status()
+                        ensure_success_blocking(response)
                             .map(|_| ())
                             .map_err(|error| format!("监控屏拒绝了状态更新：{error}"))
                     })
@@ -1409,38 +1411,28 @@ fn forward_profile(
             .send()
             .map_err(|error| format!("释放监控屏位置失败：{error}"))
             .and_then(|response| {
-                response
-                    .error_for_status()
+                ensure_success_blocking(response)
                     .map(|_| ())
                     .map_err(|error| format!("监控屏拒绝了位置释放：{error}"))
             }),
     }
 }
 
-fn record_hook_result(
-    status: &Arc<RwLock<HookRelayStatus>>,
-    tool: AiTool,
-    hook_type: &str,
-    behavior: Option<HookBehavior>,
-    result: Result<(), String>,
-) {
-    if let Ok(mut current) = status.write() {
-        current.received_count += 1;
-        current.pending_count = current.pending_count.saturating_sub(1);
-        current.last_tool = Some(tool);
-        hook_type.clone_into(&mut current.last_hook_type);
-        current.last_behavior = behavior;
-        match result {
-            Ok(()) => {
-                current.forwarded_count += 1;
-                current.last_error.clear();
-            }
-            Err(error) => {
-                current.failed_count += 1;
-                current.last_error = error;
-            }
-        }
+fn ensure_success_blocking(
+    response: reqwest::blocking::Response,
+) -> Result<reqwest::blocking::Response, String> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
     }
+    let fallback = format!("设备请求失败（HTTP {}）", status.as_u16());
+    if status == StatusCode::NO_CONTENT {
+        return Err(fallback);
+    }
+    let message = response
+        .json::<ErrorResponse>()
+        .map_or(fallback, |body| body.error);
+    Err(message)
 }
 
 fn record_hook_results(

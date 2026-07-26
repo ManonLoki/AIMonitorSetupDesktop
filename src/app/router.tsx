@@ -2,7 +2,6 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
-  redirect,
 } from "@tanstack/react-router";
 import { queryClient } from "./query-client";
 import {
@@ -52,18 +51,9 @@ const settingsRoute = createRoute({
   component: SettingsPage,
 });
 
-const workbenchRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/workbench",
-  beforeLoad: () => {
-    throw redirect({ to: "/" });
-  },
-});
-
 const routeTree = rootRoute.addChildren([
   homeRoute,
   aiManagementRoute,
-  workbenchRoute,
   imagesRoute,
   settingsRoute,
 ]);
