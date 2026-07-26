@@ -40,7 +40,6 @@ const HOOK_BIND_ADDRESS: &str = "127.0.0.1";
 const MAX_HOOK_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_HOOK_BODY_BYTES: usize = 2 * 1024;
 const TERMINAL_STATE_GUARD: Duration = Duration::from_secs(2);
-const FORWARD_ATTEMPTS: u8 = 3;
 const DISCOVERY_MISSES_BEFORE_REMOVAL: u8 = 2;
 /// 后台发现循环的轮询粒度：每次醒来都会重新读取当前配置的检查间隔，
 /// 因此设置页修改间隔后，最多这么久就会生效，无需重启线程。
@@ -368,7 +367,6 @@ pub struct HookRelayStatus {
     pub received_count: u64,
     pub forwarded_count: u64,
     pub failed_count: u64,
-    pub retried_count: u64,
     pub suppressed_count: u64,
     pub pending_count: u64,
     pub last_tool: Option<AiTool>,
@@ -568,7 +566,7 @@ impl MonitorService {
                         tauri::async_runtime::block_on(service.finish_device_discovery(candidates))
                     });
                     if let Ok(devices) = result {
-                        service.publish_online_devices(&app, devices);
+                        let _ = service.publish_online_devices(&app, devices);
                     }
                     next_run = Instant::now() + service.discovery_interval();
                 }
@@ -606,7 +604,7 @@ impl MonitorService {
         &self,
         app: &AppHandle,
         devices: Vec<DiscoveredMonitorDevice>,
-    ) -> Vec<DiscoveredMonitorDevice> {
+    ) -> Result<Vec<DiscoveredMonitorDevice>, String> {
         let devices = if let Ok(mut missed_scans) = self.discovery_missed_scans.lock() {
             let previous = self
                 .online_devices
@@ -616,10 +614,28 @@ impl MonitorService {
         } else {
             devices
         };
+        self.select_first_available_device_if_needed(&devices)?;
         if self.replace_online_devices(&devices) {
             let _ = app.emit(MONITOR_DEVICES_CHANGED_EVENT, devices.clone());
         }
-        devices
+        Ok(devices)
+    }
+
+    /// 保证当前选择始终指向在线快照中的设备。当前设备离线时按发现结果
+    /// 的稳定顺序选择第一台在线设备，并通过 `select_device` 同步持久化路由。
+    fn select_first_available_device_if_needed(
+        &self,
+        devices: &[DiscoveredMonitorDevice],
+    ) -> Result<bool, String> {
+        let Some(next) = devices.first() else {
+            return Ok(false);
+        };
+        let settings = self.settings()?;
+        if devices.iter().any(|device| device.id == settings.device_id) {
+            return Ok(false);
+        }
+        self.select_device(next)?;
+        Ok(true)
     }
 
     fn replace_online_devices(&self, devices: &[DiscoveredMonitorDevice]) -> bool {
@@ -1094,7 +1110,7 @@ impl MonitorService {
             .iter()
             .find(|profile| profile.device_id == data.settings.device_id && profile.tool == tool)
             .cloned()
-            .ok_or_else(|| "请先在 AI 管理中保存该工具的展示配置".to_owned())?;
+            .ok_or_else(|| "请先在监控管理中保存该工具的展示配置".to_owned())?;
         let generated = generate_hook_config(profile)?;
         let config_path = self.hook_config_path(&data, tool);
         let existing = read_optional_config(&config_path)?;
@@ -1283,7 +1299,6 @@ fn relay_hook(
     };
     let (forwarded, errors) = forward_to_all_targets(
         client,
-        status,
         tool,
         transition,
         &snapshot.settings.username,
@@ -1298,7 +1313,6 @@ fn relay_hook(
 /// 时间；每台设备的成功/失败互不影响。
 fn forward_to_all_targets(
     client: &reqwest::blocking::Client,
-    status: &Arc<RwLock<HookRelayStatus>>,
     tool: AiTool,
     transition: HookTransition,
     username: &str,
@@ -1323,7 +1337,6 @@ fn forward_to_all_targets(
                 scope.spawn(move || {
                     let result = forward_profile(
                         client,
-                        status,
                         tool,
                         transition,
                         username,
@@ -1356,7 +1369,6 @@ fn forward_to_all_targets(
 
 fn forward_profile(
     client: &reqwest::blocking::Client,
-    status: &Arc<RwLock<HookRelayStatus>>,
     tool: AiTool,
     transition: HookTransition,
     username: &str,
@@ -1374,38 +1386,34 @@ fn forward_profile(
             .find(|state| state.behavior == behavior)
             .ok_or_else(|| "AI 状态配置不完整".to_owned())
             .and_then(|state| {
-                forward_with_retry(status, || {
-                    client
-                        .post(&url)
-                        .json(&SlotUpdateRequest {
-                            username,
-                            ai_name: ai_tool_name(tool),
-                            behavior,
-                            content: &state.content,
-                            image: &state.image,
-                        })
-                        .send()
-                        .map_err(|error| format!("转发到监控屏失败：{error}"))
-                        .and_then(|response| {
-                            response
-                                .error_for_status()
-                                .map(|_| ())
-                                .map_err(|error| format!("监控屏拒绝了状态更新：{error}"))
-                        })
-                })
+                client
+                    .post(&url)
+                    .json(&SlotUpdateRequest {
+                        username,
+                        ai_name: ai_tool_name(tool),
+                        behavior,
+                        content: &state.content,
+                        image: &state.image,
+                    })
+                    .send()
+                    .map_err(|error| format!("转发到监控屏失败：{error}"))
+                    .and_then(|response| {
+                        response
+                            .error_for_status()
+                            .map(|_| ())
+                            .map_err(|error| format!("监控屏拒绝了状态更新：{error}"))
+                    })
             }),
-        HookTransition::Release => forward_with_retry(status, || {
-            client
-                .delete(&url)
-                .send()
-                .map_err(|error| format!("释放监控屏位置失败：{error}"))
-                .and_then(|response| {
-                    response
-                        .error_for_status()
-                        .map(|_| ())
-                        .map_err(|error| format!("监控屏拒绝了位置释放：{error}"))
-                })
-        }),
+        HookTransition::Release => client
+            .delete(&url)
+            .send()
+            .map_err(|error| format!("释放监控屏位置失败：{error}"))
+            .and_then(|response| {
+                response
+                    .error_for_status()
+                    .map(|_| ())
+                    .map_err(|error| format!("监控屏拒绝了位置释放：{error}"))
+            }),
     }
 }
 
@@ -1488,26 +1496,6 @@ fn record_suppressed_hook(status: &Arc<RwLock<HookRelayStatus>>, tool: AiTool, h
         current.last_behavior = Some(HookBehavior::Idle);
         current.last_error.clear();
     }
-}
-
-fn forward_with_retry(
-    status: &Arc<RwLock<HookRelayStatus>>,
-    mut request: impl FnMut() -> Result<(), String>,
-) -> Result<(), String> {
-    let mut last_error = String::new();
-    for attempt in 0..FORWARD_ATTEMPTS {
-        if attempt > 0 {
-            if let Ok(mut current) = status.write() {
-                current.retried_count += 1;
-            }
-            thread::sleep(Duration::from_millis(250 * u64::from(attempt)));
-        }
-        match request() {
-            Ok(()) => return Ok(()),
-            Err(error) => last_error = error,
-        }
-    }
-    Err(last_error)
 }
 
 fn record_relay_failure(status: &Arc<RwLock<HookRelayStatus>>, error: String) {
@@ -2003,23 +1991,6 @@ mod tests {
     }
 
     #[test]
-    fn forward_queue_retries_transient_failures_in_order() {
-        let status = Arc::new(RwLock::new(HookRelayStatus::default()));
-        let mut attempts = 0_u8;
-
-        let result = forward_with_retry(&status, || {
-            attempts += 1;
-            (attempts >= 3)
-                .then_some(())
-                .ok_or_else(|| "temporary".to_owned())
-        });
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(attempts, 3);
-        assert_eq!(status.read().unwrap().retried_count, 2);
-    }
-
-    #[test]
     fn switching_current_device_loads_that_devices_profiles() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2087,6 +2058,58 @@ mod tests {
                 .iter()
                 .any(|device| device.device_id == "screen-2")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unavailable_current_device_switches_to_first_online_device_and_persists() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-auto-select-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("home");
+        fs::create_dir_all(&config_home).unwrap();
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+        let current = DiscoveredMonitorDevice {
+            id: "screen-1".to_owned(),
+            name: "Desk".to_owned(),
+            api_version: "1".to_owned(),
+            base_url: "http://192.168.50.10:8080".to_owned(),
+            path: "/api/device".to_owned(),
+            discovery_source: DiscoverySource::Mdns,
+        };
+        let next = DiscoveredMonitorDevice {
+            id: "screen-2".to_owned(),
+            name: "Studio".to_owned(),
+            api_version: "1".to_owned(),
+            base_url: "http://192.168.50.99:8080".to_owned(),
+            path: "/api/device".to_owned(),
+            discovery_source: DiscoverySource::Mdns,
+        };
+        service.select_device(&current).unwrap();
+
+        assert!(
+            !service
+                .select_first_available_device_if_needed(&[])
+                .unwrap()
+        );
+        assert_eq!(service.settings().unwrap().device_id, "screen-1");
+        assert!(
+            service
+                .select_first_available_device_if_needed(std::slice::from_ref(&next))
+                .unwrap()
+        );
+        assert_eq!(service.settings().unwrap().device_id, "screen-2");
+
+        drop(service);
+        let reloaded = MonitorService::load(&app_data, &config_home).unwrap();
+        assert_eq!(reloaded.settings().unwrap().device_id, "screen-2");
+        drop(reloaded);
         fs::remove_dir_all(root).unwrap();
     }
 

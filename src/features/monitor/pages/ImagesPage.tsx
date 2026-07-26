@@ -20,15 +20,25 @@ import {
 } from "../api/monitor";
 import {
   monitorKeys,
+  monitorDevicesQuery,
+  monitorSettingsQuery,
   remoteImagesQuery,
 } from "../queries/monitor";
 import { useImageCategoryFilter } from "../hooks/useImageCategoryFilter";
 import { LineIcon } from "../../../shared/ui/LineIcon";
+import { DeviceConnectPanel } from "../components/DeviceConnectPanel";
 
 export function ImagesPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
-  const images = useQuery(remoteImagesQuery);
+  const settings = useQuery(monitorSettingsQuery);
+  const devices = useQuery(monitorDevicesQuery);
+  const hasConfiguredDevice = Boolean(settings.data?.deviceId);
+  const hasAvailableDevice = (devices.data?.length ?? 0) > 0;
+  const images = useQuery({
+    ...remoteImagesQuery,
+    enabled: hasConfiguredDevice && hasAvailableDevice,
+  });
 
   const upload = useMutation({
     mutationFn: uploadRemoteImages,
@@ -42,10 +52,30 @@ export function ImagesPage() {
       queryClient.invalidateQueries({ queryKey: monitorKeys.images() }),
   });
 
-  const error = images.error ?? upload.error ?? remove.error;
+  const error =
+    settings.error ?? devices.error ?? images.error ?? upload.error ?? remove.error;
   const imageList = images.data ?? [];
   const { category, setCategory, filteredImages, counts } =
     useImageCategoryFilter(imageList);
+
+  if (settings.isPending || devices.isPending) {
+    return (
+      <Center py={80}>
+        <Loader />
+      </Center>
+    );
+  }
+
+  if (!hasAvailableDevice || !hasConfiguredDevice) {
+    return (
+      <Stack gap="lg" maw={860}>
+        <Alert color="yellow" title="无可用设备">
+          当前未发现在线的 AIMonitor 设备，图片管理暂不可用。请确认设备已开机并接入同一局域网。
+        </Alert>
+        <DeviceConnectPanel />
+      </Stack>
+    );
+  }
 
   return (
     <Stack gap="md">

@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-monitor-setup"
-version = "1.0.8"
+version = "2.0.0"
 dependencies = [
  "if-addrs",
  "mdns-sd",

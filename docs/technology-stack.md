@@ -46,7 +46,7 @@ macOS 都显示 `AIMonitor`，不会退回 Cargo 包名 `ai-monitor-setup`。
 本机 Hook 接口使用 Rust 标准库 `TcpListener`，仅绑定
 `127.0.0.1:10240`，协议面只覆盖短连接 POST JSON，不引入通用 Web
 框架或额外 runner 脚本。APK 转发继续使用 `reqwest`；为后台 listener
-增加 `blocking` feature，使其可以在独立顺序 worker 中转发、重试并避免
+增加 `blocking` feature，使其可以在独立顺序 worker 中单次转发并避免
 占用 Tauri UI 线程。
 
 ## 为什么不使用 Axios

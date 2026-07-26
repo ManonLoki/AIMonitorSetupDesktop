@@ -114,7 +114,6 @@ export function WorkbenchPage() {
             <RelayMetric label="设备转发成功" value={relay?.forwardedCount ?? 0} />
             <RelayMetric label="设备转发失败" value={relay?.failedCount ?? 0} />
             <RelayMetric label="等待处理" value={relay?.pendingCount ?? 0} />
-            <RelayMetric label="自动重试" value={relay?.retriedCount ?? 0} />
             <RelayMetric label="时序抑制" value={relay?.suppressedCount ?? 0} />
           </SimpleGrid>
 

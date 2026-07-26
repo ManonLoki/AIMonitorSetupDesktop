@@ -8,10 +8,35 @@ interface DeviceSwitchMenuProps {
 }
 
 export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
-  const { connectedDevice, otherDevices } = useMonitorConnection();
+  const { settings, devices, connectedDevice, otherDevices, isPending } =
+    useMonitorConnection();
   const connect = useConnectDevice();
+  const savedDevice = settings.data;
+  const currentName = connectedDevice?.name ?? savedDevice?.deviceName;
+  const currentBaseUrl = connectedDevice?.baseUrl ?? savedDevice?.baseUrl;
+  const currentAvailable = Boolean(connectedDevice);
 
-  if (!connectedDevice) return null;
+  if (isPending) return <Loader size={16} />;
+  if ((devices.data?.length ?? 0) === 0) {
+    return collapsed ? (
+      <ActionIcon
+        variant="subtle"
+        color="gray"
+        size="lg"
+        disabled
+        aria-label="无可用设备"
+      >
+        <LineIcon name="server" size={18} />
+      </ActionIcon>
+    ) : (
+      <Group gap="sm" wrap="nowrap" className="sidebar-device-button">
+        <div className="status-dot offline" />
+        <Text size="sm" c="dimmed" fw={600}>
+          无可用设备
+        </Text>
+      </Group>
+    );
+  }
 
   return (
     <>
@@ -28,20 +53,30 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
               color="gray"
               size="lg"
               className="sidebar-device-button-collapsed"
-              aria-label={`当前设备：${connectedDevice.name}`}
+              aria-label={
+                currentName
+                  ? `当前设备：${currentName}${currentAvailable ? "" : "，未发现"}`
+                  : "选择设备"
+              }
             >
               <LineIcon name="server" size={18} />
-              <span className="status-dot device-indicator" />
+              <span
+                className={`status-dot device-indicator${
+                  currentAvailable ? "" : " offline"
+                }`}
+              />
             </ActionIcon>
           ) : (
             <Group gap="sm" wrap="nowrap" className="sidebar-device-button">
-              <div className="status-dot" />
+              <div
+                className={`status-dot${currentAvailable ? "" : " offline"}`}
+              />
               <div className="min-width-zero">
                 <Text size="sm" fw={600} truncate>
-                  {connectedDevice.name}
+                  {currentName ?? "选择设备"}
                 </Text>
                 <Text size="xs" c="dimmed" truncate>
-                  {connectedDevice.baseUrl}
+                  {currentAvailable ? currentBaseUrl : "当前设备未发现"}
                 </Text>
               </div>
               <LineIcon name="chevronDown" size={14} />
@@ -50,16 +85,21 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
         </Menu.Target>
         <Menu.Dropdown>
           <Menu.Label>当前设备</Menu.Label>
-          <Menu.Item disabled>
-            <Stack gap={0}>
-              <Text size="sm" fw={600}>
-                {connectedDevice.name}
-              </Text>
-              <Text size="xs" c="dimmed">
-                {connectedDevice.baseUrl}
-              </Text>
-            </Stack>
-          </Menu.Item>
+          {currentName ? (
+            <Menu.Item disabled>
+              <Stack gap={0}>
+                <Text size="sm" fw={600}>
+                  {currentName}
+                  {!currentAvailable && "（未发现）"}
+                </Text>
+                <Text size="xs" c="dimmed">
+                  {currentBaseUrl}
+                </Text>
+              </Stack>
+            </Menu.Item>
+          ) : (
+            <Menu.Item disabled>尚未连接设备</Menu.Item>
+          )}
           <Menu.Divider />
           <Menu.Label>切换设备</Menu.Label>
           {otherDevices.length === 0 ? (

@@ -51,7 +51,7 @@ pub async fn discover_monitor_devices(
             .await
             .map_err(|error| format!("设备发现任务失败：{error}"))??;
     let devices = service.finish_device_discovery(candidates).await?;
-    Ok(service.publish_online_devices(&app, devices))
+    service.publish_online_devices(&app, devices)
 }
 
 #[tauri::command]

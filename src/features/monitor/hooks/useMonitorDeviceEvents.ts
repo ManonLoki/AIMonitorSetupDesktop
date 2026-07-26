@@ -21,6 +21,9 @@ export function useMonitorDeviceEvents() {
       MONITOR_DEVICES_CHANGED_EVENT,
       (event) => {
         queryClient.setQueryData(monitorKeys.devices(), event.payload);
+        // Rust 会在当前设备离线时同步选择并持久化第一台在线设备。
+        // 设备事件到达后刷新设置，避免 UI 继续显示旧选择。
+        void queryClient.invalidateQueries({ queryKey: monitorKeys.settings() });
       },
     ).then((stopListening) => {
       if (disposed) {

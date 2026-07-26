@@ -690,8 +690,7 @@ fn managed_commands(tool: AiTool, event: &str) -> ManagedCommands {
     );
     let posix_marked = format!(
         ": {}; curl --silent --show-error --fail --connect-timeout 1 --max-time 3 \
-         --retry 2 --retry-delay 1 --retry-all-errors --request POST \
-         --header 'Content-Type: application/json' --data-binary {} {}",
+         --request POST --header 'Content-Type: application/json' --data-binary {} {}",
         shell_quote(&marker),
         shell_quote(&payload),
         shell_quote(&url),
@@ -1090,7 +1089,7 @@ mod tests {
 
         assert!(preview.content.contains("127.0.0.1:10240/api/hooks/codex"));
         assert!(preview.content.contains(r#"\"type\":\"SessionStart\""#));
-        assert!(preview.content.contains("--retry-all-errors"));
+        assert!(!preview.content.contains("--retry"));
         assert!(!preview.content.contains("aimonitor-hook.sh"));
         assert!(!preview.content.contains("aimonitor-hook.ps1"));
         assert!(!preview.content.contains(DEFAULT_BASE_URL));

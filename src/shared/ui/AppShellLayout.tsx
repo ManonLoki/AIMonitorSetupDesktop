@@ -17,12 +17,13 @@ import { LineIcon } from "./LineIcon";
 import { useQuery } from "@tanstack/react-query";
 import { systemOverviewQuery } from "../../features/system/queries/system";
 import { DeviceSwitchMenu } from "../../features/monitor/components/DeviceSwitchMenu";
+import { useMonitorConnection } from "../../features/monitor/hooks/useMonitorConnection";
 
 const navigation = [
-  { label: "工作台", to: "/" as const, icon: "dashboard" as const },
-  { label: "AI 管理", to: "/ai-management" as const, icon: "ai" as const },
-  { label: "图片管理", to: "/images" as const, icon: "image" as const },
-  { label: "设置", to: "/settings" as const, icon: "settings" as const },
+  { label: "工作台", to: "/" as const, icon: "dashboard" as const, requiresDevice: false },
+  { label: "监控管理", to: "/ai-management" as const, icon: "ai" as const, requiresDevice: true },
+  { label: "图片管理", to: "/images" as const, icon: "image" as const, requiresDevice: true },
+  { label: "设置", to: "/settings" as const, icon: "settings" as const, requiresDevice: false },
 ];
 
 export function AppShellLayout() {
@@ -32,6 +33,8 @@ export function AppShellLayout() {
   const setColorScheme = useSetAtom(colorSchemeAtom);
   const [collapsed, setCollapsed] = useAtom(sidebarCollapsedAtom);
   const overview = useQuery(systemOverviewQuery);
+  const { devices } = useMonitorConnection();
+  const hasAvailableDevice = (devices.data?.length ?? 0) > 0;
 
   return (
     <AppShell
@@ -96,19 +99,25 @@ export function AppShellLayout() {
           </Group>
         </div>
         <nav>
-          {navigation.map((item) =>
-            collapsed ? (
+          {navigation.map((item) => {
+            const disabled = item.requiresDevice && !hasAvailableDevice;
+            return collapsed ? (
               <Tooltip key={item.to} label={item.label} position="right">
-                <Link
-                  to={item.to}
-                  onClick={close}
-                  aria-label={item.label}
+                <span
+                  aria-label={`${item.label}${disabled ? "（无可用设备）" : ""}`}
+                  aria-disabled={disabled || undefined}
                   className={
-                    pathname === item.to ? "rail-link active" : "rail-link"
+                    `rail-link${pathname === item.to ? " active" : ""}${disabled ? " disabled" : ""}`
                   }
                 >
-                  <LineIcon name={item.icon} size={19} />
-                </Link>
+                  {disabled ? (
+                    <LineIcon name={item.icon} size={19} />
+                  ) : (
+                    <Link to={item.to} onClick={close} aria-label={item.label}>
+                      <LineIcon name={item.icon} size={19} />
+                    </Link>
+                  )}
+                </span>
               </Tooltip>
             ) : (
               <NavLink
@@ -119,10 +128,11 @@ export function AppShellLayout() {
                 leftSection={<LineIcon name={item.icon} size={19} />}
                 active={pathname === item.to}
                 onClick={close}
+                disabled={disabled}
                 className="sidebar-link"
               />
-            ),
-          )}
+            );
+          })}
         </nav>
         <div className="sidebar-footer">
           <DeviceSwitchMenu collapsed={collapsed} />

@@ -75,7 +75,6 @@ export interface HookRelayStatus {
   receivedCount: number;
   forwardedCount: number;
   failedCount: number;
-  retriedCount: number;
   suppressedCount: number;
   pendingCount: number;
   lastTool: AiTool | null;

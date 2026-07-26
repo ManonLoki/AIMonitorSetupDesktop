@@ -16,18 +16,6 @@ import { ImagesPage } from "../features/monitor/pages/ImagesPage";
 import { SettingsPage } from "../features/monitor/pages/SettingsPage";
 import { WorkbenchPage } from "../features/monitor/pages/WorkbenchPage";
 
-async function hasConnectedDevice() {
-  try {
-    const [settings, devices] = await Promise.all([
-      queryClient.ensureQueryData(monitorSettingsQuery),
-      queryClient.ensureQueryData(monitorDevicesQuery),
-    ]);
-    return devices.some((device) => device.id === settings.deviceId);
-  } catch {
-    return false;
-  }
-}
-
 const rootRoute = createRootRoute({
   component: AppShellLayout,
   pendingComponent: AppBootScreen,
@@ -56,11 +44,6 @@ const imagesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/images",
   component: ImagesPage,
-  beforeLoad: async () => {
-    if (!(await hasConnectedDevice())) {
-      throw redirect({ to: "/ai-management" });
-    }
-  },
 });
 
 const settingsRoute = createRoute({
