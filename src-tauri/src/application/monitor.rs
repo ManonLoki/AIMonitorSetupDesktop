@@ -1435,6 +1435,15 @@ fn ensure_success_blocking(
     Err(message)
 }
 
+/// 记录一次 Hook 事件已处理完成的公共字段，成功/抑制两条路径在此基础上
+/// 各自补充结果专属字段，避免重复维护同一份计数逻辑。
+fn begin_hook_completion(current: &mut HookRelayStatus, tool: AiTool, hook_type: &str) {
+    current.received_count += 1;
+    current.pending_count = current.pending_count.saturating_sub(1);
+    current.last_tool = Some(tool);
+    hook_type.clone_into(&mut current.last_hook_type);
+}
+
 fn record_hook_results(
     status: &Arc<RwLock<HookRelayStatus>>,
     tool: AiTool,
@@ -1444,12 +1453,9 @@ fn record_hook_results(
     errors: &[String],
 ) {
     if let Ok(mut current) = status.write() {
-        current.received_count += 1;
-        current.pending_count = current.pending_count.saturating_sub(1);
+        begin_hook_completion(&mut current, tool, hook_type);
         current.forwarded_count += forwarded;
         current.failed_count += errors.len() as u64;
-        current.last_tool = Some(tool);
-        hook_type.clone_into(&mut current.last_hook_type);
         current.last_behavior = behavior;
         current.last_error = errors.join("；");
     }
@@ -1480,11 +1486,8 @@ fn should_suppress_late_event(
 
 fn record_suppressed_hook(status: &Arc<RwLock<HookRelayStatus>>, tool: AiTool, hook_type: &str) {
     if let Ok(mut current) = status.write() {
-        current.received_count += 1;
+        begin_hook_completion(&mut current, tool, hook_type);
         current.suppressed_count += 1;
-        current.pending_count = current.pending_count.saturating_sub(1);
-        current.last_tool = Some(tool);
-        hook_type.clone_into(&mut current.last_hook_type);
         current.last_behavior = Some(HookBehavior::Idle);
         current.last_error.clear();
     }

@@ -187,6 +187,19 @@ export function AiManagementPage() {
     setDrafts((current) => ({ ...current, [activeTool]: next }));
   };
 
+  const updateHookField = (
+    behaviorValue: HookBehavior,
+    field: "image" | "content",
+    value: string,
+  ) => {
+    updateDraft({
+      ...draft,
+      hooks: draft.hooks.map((item) =>
+        item.behavior === behaviorValue ? { ...item, [field]: value } : item,
+      ),
+    });
+  };
+
   const saved = save.isSuccess && save.data.tool === activeTool;
   const error =
     profiles.error ??
@@ -401,14 +414,7 @@ export function AiManagementPage() {
                             value={hook.image}
                             disabled={images.isPending}
                             onChange={(value) =>
-                              updateDraft({
-                                ...draft,
-                                hooks: draft.hooks.map((item) =>
-                                  item.behavior === behavior.value
-                                    ? { ...item, image: value }
-                                    : item,
-                                ),
-                              })
+                              updateHookField(behavior.value, "image", value)
                             }
                           />
 
@@ -431,17 +437,11 @@ export function AiManagementPage() {
                             minRows={1}
                             value={hook.content}
                             onChange={(event) =>
-                              updateDraft({
-                                ...draft,
-                                hooks: draft.hooks.map((item) =>
-                                  item.behavior === behavior.value
-                                    ? {
-                                        ...item,
-                                        content: event.currentTarget.value,
-                                      }
-                                    : item,
-                                ),
-                              })
+                              updateHookField(
+                                behavior.value,
+                                "content",
+                                event.currentTarget.value,
+                              )
                             }
                           />
                         </Stack>
