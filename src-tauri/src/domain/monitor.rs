@@ -1178,6 +1178,8 @@ mod tests {
         let decoded = decoded_hook_command(windows).unwrap();
         assert!(decoded.contains("127.0.0.1:10240/api/hooks/codex"));
         assert!(decoded.contains(MANAGED_HOOK_PREFIX));
+        assert!(decoded.contains("while ($true)"));
+        assert!(decoded.contains("Start-Sleep -Seconds 1"));
         // command_has_marker 应能在未解码的编码命令上直接识别出托管标记。
         assert!(command_has_marker(
             windows,
@@ -1352,8 +1354,8 @@ mod tests {
         assert!(merge_hook_config(Some(r#"{"hooks":[]}"#), &generated, AiTool::Cursor).is_err());
     }
 
-    // 验证生成的命令直接请求稳定的本机中继地址，且不包含历史上淘汰的实现方式
-    // （旧的 curl 重试参数、独立脚本文件、使用默认基地址、直接携带 behavior 字段）。
+    // 验证生成的命令直接请求稳定的本机中继地址，带有覆盖冷启动竞态的有界重试，
+    // 且不包含历史上淘汰的独立脚本、默认设备地址或 behavior 业务字段。
     #[test]
     fn hook_commands_post_directly_to_the_stable_local_relay() {
         let preview = generate_hook_config(profile(AiTool::Codex)).unwrap();
@@ -1365,7 +1367,9 @@ mod tests {
                 .contains("X-AIMonitor-Hook-Type: SessionStart")
         );
         assert!(preview.content.contains("--data-binary @-"));
-        assert!(!preview.content.contains("--retry"));
+        assert!(preview.content.contains("--retry 5"));
+        assert!(preview.content.contains("--retry-connrefused"));
+        assert!(preview.content.contains("--retry-all-errors"));
         assert!(!preview.content.contains("aimonitor-hook.sh"));
         assert!(!preview.content.contains("aimonitor-hook.ps1"));
         assert!(!preview.content.contains(DEFAULT_BASE_URL));

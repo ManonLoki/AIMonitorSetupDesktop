@@ -20,6 +20,11 @@ use super::{
 };
 
 pub(super) const MANAGED_HOOK_PREFIX: &str = "AIMonitor";
+// AI 客户端与 AIMonitor 可能同时由登录项冷启动。Hook 进程通常会先于
+// Tauri setup 完成，此时本机端口会短暂拒绝连接；允许额外重试 5 次，既覆盖
+// 启动竞态，又保持失败有界，不把远端设备投递的“一次转换只发送一次”改成重试。
+const LOCAL_RELAY_RETRY_COUNT: u8 = 5;
+const LOCAL_RELAY_RETRY_DELAY_SECONDS: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HookEventKind {
@@ -326,6 +331,8 @@ fn managed_commands(protocol: &dyn HookProtocol, event: &str) -> ManagedCommands
     );
     let posix_marked = format!(
         ": {}; curl --silent --show-error --fail --connect-timeout 1 --max-time 3 \
+         --retry {LOCAL_RELAY_RETRY_COUNT} --retry-delay {LOCAL_RELAY_RETRY_DELAY_SECONDS} \
+         --retry-connrefused --retry-all-errors \
          --request POST --header 'Content-Type: application/json' --header {} \
          --data-binary @- {}",
         shell_quote(&marker),
@@ -337,8 +344,11 @@ fn managed_commands(protocol: &dyn HookProtocol, event: &str) -> ManagedCommands
     let windows_script = format!(
         "$null = '{}'; $ProgressPreference = 'SilentlyContinue'; \
          $body = [Console]::In.ReadToEnd(); \
+         $attempt = 0; while ($true) {{ try {{ \
          Invoke-RestMethod -Uri '{}' -Method Post -ContentType 'application/json' \
-         -Headers @{{'X-AIMonitor-Hook-Type'='{}'}} -Body $body -TimeoutSec 3 | Out-Null{}",
+         -Headers @{{'X-AIMonitor-Hook-Type'='{}'}} -Body $body -TimeoutSec 3 | Out-Null; break \
+         }} catch {{ if ($attempt -ge {LOCAL_RELAY_RETRY_COUNT}) {{ throw }}; \
+         $attempt++; Start-Sleep -Seconds {LOCAL_RELAY_RETRY_DELAY_SECONDS} }} }}{}",
         powershell_quote(&marker),
         powershell_quote(&url),
         powershell_quote(event),
