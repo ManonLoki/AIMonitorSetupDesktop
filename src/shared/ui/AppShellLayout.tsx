@@ -30,6 +30,7 @@ import { DeviceSwitchMenu } from "../../features/monitor/components/DeviceSwitch
 // 引入监控连接状态 hook，用于判断当前是否有可用设备
 import { useMonitorConnection } from "../../features/monitor/hooks/useMonitorConnection";
 import { AnimatedContent } from "./react-bits/AnimatedContent";
+import { OnboardingGuide } from "./OnboardingGuide";
 
 // 侧边导航菜单项配置：标签、目标路由、图标名、是否需要设备才可点击
 const navigation = [
@@ -200,6 +201,7 @@ export function AppShellLayout() {
           </AnimatedContent>
         </main>
       </AppShell.Main>
+      <OnboardingGuide />
     </AppShell>
   );
 }

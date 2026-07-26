@@ -17,6 +17,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 // 引入 React 的副作用与状态 hooks
 import { useEffect, useState } from "react";
+import { useSetAtom } from "jotai";
 // 引入设置相关的类型化 API 函数
 import {
   saveDiscoveryInterval,
@@ -33,10 +34,17 @@ import {
   monitorSettingsQuery,
   runtimeOverviewQuery,
 } from "../queries/monitor";
+import {
+  onboardingCompletedAtom,
+  onboardingOpenAtom,
+} from "../../../shared/state/ui";
+import { LineIcon } from "../../../shared/ui/LineIcon";
 
 export function SettingsPage() {
   // 获取 QueryClient 实例，用于在 mutation 成功后手动写入缓存
   const queryClient = useQueryClient();
+  const setOnboardingCompleted = useSetAtom(onboardingCompletedAtom);
+  const setOnboardingOpen = useSetAtom(onboardingOpenAtom);
   // 查询运行时概览信息（自启动状态等），对接 get_runtime_overview 命令，每 3 秒自动轮询一次
   const runtime = useQuery(runtimeOverviewQuery);
   // 查询当前监控设置（用户名、发现间隔等），对接 get_monitor_settings 命令，视为永久新鲜（仅手动失效）
@@ -173,12 +181,25 @@ export function SettingsPage() {
       >
         <Stack gap="sm">
           {/* 通用设置标题与说明文案 */}
-          <div>
-            <Title order={4}>通用设置</Title>
-            <Text size="xs" c="dimmed" mt={2}>
-              显示用户名由所有 AIMonitor 设备共享，不随当前设备切换。
-            </Text>
-          </div>
+          <Group justify="space-between" align="flex-start" wrap="wrap">
+            <div>
+              <Title order={4}>通用设置</Title>
+              <Text size="xs" c="dimmed" mt={2}>
+                显示用户名由所有 AIMonitor 设备共享，不随当前设备切换。
+              </Text>
+            </div>
+            <Button
+              size="xs"
+              variant="default"
+              leftSection={<LineIcon name="guide" size={16} />}
+              onClick={() => {
+                setOnboardingCompleted(false);
+                setOnboardingOpen(true);
+              }}
+            >
+              新手引导
+            </Button>
+          </Group>
           <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
             {/* 显示用户名输入框与保存按钮 */}
             <Group align="flex-end" wrap="nowrap">

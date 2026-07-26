@@ -1093,7 +1093,7 @@ mod tests {
     // 不含 Claude/Codex 专属事件，且中继调用格式正确（带 printf 空对象输出）。
     #[test]
     fn cursor_preview_uses_cursor_event_names_and_shape() {
-        let preview = generate_hook_config(profile(AiTool::Cursor)).unwrap();
+        let preview = generate_hook_config(AiTool::Cursor).unwrap();
 
         assert_eq!(preview.filename, ".cursor/hooks.json");
         assert!(preview.content.contains("\"beforeSubmitPrompt\""));
@@ -1121,7 +1121,7 @@ mod tests {
     // 且 Notification 事件带有 idle_prompt matcher，而普通事件（如 SessionStart）没有 matcher。
     #[test]
     fn claude_preview_covers_permission_and_lifecycle_events() {
-        let preview = generate_hook_config(profile(AiTool::ClaudeCode)).unwrap();
+        let preview = generate_hook_config(AiTool::ClaudeCode).unwrap();
 
         assert_eq!(preview.filename, ".claude/settings.json");
         assert!(preview.content.contains("\"SessionStart\""));
@@ -1147,7 +1147,7 @@ mod tests {
     // 以 -EncodedCommand 方式编码），且都能被正确解码、包含中继地址与托管标记。
     #[test]
     fn codex_preview_uses_pascal_case_and_nested_handlers() {
-        let preview = generate_hook_config(profile(AiTool::Codex)).unwrap();
+        let preview = generate_hook_config(AiTool::Codex).unwrap();
 
         assert_eq!(preview.filename, ".codex/hooks.json");
         assert!(preview.content.contains("\"SessionStart\""));
@@ -1189,7 +1189,7 @@ mod tests {
 
     #[test]
     fn work_buddy_preview_targets_its_independent_settings_file() {
-        let preview = generate_hook_config(profile(AiTool::WorkBuddy)).unwrap();
+        let preview = generate_hook_config(AiTool::WorkBuddy).unwrap();
 
         assert_eq!(preview.filename, ".workbuddy/settings.json");
         assert!(preview.content.contains("\"SessionStart\""));
@@ -1199,7 +1199,7 @@ mod tests {
 
     #[test]
     fn open_code_preview_is_a_managed_global_plugin() {
-        let preview = generate_hook_config(profile(AiTool::OpenCode)).unwrap();
+        let preview = generate_hook_config(AiTool::OpenCode).unwrap();
 
         assert_eq!(preview.filename, ".config/opencode/plugins/aimonitor.js");
         assert!(preview.content.contains("AIMonitor|tool=opencode"));
@@ -1224,7 +1224,7 @@ mod tests {
 
     #[test]
     fn code_buddy_preview_uses_its_native_config_and_posix_hook_command() {
-        let preview = generate_hook_config(profile(AiTool::CodeBuddy)).unwrap();
+        let preview = generate_hook_config(AiTool::CodeBuddy).unwrap();
 
         assert_eq!(preview.filename, ".codebuddy/settings.json");
         assert!(preview.content.contains("\"PermissionRequest\""));
@@ -1235,7 +1235,7 @@ mod tests {
 
     #[test]
     fn harness_preview_merges_with_existing_daemon_hooks() {
-        let preview = generate_hook_config(profile(AiTool::Harness)).unwrap();
+        let preview = generate_hook_config(AiTool::Harness).unwrap();
         assert!(preview.content.contains("agent-state-changed"));
         assert!(preview.content.contains("list-agents --json"));
         assert!(preview.content.contains("AIMonitor|tool=harness"));
@@ -1262,7 +1262,7 @@ mod tests {
 
     #[test]
     fn open_claw_preview_contains_a_complete_managed_plugin() {
-        let preview = generate_hook_config(profile(AiTool::OpenClaw)).unwrap();
+        let preview = generate_hook_config(AiTool::OpenClaw).unwrap();
         let auxiliary = generate_hook_auxiliary_configs(AiTool::OpenClaw);
 
         assert!(preview.content.contains("AIMonitor|tool=openclaw"));
@@ -1286,7 +1286,7 @@ mod tests {
     // 且用户手工添加的其他命令、其他顶层字段（如 permissions）会被保留。
     #[test]
     fn codex_merge_is_idempotent_and_preserves_other_commands() {
-        let generated = generate_hook_config(profile(AiTool::Codex)).unwrap();
+        let generated = generate_hook_config(AiTool::Codex).unwrap();
         // 第一次合并：从空配置开始生成初始文件。
         let first = merge_hook_config(None, &generated, AiTool::Codex).unwrap();
         let mut value: Value = serde_json::from_str(&first.content).unwrap();
@@ -1321,7 +1321,7 @@ mod tests {
     // 验证 Cursor 的合并逻辑同样幂等，且能正确保留用户命令、去重已有的托管条目。
     #[test]
     fn cursor_merge_is_idempotent_and_preserves_other_commands() {
-        let generated = generate_hook_config(profile(AiTool::Cursor)).unwrap();
+        let generated = generate_hook_config(AiTool::Cursor).unwrap();
         // 预置一份现有配置：包含用户命令和一条旧格式的托管条目。
         let existing = r#"{
           "version": 1,
@@ -1358,7 +1358,7 @@ mod tests {
     // 且不包含历史上淘汰的独立脚本、默认设备地址或 behavior 业务字段。
     #[test]
     fn hook_commands_post_directly_to_the_stable_local_relay() {
-        let preview = generate_hook_config(profile(AiTool::Codex)).unwrap();
+        let preview = generate_hook_config(AiTool::Codex).unwrap();
 
         assert!(preview.content.contains("127.0.0.1:10240/api/hooks/codex"));
         assert!(
@@ -1376,20 +1376,12 @@ mod tests {
         assert!(!preview.content.contains("\"behavior\":\"running\""));
     }
 
-    // 验证生成的 Hooks 配置只依赖 slot/工具类型等结构性字段，
-    // 修改展示文案/图片（不改变 slot 以外的结构）不会改变生成结果，
-    // 从而保证仅仅编辑显示内容不需要重新写入 Hooks 配置文件。
+    // 验证生成的 Hooks 配置只依赖工具类型，不需要预先保存设备展示 Profile。
     #[test]
     fn hook_config_is_identical_when_display_content_changes() {
-        let first = profile(AiTool::Codex);
-        let mut second = first.clone();
-        second.slot = 23;
-        second.hooks[0].content = "完全不同的文案".to_owned();
-        second.hooks[0].image = "another-idle.png".to_owned();
-
         assert_eq!(
-            generate_hook_config(first).unwrap().content,
-            generate_hook_config(second).unwrap().content
+            generate_hook_config(AiTool::Codex).unwrap().content,
+            generate_hook_config(AiTool::Codex).unwrap().content
         );
     }
 

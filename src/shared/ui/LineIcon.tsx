@@ -18,7 +18,8 @@ type IconName =
   | "close"
   | "server"
   | "chevronDown"
-  | "panel";
+  | "panel"
+  | "guide";
 
 // 图标名到具体 SVG 路径片段的映射表，每个图标由若干 <path>/<rect>/<circle> 组成
 const paths: Record<IconName, ReactNode> = {
@@ -80,6 +81,13 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <rect x="3" y="4" width="18" height="16" rx="3" />
       <path d="M9 4v16" />
+    </>
+  ),
+  // “引导”图标：指南针轮廓，用于新手引导入口。
+  guide: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="m15.5 8.5-2.1 4.9-4.9 2.1 2.1-4.9 4.9-2.1Z" />
     </>
   ),
 };

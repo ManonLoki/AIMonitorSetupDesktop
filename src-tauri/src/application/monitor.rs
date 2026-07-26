@@ -1439,15 +1439,8 @@ impl MonitorService {
             .data
             .read()
             .map_err(|_| "Hooks 配置读取锁已损坏".to_owned())?;
-        // 找到当前设备对应该工具的展示 Profile，未保存过则直接报错提示。
-        let profile = data
-            .profiles
-            .iter()
-            .find(|profile| profile.device_id == data.settings.device_id && profile.tool == tool)
-            .cloned()
-            .ok_or_else(|| "请先在监控管理中保存该工具的展示配置".to_owned())?;
-        // 根据 Profile 生成该工具期望的主配置和可选辅助文件（例如 OpenClaw 插件）。
-        let generated = generate_hook_config(profile)?;
+        // Hook 只连接固定的本机中继，不依赖设备 Profile，可在展示配置之前写入。
+        let generated = generate_hook_config(tool)?;
         let location = self.hook_config_location(&data, tool);
         let config_path = PathBuf::from(&location.config_path);
         let mut generated_files = vec![(config_path.clone(), generated)];
@@ -3709,8 +3702,8 @@ mod tests {
             PathBuf::from(&location.config_path),
             custom_directory.join("hooks.json")
         );
-        service.save_profile(test_profile()).unwrap();
-        // 仅保存 Profile 还不会触发写文件。
+        // Hooks 不依赖设备展示 Profile；首次配置时可以先完成写入。
+        assert!(service.profiles().unwrap().is_empty());
         assert!(!custom_directory.join("hooks.json").exists());
         service.write_hook_config(AiTool::Codex).unwrap();
         // 写入后应出现在自定义目录，而不是默认目录。

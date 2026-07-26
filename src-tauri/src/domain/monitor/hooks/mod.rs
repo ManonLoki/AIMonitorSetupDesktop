@@ -14,10 +14,7 @@ mod work_buddy;
 
 use serde_json::{Map, Value, json};
 
-use super::{
-    AiProfile, AiTool, DEFAULT_HOOK_RELAY_PORT, HookBehavior, HookConfigPreview, HookTransition,
-    validate_profile,
-};
+use super::{AiTool, DEFAULT_HOOK_RELAY_PORT, HookBehavior, HookConfigPreview, HookTransition};
 
 pub(super) const MANAGED_HOOK_PREFIX: &str = "AIMonitor";
 // AI 客户端与 AIMonitor 可能同时由登录项冷启动。Hook 进程通常会先于
@@ -224,9 +221,8 @@ pub(super) fn hook_transition(tool: AiTool, event: &str) -> Option<HookTransitio
     event_definition(tool, event).map(|definition| definition.kind.transition())
 }
 
-pub fn generate_hook_config(profile: AiProfile) -> Result<HookConfigPreview, String> {
-    let profile = validate_profile(profile)?;
-    let protocol = protocol(profile.tool);
+pub fn generate_hook_config(tool: AiTool) -> Result<HookConfigPreview, String> {
+    let protocol = protocol(tool);
     if let Some(content) = protocol.standalone_config() {
         return Ok(HookConfigPreview {
             filename: protocol.preview_filename().to_owned(),

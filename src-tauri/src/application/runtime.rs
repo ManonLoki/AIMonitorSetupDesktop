@@ -15,8 +15,8 @@ use super::monitor::{HookRelayStatus, MonitorService};
 
 // 托盘图标的固定标识符
 const TRAY_ID: &str = "aimonitor-tray";
-// 菜单项「显示/隐藏窗口」的固定标识符
-const TOGGLE_WINDOW_MENU_ID: &str = "toggle-window";
+// 菜单项「显示窗口」的固定标识符
+const SHOW_WINDOW_MENU_ID: &str = "show-window";
 // 菜单项「开机自启」的固定标识符
 const AUTOSTART_MENU_ID: &str = "autostart";
 // 菜单项「退出」的固定标识符
@@ -24,8 +24,6 @@ const QUIT_MENU_ID: &str = "quit";
 
 // 运行时托管的菜单状态，持有需要在运行期间动态更新的菜单项与托盘图标句柄
 pub struct RuntimeMenuState<R: Runtime> {
-    // 「显示/隐藏窗口」菜单项，用于动态更新其文案
-    toggle_window: MenuItem<R>,
     // 「开机自启」勾选菜单项，用于同步勾选状态
     autostart: CheckMenuItem<R>,
     // 托盘图标句柄，以下划线前缀命名表示仅用于持有生命周期、不主动读取
@@ -98,8 +96,7 @@ pub fn setup_desktop_runtime(app: &mut App) -> tauri::Result<()> {
     // 读取当前是否已启用开机自启，读取失败则默认视为未启用
     let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     // 构建「显示窗口」菜单项
-    let toggle_window =
-        MenuItem::with_id(app, TOGGLE_WINDOW_MENU_ID, "显示窗口", true, None::<&str>)?;
+    let show_window = MenuItem::with_id(app, SHOW_WINDOW_MENU_ID, "显示窗口", true, None::<&str>)?;
     // 构建「开机自启」勾选菜单项，初始勾选状态与实际自启动状态保持一致
     let autostart = CheckMenuItem::with_id(
         app,
@@ -114,10 +111,8 @@ pub fn setup_desktop_runtime(app: &mut App) -> tauri::Result<()> {
     // 构建「退出」菜单项
     let quit = MenuItem::with_id(app, QUIT_MENU_ID, "退出", true, None::<&str>)?;
     // 将上述菜单项按顺序组装成完整菜单
-    let menu = Menu::with_items(app, &[&toggle_window, &autostart, &separator, &quit])?;
+    let menu = Menu::with_items(app, &[&show_window, &autostart, &separator, &quit])?;
 
-    // 克隆一份「显示窗口」菜单项句柄，供事件回调闭包捕获使用
-    let toggle_for_events = toggle_window.clone();
     // 克隆一份「开机自启」菜单项句柄，供事件回调闭包捕获使用
     let autostart_for_events = autostart.clone();
     // 开始构建系统托盘图标
@@ -130,8 +125,8 @@ pub fn setup_desktop_runtime(app: &mut App) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         // 注册菜单项点击事件处理回调
         .on_menu_event(move |app, event| match event.id().as_ref() {
-            // 点击「显示窗口」：切换主窗口显示/隐藏状态
-            TOGGLE_WINDOW_MENU_ID => toggle_main_window(app, &toggle_for_events),
+            // 点击「显示窗口」：始终显示并聚焦主窗口。
+            SHOW_WINDOW_MENU_ID => show_main_window(app),
             // 点击「开机自启」：读取当前勾选状态并尝试应用，失败则回滚勾选框显示状态
             AUTOSTART_MENU_ID => {
                 let enabled = autostart_for_events.is_checked().unwrap_or(false);
@@ -152,7 +147,6 @@ pub fn setup_desktop_runtime(app: &mut App) -> tauri::Result<()> {
 
     // 将菜单项与托盘图标句柄托管到 Tauri 状态管理中，供后续动态更新使用
     app.manage(RuntimeMenuState {
-        toggle_window,
         autostart,
         _tray: tray,
     });
@@ -160,7 +154,7 @@ pub fn setup_desktop_runtime(app: &mut App) -> tauri::Result<()> {
     Ok(())
 }
 
-// 显示主窗口：取消最小化并聚焦，同时同步菜单文案为「隐藏窗口」
+// 显示主窗口：取消最小化并聚焦。
 pub fn show_main_window(app: &AppHandle) {
     // 尝试获取名为 "main" 的窗口句柄
     if let Some(window) = app.get_webview_window("main") {
@@ -170,8 +164,6 @@ pub fn show_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         // 将焦点设置到该窗口（忽略可能的错误）
         let _ = window.set_focus();
-        // 同步托盘菜单中「显示/隐藏窗口」的文案为「隐藏窗口」
-        sync_window_menu_label(app, true);
     }
 }
 
@@ -183,39 +175,6 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
         api.prevent_close();
         // 改为隐藏窗口（忽略可能的错误）
         let _ = window.hide();
-        // 同步托盘菜单文案为「显示窗口」
-        sync_window_menu_label(window.app_handle(), false);
-    }
-}
-
-// 切换主窗口的显示/隐藏状态，并同步菜单项文案
-fn toggle_main_window(app: &AppHandle, item: &MenuItem<tauri::Wry>) {
-    // 获取主窗口句柄，若不存在则直接返回
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    // 根据当前可见性决定是隐藏还是显示窗口
-    if window.is_visible().unwrap_or(false) {
-        // 当前可见：隐藏窗口
-        let _ = window.hide();
-        // 并将菜单文案改回「显示窗口」
-        let _ = item.set_text("显示窗口");
-    } else {
-        // 当前不可见：调用显示窗口逻辑（内部会同步菜单文案）
-        show_main_window(app);
-    }
-}
-
-// 根据窗口可见性同步托盘菜单中「显示/隐藏窗口」项的文案
-fn sync_window_menu_label(app: &AppHandle, visible: bool) {
-    // 从托管状态中取出菜单状态（若尚未初始化则跳过）
-    if let Some(state) = app.try_state::<RuntimeMenuState<tauri::Wry>>() {
-        // 根据可见性设置对应文案（忽略可能的错误）
-        let _ = state.toggle_window.set_text(if visible {
-            "隐藏窗口"
-        } else {
-            "显示窗口"
-        });
     }
 }
 

@@ -29,7 +29,6 @@ import {
 import { useActiveVisibleTool } from "../hooks/useActiveVisibleTool";
 // 引入查询键与预定义的查询配置
 import {
-  aiProfilesQuery,
   hookConfigLocationsQuery,
   monitorKeys,
 } from "../queries/monitor";
@@ -78,8 +77,6 @@ export function HooksManagementCard({
 }: HooksManagementCardProps) {
   // 获取 QueryClient 实例，用于在 mutation 成功后手动写入缓存
   const queryClient = useQueryClient();
-  // 查询当前设备下所有 AI 工具的 Profile 列表，用于判断某工具是否已完成展示配置
-  const profiles = useQuery(aiProfilesQuery);
   // 查询各工具的 hook 配置文件目录信息（对接 list_hook_config_locations 命令）
   const locations = useQuery(hookConfigLocationsQuery);
   // 按固定顺序过滤出当前可见的工具，仅在勾选集合变化时重新计算
@@ -137,8 +134,7 @@ export function HooksManagementCard({
   });
 
   // 汇总所有相关查询/mutation 的错误，任意一个出错就展示错误提示
-  const error =
-    profiles.error ?? locations.error ?? saveDirectory.error ?? write.error;
+  const error = locations.error ?? saveDirectory.error ?? write.error;
 
   return (
     <Card
@@ -189,9 +185,6 @@ export function HooksManagementCard({
               const pathDirty =
                 Boolean(location) &&
                 directoryDraft.trim() !== location?.directory;
-              const savedProfile = profiles.data?.find(
-                (profile) => profile.tool === tool.value,
-              );
               const writeResult =
                 write.isSuccess && write.data?.tool === tool.value
                   ? write.data
@@ -318,7 +311,7 @@ export function HooksManagementCard({
                             write.isPending && write.variables === tool.value
                           }
                           disabled={
-                            locations.isPending || pathDirty || !savedProfile
+                            locations.isPending || pathDirty
                           }
                         >
                           写入 Hooks 配置
@@ -329,13 +322,6 @@ export function HooksManagementCard({
                     {pathDirty && (
                       <Alert color="yellow" variant="light">
                         路径尚未保存。保存后写入会切换到新目录；旧文件不会被移动或删除。
-                      </Alert>
-                    )}
-
-                    {!profiles.isPending && !savedProfile && (
-                      <Alert color="yellow" variant="light">
-                        尚未保存 {tool.label}
-                        的展示配置。请先到“监控管理”完成并保存展示配置。
                       </Alert>
                     )}
 

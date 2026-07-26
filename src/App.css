@@ -246,6 +246,22 @@ body {
   transform-origin: 50% 0;
 }
 
+.onboarding-guide {
+  position: fixed;
+  z-index: 400;
+  right: 20px;
+  bottom: 20px;
+  width: min(390px, calc(100vw - 32px));
+  background: var(--app-surface);
+}
+
+@media (max-width: 48em) {
+  .onboarding-guide {
+    right: 16px;
+    bottom: 16px;
+  }
+}
+
 /* ReactBits 页面过渡之后，让重复内容以很短的节奏依次出现。 */
 .react-bits-page .mantine-SimpleGrid-root > *,
 .react-bits-page .mantine-Tabs-panel > .mantine-Stack-root > * {
