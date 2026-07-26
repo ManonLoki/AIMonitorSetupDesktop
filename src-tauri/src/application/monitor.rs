@@ -24,12 +24,12 @@ use tauri::{AppHandle, Emitter};
 // 本文件（application 层）只做编排，具体业务规则在 domain 层实现。
 use crate::domain::monitor::{
     AiProfile, AiTool, DEFAULT_HOOK_RELAY_PORT, DiscoveredMonitorDevice, DiscoverySource,
-    HookBehavior, HookConfigDirectories, HookConfigLocation, HookConfigWriteResult, HookTransition,
-    MonitorDeviceRoute, MonitorSettings, SavedMonitorData, ai_tool_name, encode_base64,
-    generate_hook_config, hook_config_filename, hook_transition, is_authoritative_terminal_event,
-    is_late_completion_event, merge_hook_config, normalize_base_url, resize_and_compress_image,
-    validate_device_route, validate_discovery_interval_minutes, validate_profile,
-    validate_saved_monitor_data, validate_username,
+    HookBehavior, HookConfigDirectories, HookConfigLocation, HookConfigWriteResult,
+    HookEventDecision, HookStateMachine, HookTransition, MonitorDeviceRoute, MonitorSettings,
+    SavedMonitorData, ai_tool_name, encode_base64, generate_hook_config, hook_config_filename,
+    merge_hook_config, normalize_base_url, resize_and_compress_image, validate_device_route,
+    validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
+    validate_username,
 };
 
 // 本地持久化存储文件名（保存监控配置数据的 JSON 文件）。
@@ -56,12 +56,11 @@ const MAX_REMOTE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const HOOK_LISTENER_PORT: u16 = DEFAULT_HOOK_RELAY_PORT;
 // Hook 中继 TCP 监听器只绑定在本机回环地址，不对外暴露。
 const HOOK_BIND_ADDRESS: &str = "127.0.0.1";
-// 单次 Hook HTTP 请求（含请求头）允许的最大字节数。
-const MAX_HOOK_REQUEST_BYTES: usize = 8 * 1024;
-// 单次 Hook 请求体允许的最大字节数。
-const MAX_HOOK_BODY_BYTES: usize = 2 * 1024;
-// 终止态（如任务完成/失败）后的保护时间窗口，用于防止状态被后续事件覆盖。
-const TERMINAL_STATE_GUARD: Duration = Duration::from_secs(2);
+// 原始 Hook JSON 可能包含用户 prompt、工具输入/输出等上下文；限制为 4 MiB，
+// 既允许完整转发常规事件，又避免异常本机连接无界占用内存。
+const MAX_HOOK_BODY_BYTES: usize = 4 * 1024 * 1024;
+// 完整 HTTP 请求额外为请求头预留 8 KiB。
+const MAX_HOOK_REQUEST_BYTES: usize = MAX_HOOK_BODY_BYTES + 8 * 1024;
 // 连续多少次发现轮询未命中某设备后，才将其判定为离线并移除。
 const DISCOVERY_MISSES_BEFORE_REMOVAL: u8 = 2;
 /// 后台发现循环的轮询粒度：每次醒来都会重新读取当前配置的检查间隔，
@@ -490,13 +489,29 @@ pub struct HookRelayStatus {
     pub last_error: String,
 }
 
-// Hook 请求体的最小反序列化结构，只关心事件类型字段；
-// 使用 deny_unknown_fields 严格校验，防止误收非法/畸形请求。
+// Hook 请求体保留工具原生的生命周期上下文。中继当前只读取事件名，但允许
+// session_id、turn_id、reason 等原始字段随请求进入，状态算法可按需继续扩展。
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct HookRequest {
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type")]
+    legacy_type: Option<String>,
+    #[serde(default)]
+    hook_event_name: Option<String>,
+    #[serde(default, alias = "conversation_id")]
+    session_id: Option<String>,
+    #[serde(default, alias = "generation_id")]
+    turn_id: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct IncomingHookEvent {
+    tool: AiTool,
     hook_type: String,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    status: Option<String>,
 }
 
 // 向设备端上报槽位状态更新时使用的请求体。
@@ -632,29 +647,10 @@ impl MonitorService {
             };
             // 建立一个 mpsc 通道：监听线程只负责快速接收连接、解析请求后扔进队列，
             // 真正耗时的转发工作交给独立的 worker 线程串行处理，避免阻塞新连接的接收。
-            let (sender, receiver) = mpsc::channel::<(AiTool, String)>();
+            let (sender, receiver) = mpsc::channel::<IncomingHookEvent>();
             let worker_data = Arc::clone(&data);
             let worker_status = Arc::clone(&status);
-            thread::spawn(move || {
-                // 记录每个 AI 工具最近一次进入终止态的时间，用于抑制“迟到”的过期事件。
-                let mut terminal_states = HashMap::<AiTool, Instant>::new();
-                while let Ok((tool, hook_type)) = receiver.recv() {
-                    // 判断该事件是否应被抑制（比如终止态之后又收到的过期事件）。
-                    if should_suppress_late_event(&mut terminal_states, tool, &hook_type) {
-                        record_suppressed_hook(&worker_status, tool, &hook_type);
-                        continue;
-                    }
-                    // 未被抑制则真正执行转发逻辑。
-                    relay_hook(
-                        &client,
-                        &worker_data,
-                        &online_devices,
-                        &worker_status,
-                        tool,
-                        &hook_type,
-                    );
-                }
-            });
+            spawn_hook_worker(client, receiver, worker_data, online_devices, worker_status);
 
             // 主循环：逐个接受 TCP 连接（阻塞式监听器，来一个处理一个）。
             for connection in listener.incoming() {
@@ -662,12 +658,12 @@ impl MonitorService {
                     continue;
                 };
                 match read_hook_request(&mut stream) {
-                    Ok((tool, hook_type)) => {
+                    Ok(event) => {
                         // 解析成功先把待处理计数加一。
                         if let Ok(mut current) = status.write() {
                             current.pending_count += 1;
                         }
-                        if sender.send((tool, hook_type)).is_ok() {
+                        if sender.send(event).is_ok() {
                             // 成功入队后立刻回 202，表示已接受、异步处理。
                             write_http_response(&mut stream, 202, "Accepted");
                         } else {
@@ -1409,8 +1405,61 @@ impl MonitorService {
     }
 }
 
+fn spawn_hook_worker(
+    client: reqwest::blocking::Client,
+    receiver: mpsc::Receiver<IncomingHookEvent>,
+    data: Arc<RwLock<SavedMonitorData>>,
+    online_devices: Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
+    status: Arc<RwLock<HookRelayStatus>>,
+) {
+    thread::spawn(move || {
+        // 每个工具拥有独立的纯生命周期状态机；它根据事件顺序而不是时间窗口
+        // 决定是否转发，因此用户中断后的迟到完成事件不会让状态反弹。
+        let mut state_machines = HashMap::<AiTool, HookStateMachine>::new();
+        while let Ok(event) = receiver.recv() {
+            let IncomingHookEvent {
+                tool,
+                hook_type,
+                session_id,
+                turn_id,
+                status: event_status,
+            } = event;
+            let decision = state_machines
+                .entry(tool)
+                .or_default()
+                .apply_event_with_status(
+                    tool,
+                    &hook_type,
+                    session_id.as_deref(),
+                    turn_id.as_deref(),
+                    event_status.as_deref(),
+                );
+            match decision {
+                HookEventDecision::Forward(transition) => relay_hook(
+                    &client,
+                    &data,
+                    &online_devices,
+                    &status,
+                    tool,
+                    &hook_type,
+                    transition,
+                ),
+                HookEventDecision::Ignore => record_suppressed_hook(&status, tool, &hook_type),
+                HookEventDecision::Unsupported => record_hook_results(
+                    &status,
+                    tool,
+                    &hook_type,
+                    None,
+                    0,
+                    &[format!("不支持的 Hook 类型：{hook_type}")],
+                ),
+            }
+        }
+    });
+}
+
 // 从 Hook 中继监听收到的 TCP 连接里读取并解析出一个 Hook 请求，返回涉及的 AI 工具与事件类型。
-fn read_hook_request(stream: &mut TcpStream) -> Result<(AiTool, String), String> {
+fn read_hook_request(stream: &mut TcpStream) -> Result<IncomingHookEvent, String> {
     // 读超时 3 秒，避免恶意或异常连接长期占用线程。
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
@@ -1460,15 +1509,22 @@ fn read_hook_request(stream: &mut TcpStream) -> Result<(AiTool, String), String>
         Some("cursor") => AiTool::Cursor,
         _ => return Err("Hook 请求中的 AI 工具无效".to_owned()),
     };
-    // 从头部行中查找 Content-Length（大小写不敏感），解析出请求体长度。
-    let content_length = lines
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())
-                .flatten()
-        })
-        .ok_or_else(|| "Hook 请求缺少有效的 Content-Length".to_owned())?;
+    // 同时读取正文长度与配置生成时写入的可信事件头。原始 Hook JSON 中通常
+    // 自带 hook_event_name；事件头用于 Cursor 等协议字段不一致时兜底。
+    let mut content_length = None;
+    let mut header_hook_type = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.trim().parse::<usize>().ok();
+        } else if name.eq_ignore_ascii_case("x-aimonitor-hook-type") {
+            header_hook_type = Some(value.trim().to_owned());
+        }
+    }
+    let content_length =
+        content_length.ok_or_else(|| "Hook 请求缺少有效的 Content-Length".to_owned())?;
     // 请求体长度必须大于 0 且不超过限制。
     if content_length == 0 || content_length > MAX_HOOK_BODY_BYTES {
         return Err("Hook 请求体大小无效".to_owned());
@@ -1487,16 +1543,32 @@ fn read_hook_request(stream: &mut TcpStream) -> Result<(AiTool, String), String>
             return Err("Hook 请求过大".to_owned());
         }
     }
-    // 截取请求体部分并反序列化为 HookRequest。
+    // 截取请求体部分并反序列化。未知字段是工具提供的原始上下文，不属于监控
+    // 业务载荷，因此予以保留兼容而不是拒绝整个事件。
     let body =
         serde_json::from_slice::<HookRequest>(&request[header_end..header_end + content_length])
             .map_err(|error| format!("Hook 请求 JSON 无效：{error}"))?;
-    let hook_type = body.hook_type.trim();
+    let body_hook_type = body.hook_event_name.clone().or(body.legacy_type.clone());
+    if let (Some(body_type), Some(header_type)) = (&body_hook_type, &header_hook_type)
+        && body_type.trim() != header_type.trim()
+    {
+        return Err("Hook 请求体与事件头不一致".to_owned());
+    }
+    let hook_type = body_hook_type
+        .or(header_hook_type)
+        .ok_or_else(|| "Hook 请求缺少事件类型".to_owned())?;
+    let hook_type = hook_type.trim();
     // 事件类型字符串不能为空，也不能过长。
     if hook_type.is_empty() || hook_type.len() > 128 {
         return Err("Hook 类型不能为空且不能超过 128 个字符".to_owned());
     }
-    Ok((tool, hook_type.to_owned()))
+    Ok(IncomingHookEvent {
+        tool,
+        hook_type: hook_type.to_owned(),
+        session_id: body.session_id,
+        turn_id: body.turn_id,
+        status: body.status,
+    })
 }
 
 // 处理一个已通过去抖判定的 Hook 事件：转换为业务行为、找出所有配置了该工具的
@@ -1508,19 +1580,8 @@ fn relay_hook(
     status: &Arc<RwLock<HookRelayStatus>>,
     tool: AiTool,
     hook_type: &str,
+    transition: HookTransition,
 ) {
-    // 将原始事件类型转换为领域层定义的状态转换；不支持的类型直接记录失败并返回。
-    let Some(transition) = hook_transition(tool, hook_type) else {
-        record_hook_results(
-            status,
-            tool,
-            hook_type,
-            None,
-            0,
-            &[format!("不支持的 Hook 类型：{hook_type}")],
-        );
-        return;
-    };
     // 读取共享配置数据；锁损坏则记录失败并返回。
     let Ok(data) = data.read() else {
         record_hook_results(
@@ -1777,41 +1838,12 @@ fn record_hook_results(
     }
 }
 
-// 判断某个事件是否应被抑制：终止态事件之后收到的“迟到”完成类事件在保护窗口内会被忽略，
-// 避免旧的完成事件覆盖掉之后已经开始的新一轮工作状态。
-fn should_suppress_late_event(
-    terminal_states: &mut HashMap<AiTool, Instant>,
-    tool: AiTool,
-    hook_type: &str,
-) -> bool {
-    let now = Instant::now();
-    // 权威终止事件：记录发生时间，本身不被抑制。
-    if is_authoritative_terminal_event(tool, hook_type) {
-        terminal_states.insert(tool, now);
-        return false;
-    }
-    // 若是“迟到完成”类事件，且距离最近一次终止态仍在保护窗口内，则抑制。
-    if is_late_completion_event(hook_type)
-        && terminal_states
-            .get(&tool)
-            .is_some_and(|terminal| now.duration_since(*terminal) <= TERMINAL_STATE_GUARD)
-    {
-        return true;
-    }
-    // 非迟到完成类事件（说明有新工作开始）：清除该工具的终止态记录。
-    if !is_late_completion_event(hook_type) {
-        terminal_states.remove(&tool);
-    }
-    false
-}
-
 // 记录一次被抑制（未真正转发）的 Hook 事件：仍计入收到总数，但归入抑制计数。
 fn record_suppressed_hook(status: &Arc<RwLock<HookRelayStatus>>, tool: AiTool, hook_type: &str) {
     if let Ok(mut current) = status.write() {
         begin_hook_completion(&mut current, tool, hook_type);
         current.suppressed_count += 1;
-        // 被抑制的事件视为“空闲”状态展示，且不携带错误信息。
-        current.last_behavior = Some(HookBehavior::Idle);
+        // 忽略事件不会改变已经转发到设备的最后行为。
         current.last_error.clear();
     }
 }
@@ -2007,19 +2039,29 @@ mod tests {
 
         sender.join().unwrap();
         // 期望解析出 Codex 工具与 SessionStart 事件类型。
-        assert_eq!(request, (AiTool::Codex, "SessionStart".to_owned()));
+        assert_eq!(
+            request,
+            IncomingHookEvent {
+                tool: AiTool::Codex,
+                hook_type: "SessionStart".to_owned(),
+                session_id: None,
+                turn_id: None,
+                status: None,
+            }
+        );
     }
 
-    // 验证请求体中携带业务字段（如 image）时会被拒绝：
-    // HookRequest 使用 deny_unknown_fields，本地 Hook 请求不应该允许伪造业务负载。
+    // 验证工具原生 Hook JSON 可以完整透传：状态算法只读取 hook_event_name，
+    // session_id/turn_id/tool_input 等上下文不会导致请求被拒绝。
     #[test]
-    fn local_hook_request_rejects_business_payload_fields() {
+    fn local_hook_request_accepts_native_context_and_event_header() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let body = r#"{"type":"Stop","image":"should-not-be-here.png"}"#;
+        let body = r#"{"hook_event_name":"stop","conversation_id":"s-1","generation_id":"t-1","status":"cancelled"}"#;
         let request = format!(
             "POST /api/hooks/cursor HTTP/1.1\r\nHost: 127.0.0.1\r\n\
-             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+             Content-Type: application/json\r\nX-AIMonitor-Hook-Type: stop\r\n\
+             Content-Length: {}\r\n\r\n{body}",
             body.len()
         );
         let sender = thread::spawn(move || {
@@ -2028,11 +2070,19 @@ mod tests {
         });
         let (mut stream, _) = listener.accept().unwrap();
 
-        let error = read_hook_request(&mut stream).unwrap_err();
+        let parsed = read_hook_request(&mut stream).unwrap();
 
         sender.join().unwrap();
-        // 期望返回的错误信息里包含 "unknown field" 字样，证明是被 deny_unknown_fields 拒绝的。
-        assert!(error.contains("unknown field"));
+        assert_eq!(
+            parsed,
+            IncomingHookEvent {
+                tool: AiTool::Cursor,
+                hook_type: "stop".to_owned(),
+                session_id: Some("s-1".to_owned()),
+                turn_id: Some("t-1".to_owned()),
+                status: Some("cancelled".to_owned()),
+            }
+        );
     }
 
     // 验证 relay_hook 能根据事件类型计算出正确的行为状态，并转发到已配置的设备路由，
@@ -2079,6 +2129,7 @@ mod tests {
             &status,
             AiTool::Codex,
             "UserPromptSubmit",
+            HookTransition::Display(HookBehavior::Running),
         );
 
         let request = receiver.join().unwrap();
@@ -2164,6 +2215,7 @@ mod tests {
             &status,
             AiTool::Codex,
             "UserPromptSubmit",
+            HookTransition::Display(HookBehavior::Running),
         );
 
         let request = receiver.join().unwrap();
@@ -2279,6 +2331,7 @@ mod tests {
             &status,
             AiTool::Codex,
             "UserPromptSubmit",
+            HookTransition::Display(HookBehavior::Running),
         );
         let elapsed = started.elapsed();
 
@@ -2291,35 +2344,6 @@ mod tests {
             elapsed < delay * 2,
             "two devices answering in {delay:?} should overlap, not add up (took {elapsed:?})"
         );
-    }
-
-    // 验证终止态保护窗口的行为：Stop 是权威终止事件（不会被抑制，且会记录终止时间点）；
-    // 紧随其后的 SubagentStop 属于“迟到完成”类事件，应被抑制；
-    // 而 UserPromptSubmit（新一轮工作开始）应清除终止态并放行；
-    // 清除之后再来的 PostToolUse 也应正常放行（不再处于保护窗口逻辑内）。
-    #[test]
-    fn terminal_state_guard_suppresses_late_completion_but_not_new_work() {
-        let mut terminals = HashMap::new();
-        assert!(!should_suppress_late_event(
-            &mut terminals,
-            AiTool::ClaudeCode,
-            "Stop"
-        ));
-        assert!(should_suppress_late_event(
-            &mut terminals,
-            AiTool::ClaudeCode,
-            "SubagentStop"
-        ));
-        assert!(!should_suppress_late_event(
-            &mut terminals,
-            AiTool::ClaudeCode,
-            "UserPromptSubmit"
-        ));
-        assert!(!should_suppress_late_event(
-            &mut terminals,
-            AiTool::ClaudeCode,
-            "PostToolUse"
-        ));
     }
 
     // 验证切换当前设备后，profiles() 只返回新设备的 Profile（而不是混合了旧设备的）；

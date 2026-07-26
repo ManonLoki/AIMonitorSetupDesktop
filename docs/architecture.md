@@ -40,6 +40,7 @@ src/
 src-tauri/src/
 ├── commands/                  # Tauri 参数/结果适配；保持极薄
 ├── domain/                    # 业务实体、规则与纯逻辑
+│   └── monitor/hooks/         # HookProtocol 公共契约及各 AI 工具独立协议实现
 ├── application/                # 服务编排（如 MonitorService、设备发现）
 └── lib.rs                     # 插件与 command 注册
 ```
@@ -109,9 +110,9 @@ AI 工具的 Hooks 不再直接访问监控屏。桌面端是状态计算与转�
 
 ```text
 Codex / Claude Code / Cursor Hook
-  ↓ POST 127.0.0.1:10240/api/hooks/{tool}，请求体仅含 type
+  ↓ POST 127.0.0.1:10240/api/hooks/{tool}，原始 Hook JSON + 受配置控制的事件头
 Rust 本机 Hook listener
-  ↓ 根据 tool + Hook type 计算 Idle / Running / Asking / Error
+  ↓ 根据 tool + Hook type 推进纯 Rust 生命周期状态机
 Rust 中读取共享用户名，并按 AI 工具遍历已配置设备的 Profile、路由和显示位置
   ↓ 对每台已配置设备 POST / DELETE /api/slots/{slot}
 AIMonitor APK（单台失败不终止后续设备）
@@ -140,9 +141,24 @@ AIMonitor APK（单台失败不终止后续设备）
   Rust 读取当前编辑设备对应的已保存 Profile，只生成固定本机中继规则。配置
   配置目录仍由 Rust 校验并持久化。完全没有在线设备时，监控管理和图片管理
   入口禁用，页面也不发起设备业务请求；侧栏明确显示“无可用设备”。
+- Hook 命令把工具写入 stdin 的原始 JSON 原样转发，因此 session、turn、退出
+  原因等上下文不会在传输层丢失；`X-AIMonitor-Hook-Type` 仅作为不含
+  `hook_event_name` 的工具协议兜底，若正文与事件头同时存在但不一致则拒绝。
+  事件到状态的归一化、重复事件消除、迟到完成事件抑制和会话释放全部由
+  `domain/monitor.rs` 的无时间依赖状态机决定。状态机按 `session_id` 隔离任务、
+  按 `turn_id` 拒绝旧轮次事件，再聚合为工具的唯一展示状态，因此一个任务的
+  Stop/退出不会覆盖另一个仍在工作的任务：`SessionStart` 建立空闲展示，
+  `UserPromptSubmit` 等真实工作起点进入运行，`Stop`（包括用户中断后的轮次
+  停止）回到空闲，`SessionEnd` 释放展示位；Stop 后的 `PostToolUse`、
+  `SubagentStop`、`PostCompact` 不会重新激活状态，直到出现新的工作起点。
+- Codex、Claude Code、Cursor 的协议实现分别位于 `domain/monitor/hooks/`
+  下的独立文件，并统一实现 `HookProtocol`。Trait 负责约束工具元数据、事件语义、
+  原生 handler/config 结构、stdout 约定和托管条目清理；公共生成、合并和状态机
+  不得按工具硬编码事件字符串。Cursor 的 `conversation_id`/`generation_id` 在
+  listener 边界归一化为 session/turn，`stop.status=error` 归一化为异常展示。
 - listener 与转发 worker 通过内存队列解耦，按接收顺序处理。每个目标设备
-  只转发一次，失败后不重试，避免积压事件形成请求风暴；终态到达后的两秒内会抑制迟到的完成类事件，避免
-  `Stop → SubagentStop` 把屏幕错误地从空闲切回运行中。
+  只转发一次，失败后不重试，避免积压事件形成请求风暴；状态机还会消除
+  不改变展示状态的重复事件，减少不必要的设备请求。
 - Rust 在启动后立即执行一次在线设备发现，之后按设置页以“分钟”为单位配置的
   间隔（默认一分钟）持续刷新在线设备快照；后台循环以 1 秒粒度醒来并重新读取当前
   间隔，因此在设置页修改间隔后无需重启即可立即生效。设备发现同时执行
