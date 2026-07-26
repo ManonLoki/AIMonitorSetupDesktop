@@ -1,3 +1,4 @@
+// 引入 Mantine UI 组件：提示、徽标、按钮、卡片、代码片段展示、分组/网格/堆叠布局、文本、标题
 import {
   Alert,
   Badge,
@@ -10,15 +11,20 @@ import {
   Text,
   Title,
 } from "@mantine/core";
+// 引入 TanStack Query 的 query hook
 import { useQuery } from "@tanstack/react-query";
+// 引入被发现设备的类型定义
 import type { DiscoveredMonitorDevice } from "../api/monitor";
+// 引入查询键与预定义的查询配置
 import {
   monitorDevicesQuery,
   monitorSettingsQuery,
   runtimeOverviewQuery,
 } from "../queries/monitor";
+// 引入通用图标组件
 import { LineIcon } from "../../../shared/ui/LineIcon";
 
+// 设备发现来源枚举值到中文展示文案的映射表
 const discoverySourceLabel: Record<DiscoveredMonitorDevice["discoverySource"], string> = {
   mdns: "mDNS 发现",
   udpBroadcast: "UDP 广播",
@@ -26,17 +32,24 @@ const discoverySourceLabel: Record<DiscoveredMonitorDevice["discoverySource"], s
 };
 
 export function WorkbenchPage() {
+  // 查询运行时概览信息（含 hook 中继状态），对接 get_runtime_overview 命令，每 3 秒自动轮询一次
   const runtime = useQuery(runtimeOverviewQuery);
+  // 查询当前监控设置（用于判断哪个设备是“当前连接”），对接 get_monitor_settings 命令
   const settings = useQuery(monitorSettingsQuery);
+  // 查询局域网内已发现的设备列表，对接 discover_monitor_devices 命令，10 秒内视为新鲜
   const devices = useQuery(monitorDevicesQuery);
+  // 从运行时概览中取出 hook 中继状态，便于下方多处引用
   const relay = runtime.data?.hookRelay;
 
   return (
     <Stack gap="md">
+      {/* 运行时概览查询本身的错误提示 */}
       {runtime.error && <Alert color="red">{runtime.error.message}</Alert>}
 
+      {/* 在线设备卡片：展示已发现设备列表，并支持手动强制重新检查 */}
       <Card withBorder radius="lg" p="md" className="surface-card">
         <Stack gap="md">
+          {/* 标题、说明文案与“强制重新检查”按钮 */}
           <Group justify="space-between" align="flex-start">
             <div>
               <Title order={3}>在线设备</Title>
@@ -47,6 +60,7 @@ export function WorkbenchPage() {
             <Button
               variant="default"
               leftSection={<LineIcon name="refresh" size={17} />}
+              // 手动触发一次设备发现，强制刷新在线设备列表
               onClick={() => devices.refetch()}
               loading={devices.isFetching}
             >
@@ -54,14 +68,17 @@ export function WorkbenchPage() {
             </Button>
           </Group>
 
+          {/* 设备发现查询自身的错误提示 */}
           {devices.error && <Alert color="red">{devices.error.message}</Alert>}
 
+          {/* 查询完成但未发现任何设备时的提示 */}
           {!devices.isPending && devices.data?.length === 0 && (
             <Alert color="yellow" variant="light">
               暂未发现在线设备，请确认设备已开机并接入同一局域网。
             </Alert>
           )}
 
+          {/* 已发现设备列表：逐个渲染设备名称（当前连接设备额外标注）、访问地址、API 版本与发现来源徽标 */}
           {(devices.data?.length ?? 0) > 0 && (
             <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm">
               {devices.data?.map((device) => (
@@ -72,6 +89,7 @@ export function WorkbenchPage() {
                       <div className="min-width-zero">
                         <Text size="sm" fw={600} truncate>
                           {device.name}
+                          {/* 当前已连接设备的额外标注 */}
                           {device.id === settings.data?.deviceId && (
                             <Text component="span" size="xs" c="dimmed">
                               {" "}
@@ -84,6 +102,7 @@ export function WorkbenchPage() {
                         </Text>
                       </div>
                     </Group>
+                    {/* 设备发现来源徽标 */}
                     <Badge variant="light" color="teal">
                       {discoverySourceLabel[device.discoverySource]}
                     </Badge>
@@ -95,8 +114,10 @@ export function WorkbenchPage() {
         </Stack>
       </Card>
 
+      {/* 本机 Hook 中继卡片：展示中继监听状态、各项统计指标、最近一次事件与最近一次错误 */}
       <Card withBorder radius="lg" p="md" className="surface-card">
         <Stack gap="md">
+          {/* 标题、说明文案与监听状态徽标 */}
           <Group justify="space-between" align="flex-start">
             <div>
               <Title order={3}>本机 Hook 中继</Title>
@@ -109,6 +130,7 @@ export function WorkbenchPage() {
             </Badge>
           </Group>
 
+          {/* 中继统计指标网格：接收数、转发成功/失败数、等待处理数、时序抑制数 */}
           <SimpleGrid cols={{ base: 2, sm: 3 }}>
             <RelayMetric label="已接收事件" value={relay?.receivedCount ?? 0} />
             <RelayMetric label="设备转发成功" value={relay?.forwardedCount ?? 0} />
@@ -117,6 +139,7 @@ export function WorkbenchPage() {
             <RelayMetric label="时序抑制" value={relay?.suppressedCount ?? 0} />
           </SimpleGrid>
 
+          {/* 最近一次事件的工具、hook 类型与对应行为（若无行为则说明是释放位置） */}
           {relay?.lastHookType && (
             <Text size="sm">
               最近事件：<Code>{relay.lastTool}</Code> /{" "}
@@ -125,6 +148,7 @@ export function WorkbenchPage() {
             </Text>
           )}
 
+          {/* 最近一次转发失败时展示错误详情 */}
           {relay?.lastError && (
             <Alert color="red" title="最近一次转发存在失败">
               {relay.lastError}
@@ -136,6 +160,7 @@ export function WorkbenchPage() {
   );
 }
 
+// 中继统计指标小卡片：展示一个标签与对应数值
 function RelayMetric({ label, value }: { label: string; value: number }) {
   return (
     <div className="endpoint-preview">

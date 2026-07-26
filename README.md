@@ -25,6 +25,18 @@ pnpm check
 pnpm tauri build
 ```
 
+## 发布构建
+
+在 macOS 上一次性构建 macOS（ARM64）与 Windows（x64，通过
+`cargo-xwin` 交叉编译）安装包：
+
+```bash
+pnpm release:desktop
+```
+
+产物输出到 `publish/`。运行前需要 `cargo-xwin`、`makensis`（NSIS）等
+工具，脚本会在开始前检查依赖是否齐全。
+
 ## 项目约束
 
 - [技术栈与版本](docs/technology-stack.md)

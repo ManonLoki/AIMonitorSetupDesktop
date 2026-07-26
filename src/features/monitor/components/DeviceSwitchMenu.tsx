@@ -3,11 +3,13 @@ import { useMonitorConnection } from "../hooks/useMonitorConnection";
 import { useConnectDevice } from "../hooks/useConnectDevice";
 import { LineIcon } from "../../../shared/ui/LineIcon";
 
+// collapsed 为 true 时使用侧边栏收起态的图标按钮样式，否则展示完整的设备信息条
 interface DeviceSwitchMenuProps {
   collapsed?: boolean;
 }
 
 export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
+  // 从统一的设备连接 hook 中取出设置、当前已连接设备、其他可切换设备等状态
   const {
     settings,
     connectedDevice,
@@ -15,13 +17,17 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
     isPending,
     hasAvailableDevice,
   } = useMonitorConnection();
+  // 用于切换/连接设备的 mutation
   const connect = useConnectDevice();
   const savedDevice = settings.data;
+  // 优先展示当前已连接设备的信息，若未连接则回退展示已保存的设备信息
   const currentName = connectedDevice?.name ?? savedDevice?.deviceName;
   const currentBaseUrl = connectedDevice?.baseUrl ?? savedDevice?.baseUrl;
   const currentAvailable = Boolean(connectedDevice);
 
+  // 设备状态尚在加载时，仅展示一个小的加载指示器
   if (isPending) return <Loader size={16} />;
+  // 完全没有可用设备时，根据是否收起渲染禁用态的图标按钮或提示文案
   if (!hasAvailableDevice) {
     return collapsed ? (
       <ActionIcon
@@ -45,6 +51,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
 
   return (
     <>
+      {/* 切换设备失败时，在展开态下展示错误提示 */}
       {connect.isError && !collapsed && (
         <Text size="xs" c="red" px={4}>
           切换设备失败：{connect.error.message}
@@ -53,6 +60,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
       <Menu shadow="md" width={220} position="top-start" withinPortal>
         <Menu.Target>
           {collapsed ? (
+            // 收起态：仅展示服务器图标，右上角小圆点标记当前设备是否在线
             <ActionIcon
               variant="subtle"
               color="gray"
@@ -72,6 +80,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
               />
             </ActionIcon>
           ) : (
+            // 展开态：展示状态圆点、设备名称、地址（或未发现提示）以及下拉箭头
             <Group gap="sm" wrap="nowrap" className="sidebar-device-button">
               <div
                 className={`status-dot${currentAvailable ? "" : " offline"}`}
@@ -90,6 +99,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
         </Menu.Target>
         <Menu.Dropdown>
           <Menu.Label>当前设备</Menu.Label>
+          {/* 当前设备信息条目：有设备名则展示名称与地址（未发现时附加提示），否则展示未连接文案 */}
           {currentName ? (
             <Menu.Item disabled>
               <Stack gap={0}>
@@ -107,6 +117,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
           )}
           <Menu.Divider />
           <Menu.Label>切换设备</Menu.Label>
+          {/* 其他可切换设备列表：为空时展示提示，否则逐个渲染可点击切换的设备条目 */}
           {otherDevices.length === 0 ? (
             <Menu.Item disabled>未发现其他可连接设备</Menu.Item>
           ) : (
@@ -116,6 +127,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
                 disabled={connect.isPending}
                 onClick={() => connect.mutate(device)}
                 rightSection={
+                  // 正在连接当前这台设备时，在条目右侧展示加载指示器
                   connect.isPending &&
                   connect.variables?.id === device.id ? (
                     <Loader size={14} />

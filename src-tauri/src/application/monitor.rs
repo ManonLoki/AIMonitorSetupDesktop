@@ -1,3 +1,5 @@
+// 标准库依赖：集合、文件系统、IO 读写、网络套接字（TCP/UDP）、路径、
+// 线程安全共享（Arc/Mutex/RwLock/mpsc 通道）、线程、时间。
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -9,54 +11,82 @@ use std::{
     time::{Duration, Instant},
 };
 
+// 第三方依赖：网卡信息枚举（if_addrs）、mDNS 服务发现（mdns_sd）、
+// HTTP 客户端与 multipart 上传（reqwest）、序列化（serde）、
+// Tauri 应用句柄与事件发送（tauri）。
 use if_addrs::{IfAddr, IfOperStatus};
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent};
 use reqwest::{Client, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
+// 引入领域层（domain/monitor.rs）的实体类型与纯业务函数，
+// 本文件（application 层）只做编排，具体业务规则在 domain 层实现。
 use crate::domain::monitor::{
     AiProfile, AiTool, DEFAULT_HOOK_RELAY_PORT, DiscoveredMonitorDevice, DiscoverySource,
     HookBehavior, HookConfigDirectories, HookConfigLocation, HookConfigWriteResult, HookTransition,
     MonitorDeviceRoute, MonitorSettings, SavedMonitorData, ai_tool_name, encode_base64,
     generate_hook_config, hook_config_filename, hook_transition, is_authoritative_terminal_event,
-    is_late_completion_event, merge_hook_config, normalize_base_url, validate_device_route,
-    validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
-    validate_username,
+    is_late_completion_event, merge_hook_config, normalize_base_url, resize_and_compress_image,
+    validate_device_route, validate_discovery_interval_minutes, validate_profile,
+    validate_saved_monitor_data, validate_username,
 };
 
+// 本地持久化存储文件名（保存监控配置数据的 JSON 文件）。
 const STORE_FILENAME: &str = "monitor-data.json";
+// mDNS 服务发现使用的服务类型标识。
 const AIMONITOR_SERVICE_TYPE: &str = "_aimonitor._tcp.local.";
+// 整体发现流程的超时时间。
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+// 对单个候选地址做连接探测时的超时时间。
 const DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
+// UDP 广播发现所使用的端口。
 const UDP_DISCOVERY_PORT: u16 = 8080;
+// UDP 广播发现请求的固定报文内容。
 const UDP_DISCOVERY_REQUEST: &[u8] = b"AIMONITOR_DISCOVER_V1";
+// 等待 UDP 广播响应的超时时间。
 const UDP_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1_200);
+// 单个 UDP 响应报文允许的最大字节数，超出则丢弃。
 const UDP_RESPONSE_MAX_BYTES: usize = 1_024;
+// 设备 HTTP API 的默认路径前缀。
 const DEFAULT_DEVICE_API_PATH: &str = "/api/device";
+// 允许下载的远程图片最大字节数（8MB），超过则拒绝。
 const MAX_REMOTE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+// 本机 Hook 中继监听端口，直接复用领域层的默认端口常量。
 pub const HOOK_LISTENER_PORT: u16 = DEFAULT_HOOK_RELAY_PORT;
+// Hook 中继 TCP 监听器只绑定在本机回环地址，不对外暴露。
 const HOOK_BIND_ADDRESS: &str = "127.0.0.1";
+// 单次 Hook HTTP 请求（含请求头）允许的最大字节数。
 const MAX_HOOK_REQUEST_BYTES: usize = 8 * 1024;
+// 单次 Hook 请求体允许的最大字节数。
 const MAX_HOOK_BODY_BYTES: usize = 2 * 1024;
+// 终止态（如任务完成/失败）后的保护时间窗口，用于防止状态被后续事件覆盖。
 const TERMINAL_STATE_GUARD: Duration = Duration::from_secs(2);
+// 连续多少次发现轮询未命中某设备后，才将其判定为离线并移除。
 const DISCOVERY_MISSES_BEFORE_REMOVAL: u8 = 2;
 /// 后台发现循环的轮询粒度：每次醒来都会重新读取当前配置的检查间隔，
 /// 因此设置页修改间隔后，最多这么久就会生效，无需重启线程。
 const DISCOVERY_POLL_GRANULARITY: Duration = Duration::from_secs(1);
+// 设备列表发生变化时向前端发送的 Tauri 事件名称。
 pub const MONITOR_DEVICES_CHANGED_EVENT: &str = "monitor-devices-changed";
 
+// 根据用户主目录，探测各 AI 工具（Codex/Claude Code/Cursor）的 Hook 配置目录。
 fn detect_hook_config_directories(config_home: &Path) -> HookConfigDirectories {
     HookConfigDirectories {
+        // Codex 配置目录：优先读取环境变量 CODEX_HOME，否则回退到 ~/.codex。
         codex: detected_config_directory("CODEX_HOME", &config_home.join(".codex")),
+        // Claude Code 配置目录：优先读取环境变量 CLAUDE_CONFIG_DIR，否则回退到 ~/.claude。
         claude_code: detected_config_directory("CLAUDE_CONFIG_DIR", &config_home.join(".claude")),
+        // Cursor 配置目录固定为 ~/.cursor（没有对应的环境变量覆盖）。
         cursor: config_home.join(".cursor").to_string_lossy().into_owned(),
     }
 }
 
+// 读取指定环境变量作为配置目录，若变量不存在或不是绝对路径则使用回退路径。
 fn detected_config_directory(variable: &str, fallback: &Path) -> String {
     std::env::var_os(variable)
         .map(PathBuf::from)
+        // 只信任绝对路径的环境变量值，避免相对路径造成歧义。
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| fallback.to_owned())
         .to_string_lossy()
@@ -67,16 +97,21 @@ fn detected_config_directory(variable: &str, fallback: &Path) -> String {
 /// 连接测试按 `candidate_url_priority` 排序后依次尝试，取第一个可达的。
 #[derive(Clone, Debug)]
 pub(crate) struct DiscoveryCandidate {
+    // 已发现的设备领域实体。
     device: DiscoveredMonitorDevice,
+    // 该设备所有候选的 base url（按优先级排序前的原始集合）。
     base_urls: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct UdpBroadcastTarget {
+    // 本机用于发送广播的网卡 IPv4 地址。
     local_ip: Ipv4Addr,
+    // 该网卡对应的广播地址。
     broadcast_ip: Ipv4Addr,
 }
 
+// UDP 发现响应报文的反序列化结构，字段名按 camelCase 与设备端 JSON 对应。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UdpDiscoveryResponse {
@@ -86,14 +121,20 @@ struct UdpDiscoveryResponse {
     api_version: String,
 }
 
+// 根据 mDNS 返回的作用域地址与端口，拼出可用于 HTTP 请求的 base url。
 fn discovery_base_url(address: &ScopedIp, port: u16) -> Option<String> {
     match address {
+        // IPv4 地址直接拼接。
         ScopedIp::V4(address) => Some(format!("http://{}:{port}", address.addr())),
+        // IPv6 链路本地地址必须带上作用域 ID（zone id），否则无法正确路由；
+        // 若作用域 ID 为 0（无效），则放弃该候选地址。
         ScopedIp::V6(address) if address.addr().is_unicast_link_local() => {
             let scope_id = address.scope_id().index;
             (scope_id != 0).then(|| format!("http://[{}%25{scope_id}]:{port}", address.addr()))
         }
+        // 其他 IPv6 地址（非链路本地）直接拼接，无需作用域 ID。
         ScopedIp::V6(address) => Some(format!("http://[{}]:{port}", address.addr())),
+        // 未知地址类型不生成候选。
         _ => None,
     }
 }
@@ -101,19 +142,26 @@ fn discovery_base_url(address: &ScopedIp, port: u16) -> Option<String> {
 /// IPv4 地址优先于 IPv6（`http://[` 形式，第 8 个字符是 `[`）：IPv6
 /// 链路本地地址更容易受网卡切换、作用域 ID 失效等问题影响，连接稳定性更低。
 fn candidate_url_priority(base_url: &str) -> u8 {
+    // 第 8 个字节（下标 7）是 `[` 说明是 IPv6 字面量地址（http://[...），返回 1（低优先级）；
+    // IPv4 或其他情况返回 0（高优先级），从而让排序时 IPv4 排在前面。
     u8::from(base_url.as_bytes().get(7) == Some(&b'['))
 }
 
+// 通过 UDP 广播方式发现设备：先枚举本机所有可用网卡的广播目标，再逐个发送探测报文。
 fn discover_udp_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
     let targets = udp_broadcast_targets()?;
     discover_udp_on_targets(&targets, UDP_DISCOVERY_PORT, UDP_DISCOVERY_TIMEOUT)
 }
 
+// 枚举本机网卡，计算出每个可用网卡对应的 UDP 广播目标地址。
 fn udp_broadcast_targets() -> Result<Vec<UdpBroadcastTarget>, String> {
+    // 获取本机所有网卡地址信息。
     let interfaces =
         if_addrs::get_if_addrs().map_err(|error| format!("无法枚举本机网卡：{error}"))?;
     let mut targets = interfaces
         .into_iter()
+        // 只保留处于 Up 或状态未知（部分平台不会上报明确状态）的网卡，
+        // 排除回环接口和点对点接口（它们不适合做局域网广播发现）。
         .filter(|interface| {
             matches!(
                 interface.oper_status,
@@ -121,8 +169,10 @@ fn udp_broadcast_targets() -> Result<Vec<UdpBroadcastTarget>, String> {
             ) && !interface.is_loopback()
                 && !interface.is_p2p()
         })
+        // 只处理 IPv4 且非未指定地址（0.0.0.0）的网卡，计算其广播地址。
         .filter_map(|interface| match interface.addr {
             IfAddr::V4(address) if !address.ip.is_unspecified() => {
+                // 优先使用系统上报的广播地址；若未提供则根据 IP+子网掩码手动计算定向广播地址。
                 let broadcast_ip = address
                     .broadcast
                     .unwrap_or_else(|| directed_broadcast(address.ip, address.netmask));
@@ -134,9 +184,11 @@ fn udp_broadcast_targets() -> Result<Vec<UdpBroadcastTarget>, String> {
             _ => None,
         })
         .collect::<Vec<_>>();
+    // 排序后去重，避免同一网卡/广播地址组合被重复探测。
     targets.sort_by_key(|target| (target.local_ip, target.broadcast_ip));
     targets.dedup();
 
+    // 如果没有枚举到任何可用网卡（极端情况），退化为使用全局广播地址兜底。
     if targets.is_empty() {
         targets.push(UdpBroadcastTarget {
             local_ip: Ipv4Addr::UNSPECIFIED,
@@ -146,25 +198,31 @@ fn udp_broadcast_targets() -> Result<Vec<UdpBroadcastTarget>, String> {
     Ok(targets)
 }
 
+// 根据 IP 与子网掩码计算定向广播地址：IP 与掩码取反后按位或。
 fn directed_broadcast(ip: Ipv4Addr, netmask: Ipv4Addr) -> Ipv4Addr {
     Ipv4Addr::from(u32::from(ip) | !u32::from(netmask))
 }
 
+// 在给定的多个广播目标上并发发送 UDP 探测报文并收集响应，汇总为发现候选列表。
 fn discover_udp_on_targets(
     targets: &[UdpBroadcastTarget],
     discovery_port: u16,
     timeout: Duration,
 ) -> Result<Vec<DiscoveryCandidate>, String> {
+    // 为每个广播目标准备一个 UDP socket，同时记录绑定失败的错误信息。
     let mut sockets = Vec::with_capacity(targets.len());
     let mut bind_errors = Vec::new();
 
     for target in targets {
+        // 绑定到该网卡本地地址的随机端口（0 表示由系统分配）。
         match UdpSocket::bind(SocketAddrV4::new(target.local_ip, 0)) {
             Ok(socket) => {
+                // 允许发送广播报文。
                 if let Err(error) = socket.set_broadcast(true) {
                     bind_errors.push(format!("{}：{error}", target.local_ip));
                     continue;
                 }
+                // 设置非阻塞模式，便于后续轮询接收多个 socket。
                 if let Err(error) = socket.set_nonblocking(true) {
                     bind_errors.push(format!("{}：{error}", target.local_ip));
                     continue;
@@ -175,6 +233,7 @@ fn discover_udp_on_targets(
         }
     }
 
+    // 所有网卡都绑定失败时直接返回错误，携带每个网卡的失败原因。
     if sockets.is_empty() {
         return Err(format!(
             "无法在任何 IPv4 网卡上创建 UDP socket：{}",
@@ -182,12 +241,15 @@ fn discover_udp_on_targets(
         ));
     }
 
+    // 发送两轮探测报文（间隔 75ms），提高在丢包网络下的命中率。
     for _ in 0..2 {
         for (socket, target) in &sockets {
+            // 同时向该网卡的定向广播地址和全局广播地址发送，去重后避免重复发送同一地址。
             let destinations = [target.broadcast_ip, Ipv4Addr::BROADCAST]
                 .into_iter()
                 .collect::<HashSet<_>>();
             for destination in destinations {
+                // 发送失败直接忽略（尽力而为，不影响其他网卡的探测）。
                 let _ = socket.send_to(
                     UDP_DISCOVERY_REQUEST,
                     SocketAddrV4::new(destination, discovery_port),
@@ -197,54 +259,65 @@ fn discover_udp_on_targets(
         thread::sleep(Duration::from_millis(75));
     }
 
+    // 计算总体等待截止时间，用设备 id 去重合并候选结果。
     let deadline = Instant::now() + timeout;
     let mut candidates = HashMap::<String, DiscoveryCandidate>::new();
     let mut response = [0_u8; UDP_RESPONSE_MAX_BYTES];
 
     while Instant::now() < deadline {
         let mut received_any = false;
+        // 轮询每个 socket，非阻塞地读取所有已到达的响应报文。
         for (socket, _) in &sockets {
             loop {
                 match socket.recv_from(&mut response) {
                     Ok((length, source)) => {
                         received_any = true;
+                        // 解析成功则合并进候选集合（同一设备可能从多网卡收到响应）。
                         if let Some(device) =
                             parse_udp_discovery_response(&response[..length], source)
                         {
                             merge_udp_candidate(&mut candidates, device);
                         }
                     }
+                    // 非阻塞 socket 无数据可读时会返回 WouldBlock，跳出内层循环换下一个 socket。
                     Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                     Err(_) => break,
                 }
             }
         }
+        // 本轮没有收到任何数据时短暂休眠，避免忙等占满 CPU。
         if !received_any {
             thread::sleep(Duration::from_millis(10));
         }
     }
 
+    // 按设备名称排序后返回，保证结果顺序稳定。
     let mut candidates = candidates.into_values().collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.device.name.cmp(&right.device.name));
     Ok(candidates)
 }
 
+// 解析单个 UDP 发现响应报文，校验来源地址与字段合法性后转换为设备实体。
 fn parse_udp_discovery_response(
     bytes: &[u8],
     source: SocketAddr,
 ) -> Option<DiscoveredMonitorDevice> {
+    // 只接受 IPv4 来源（UDP 发现协议本身只在 IPv4 网段广播）。
     let source_ip = match source {
         SocketAddr::V4(source) => *source.ip(),
         SocketAddr::V6(_) => return None,
     };
+    // 过滤掉非法/伪造的来源地址（未指定、组播、广播地址都不可能是真实设备）。
     if source_ip.is_unspecified() || source_ip.is_multicast() || source_ip.is_broadcast() {
         return None;
     }
 
+    // 反序列化 JSON 报文，失败则视为无效响应。
     let response = serde_json::from_slice::<UdpDiscoveryResponse>(bytes).ok()?;
     let id = response.id.trim();
     let name = response.name.trim();
     let api_version = response.api_version.trim();
+    // 校验各字段非空且长度在合理范围内，端口不能为 0，否则丢弃该响应。
     if id.is_empty()
         || id.len() > 256
         || name.is_empty()
@@ -256,6 +329,7 @@ fn parse_udp_discovery_response(
         return None;
     }
 
+    // 校验通过后构造设备实体，base_url 直接使用来源 IP 和响应中的端口拼出。
     Some(DiscoveredMonitorDevice {
         id: id.to_owned(),
         name: name.to_owned(),
@@ -266,20 +340,25 @@ fn parse_udp_discovery_response(
     })
 }
 
+// 将单个 UDP 发现到的设备合并进候选表：同一设备 id 若已存在则追加新的 base_url，
+// 否则新建一条候选记录；每次合并后都按优先级重新排序候选地址。
 fn merge_udp_candidate(
     candidates: &mut HashMap<String, DiscoveryCandidate>,
     device: DiscoveredMonitorDevice,
 ) {
     let base_url = device.base_url.clone();
+    // 若该设备 id 已在候选表中则取出已有记录，否则插入一条新记录。
     let candidate = candidates
         .entry(device.id.clone())
         .or_insert_with(|| DiscoveryCandidate {
             device,
             base_urls: Vec::new(),
         });
+    // 避免重复地址被多次加入列表。
     if !candidate.base_urls.contains(&base_url) {
         candidate.base_urls.push(base_url);
     }
+    // 按 IPv4 优先的规则重新排序候选地址。
     candidate
         .base_urls
         .sort_by_key(|url| candidate_url_priority(url));
@@ -292,27 +371,33 @@ fn merge_discovery_candidates(
     mdns_candidates: Vec<DiscoveryCandidate>,
     udp_candidates: Vec<DiscoveryCandidate>,
 ) -> Vec<DiscoveryCandidate> {
+    // 先以 mDNS 候选为基础建立按设备 id 索引的表。
     let mut merged = mdns_candidates
         .into_iter()
         .map(|candidate| (candidate.device.id.clone(), candidate))
         .collect::<HashMap<_, _>>();
 
+    // 遍历 UDP 候选，与已有的 mDNS 候选按 id 合并。
     for udp_candidate in udp_candidates {
         merged
             .entry(udp_candidate.device.id.clone())
             .and_modify(|existing| {
+                // 已存在同 id 设备：把 UDP 候选中尚未出现过的 base_url 补充进去。
                 for base_url in &udp_candidate.base_urls {
                     if !existing.base_urls.contains(base_url) {
                         existing.base_urls.push(base_url.clone());
                     }
                 }
+                // 合并后重新按优先级排序。
                 existing
                     .base_urls
                     .sort_by_key(|url| candidate_url_priority(url));
             })
+            // 不存在则直接把 UDP 候选整体插入。
             .or_insert(udp_candidate);
     }
 
+    // 按设备名排序，返回结果顺序稳定。
     let mut merged = merged.into_values().collect::<Vec<_>>();
     merged.sort_by(|left, right| left.device.name.cmp(&right.device.name));
     merged
@@ -326,55 +411,87 @@ fn stabilize_discovered_devices(
     mut discovered: Vec<DiscoveredMonitorDevice>,
     missed_scans: &mut HashMap<String, u8>,
 ) -> Vec<DiscoveredMonitorDevice> {
+    // 本轮实际发现到的设备 id 集合。
     let discovered_ids = discovered
         .iter()
         .map(|device| device.id.clone())
         .collect::<HashSet<_>>();
+    // 本轮已重新发现的设备，清除其历史缺席计数。
     missed_scans.retain(|id, _| !discovered_ids.contains(id));
 
+    // 遍历上一轮的设备列表，找出本轮没有出现的设备。
     for device in previous {
         if discovered_ids.contains(&device.id) {
             continue;
         }
+        // 缺席计数加一。
         let misses = missed_scans.entry(device.id.clone()).or_default();
         *misses = misses.saturating_add(1);
+        // 未达到移除阈值前，仍把设备保留在结果里（去抖，避免闪烁）。
         if *misses < DISCOVERY_MISSES_BEFORE_REMOVAL {
             discovered.push(device.clone());
         }
     }
+    // 按名称排序，保证输出顺序稳定。
     discovered.sort_by(|left, right| left.name.cmp(&right.name));
     discovered
 }
 
+// 应用核心服务：持有 HTTP 客户端、数据存储路径与内存态、在线设备快照、
+// 发现去抖计数、Hook 配置写入互斥锁、Hook 中继状态等所有共享状态。
+// Clone 只克隆 Arc/Client 句柄，底层状态仍然共享。
 #[derive(Clone)]
 pub struct MonitorService {
+    // 复用的 reqwest HTTP 客户端。
     client: Client,
+    // 本地持久化数据文件路径。
     data_path: PathBuf,
+    // 默认探测到的各 AI 工具 Hook 配置目录。
     default_hook_config_directories: HookConfigDirectories,
+    // 内存中的已保存监控数据（读写锁保护）。
     data: Arc<RwLock<SavedMonitorData>>,
+    // 当前在线设备快照（后台轮询线程更新）。
     online_devices: Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
+    // 各设备连续未被发现命中的次数，用于去抖判定离线。
     discovery_missed_scans: Arc<Mutex<HashMap<String, u8>>>,
+    // Hook 配置文件写入互斥锁，避免并发写入导致文件损坏。
     hook_config_write_lock: Arc<Mutex<()>>,
+    // Hook 中继监听/转发状态（供前端查询展示）。
     relay_status: Arc<RwLock<HookRelayStatus>>,
 }
 
+// Hook 中继状态快照，序列化后暴露给前端展示中继运行情况。
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookRelayStatus {
+    // 中继 TCP 监听器是否正在运行。
     pub listening: bool,
+    // 监听绑定的地址。
     pub bind_address: String,
+    // 监听端口。
     pub port: u16,
+    // 累计收到的 Hook 请求数。
     pub received_count: u64,
+    // 累计成功转发的次数。
     pub forwarded_count: u64,
+    // 累计转发失败的次数。
     pub failed_count: u64,
+    // 累计被抑制（忽略）未转发的次数。
     pub suppressed_count: u64,
+    // 当前排队等待处理的数量。
     pub pending_count: u64,
+    // 最近一次处理涉及的 AI 工具。
     pub last_tool: Option<AiTool>,
+    // 最近一次收到的 Hook 类型（原始事件名）。
     pub last_hook_type: String,
+    // 最近一次转换出的行为类型。
     pub last_behavior: Option<HookBehavior>,
+    // 最近一次的错误信息（无错误时为空字符串）。
     pub last_error: String,
 }
 
+// Hook 请求体的最小反序列化结构，只关心事件类型字段；
+// 使用 deny_unknown_fields 严格校验，防止误收非法/畸形请求。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HookRequest {
@@ -382,6 +499,7 @@ struct HookRequest {
     hook_type: String,
 }
 
+// 向设备端上报槽位状态更新时使用的请求体。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SlotUpdateRequest<'a> {
@@ -392,6 +510,7 @@ struct SlotUpdateRequest<'a> {
     image: &'a str,
 }
 
+// 连接测试结果，返回给前端展示设备是否可达。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionStatus {
@@ -400,6 +519,7 @@ pub struct ConnectionStatus {
     pub message: String,
 }
 
+// 从设备下载的远程图片，image 字段为 base64 编码内容。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteImage {
@@ -408,11 +528,13 @@ pub struct RemoteImage {
     pub image: String,
 }
 
+// 设备端图片列表接口的响应体。
 #[derive(Deserialize)]
 struct ImageListResponse {
     images: Vec<RemoteImageMetadata>,
 }
 
+// 图片列表中单条图片的元数据（文件名与 MIME 类型）。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteImageMetadata {
@@ -420,11 +542,13 @@ struct RemoteImageMetadata {
     mime_type: String,
 }
 
+// 图片上传接口成功后返回的响应体，携带最终保存的文件名。
 #[derive(Deserialize)]
 struct UploadResponse {
     filename: String,
 }
 
+// 从前端接收的待上传图片：文件名、MIME 类型与原始字节内容。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageUpload {
@@ -433,22 +557,29 @@ pub struct ImageUpload {
     bytes: Vec<u8>,
 }
 
+// 设备端错误响应体的通用结构，仅包含一条错误信息字符串。
 #[derive(Deserialize)]
 struct ErrorResponse {
     error: String,
 }
 
 impl MonitorService {
+    // 加载/初始化服务：确保配置目录存在，读取（或创建默认的）本地持久化数据，
+    // 校验数据合法性后构造出内存态的各共享状态。
     pub fn load(app_data_dir: &Path, config_home: &Path) -> Result<Self, String> {
+        // 应用数据目录不存在则递归创建。
         fs::create_dir_all(app_data_dir).map_err(|error| format!("无法创建配置目录：{error}"))?;
         let data_path = app_data_dir.join(STORE_FILENAME);
         let data = if data_path.exists() {
+            // 存储文件已存在：读取内容并反序列化为 SavedMonitorData。
             let contents =
                 fs::read_to_string(&data_path).map_err(|error| format!("无法读取配置：{error}"))?;
             serde_json::from_str(&contents).map_err(|error| format!("配置文件格式错误：{error}"))?
         } else {
+            // 首次启动：使用默认空数据。
             SavedMonitorData::default()
         };
+        // 无论是读取到的还是默认数据，都要过一遍领域层校验，防止带着非法数据启动。
         validate_saved_monitor_data(&data).map_err(|error| format!("配置数据校验失败：{error}"))?;
         Ok(Self {
             client: Client::new(),
@@ -458,6 +589,7 @@ impl MonitorService {
             online_devices: Arc::new(RwLock::new(Vec::new())),
             discovery_missed_scans: Arc::new(Mutex::new(HashMap::new())),
             hook_config_write_lock: Arc::new(Mutex::new(())),
+            // 中继状态初始值：尚未开始监听，绑定地址/端口先填好，其余字段用 Default。
             relay_status: Arc::new(RwLock::new(HookRelayStatus {
                 bind_address: HOOK_BIND_ADDRESS.to_owned(),
                 port: HOOK_LISTENER_PORT,
@@ -466,11 +598,14 @@ impl MonitorService {
         })
     }
 
+    // 启动本机 Hook 中继：开一个 TCP 监听线程接收本地 Hook 请求，
+    // 再开一个工作线程从通道里取出请求做去抖判断并转发给设备。
     pub fn start_hook_listener(&self) {
         let data = Arc::clone(&self.data);
         let online_devices = Arc::clone(&self.online_devices);
         let status = Arc::clone(&self.relay_status);
         thread::spawn(move || {
+            // 绑定本地监听端口，失败则记录错误并直接结束该线程（不重试）。
             let listener = match TcpListener::bind((HOOK_BIND_ADDRESS, HOOK_LISTENER_PORT)) {
                 Ok(listener) => listener,
                 Err(error) => {
@@ -478,10 +613,12 @@ impl MonitorService {
                     return;
                 }
             };
+            // 绑定成功后更新状态为“正在监听”，并清空历史错误信息。
             if let Ok(mut current) = status.write() {
                 current.listening = true;
                 current.last_error.clear();
             }
+            // 构造用于向设备转发请求的阻塞式 HTTP 客户端，连接和读写超时都设为 2 秒。
             let client = reqwest::blocking::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(2))
@@ -493,16 +630,21 @@ impl MonitorService {
                     return;
                 }
             };
+            // 建立一个 mpsc 通道：监听线程只负责快速接收连接、解析请求后扔进队列，
+            // 真正耗时的转发工作交给独立的 worker 线程串行处理，避免阻塞新连接的接收。
             let (sender, receiver) = mpsc::channel::<(AiTool, String)>();
             let worker_data = Arc::clone(&data);
             let worker_status = Arc::clone(&status);
             thread::spawn(move || {
+                // 记录每个 AI 工具最近一次进入终止态的时间，用于抑制“迟到”的过期事件。
                 let mut terminal_states = HashMap::<AiTool, Instant>::new();
                 while let Ok((tool, hook_type)) = receiver.recv() {
+                    // 判断该事件是否应被抑制（比如终止态之后又收到的过期事件）。
                     if should_suppress_late_event(&mut terminal_states, tool, &hook_type) {
                         record_suppressed_hook(&worker_status, tool, &hook_type);
                         continue;
                     }
+                    // 未被抑制则真正执行转发逻辑。
                     relay_hook(
                         &client,
                         &worker_data,
@@ -514,18 +656,22 @@ impl MonitorService {
                 }
             });
 
+            // 主循环：逐个接受 TCP 连接（阻塞式监听器，来一个处理一个）。
             for connection in listener.incoming() {
                 let Ok(mut stream) = connection else {
                     continue;
                 };
                 match read_hook_request(&mut stream) {
                     Ok((tool, hook_type)) => {
+                        // 解析成功先把待处理计数加一。
                         if let Ok(mut current) = status.write() {
                             current.pending_count += 1;
                         }
                         if sender.send((tool, hook_type)).is_ok() {
+                            // 成功入队后立刻回 202，表示已接受、异步处理。
                             write_http_response(&mut stream, 202, "Accepted");
                         } else {
+                            // 工作线程已经退出导致发送失败：回滚待处理计数，返回 503，并记录失败。
                             if let Ok(mut current) = status.write() {
                                 current.pending_count = current.pending_count.saturating_sub(1);
                             }
@@ -534,17 +680,20 @@ impl MonitorService {
                         }
                     }
                     Err(error) => {
+                        // 请求解析失败：返回 400 并记录错误信息。
                         write_http_response(&mut stream, 400, "Bad Request");
                         record_relay_failure(&status, error);
                     }
                 }
             }
+            // 监听循环退出（理论上不会正常发生）后，把状态标记为未监听。
             if let Ok(mut current) = status.write() {
                 current.listening = false;
             }
         });
     }
 
+    // 读取当前 Hook 中继状态快照，供前端查询展示。
     pub fn hook_relay_status(&self) -> Result<HookRelayStatus, String> {
         self.relay_status
             .read()
@@ -557,19 +706,25 @@ impl MonitorService {
     /// 的间隔，因此用户在设置页修改间隔后无需重启应用或线程即可立即生效。
     /// 只有快照实际变化时才向前端发送事件，避免无意义地重绘设备列表。
     pub fn start_background_device_discovery(&self, app: AppHandle) {
+        // clone 出的 service 只是共享状态的句柄，可以安全移动进新线程。
         let service = self.clone();
         thread::spawn(move || {
             let mut next_run = Instant::now();
             loop {
+                // 到达计划执行时间才真正跑一次发现，否则只是短暂休眠等待。
                 if Instant::now() >= next_run {
+                    // 先做设备发现（mDNS+UDP），再对候选逐个做连接测试确定最终在线列表。
                     let result = Self::discover_device_candidates().and_then(|candidates| {
                         tauri::async_runtime::block_on(service.finish_device_discovery(candidates))
                     });
                     if let Ok(devices) = result {
+                        // 发布最新在线设备快照，变化时会向前端发事件。
                         let _ = service.publish_online_devices(&app, devices);
                     }
+                    // 按当前配置的检查间隔计算下一次执行时间。
                     next_run = Instant::now() + service.discovery_interval();
                 }
+                // 以固定粒度醒来检查，保证配置变更后间隔能较快生效。
                 thread::sleep(DISCOVERY_POLL_GRANULARITY);
             }
         });
@@ -587,6 +742,7 @@ impl MonitorService {
         Duration::from_secs(minutes * 60)
     }
 
+    // 保存用户在设置页配置的自动发现检查间隔（分钟），校验后持久化并返回最新设置。
     pub fn save_discovery_interval(&self, minutes: u64) -> Result<MonitorSettings, String> {
         let minutes = validate_discovery_interval_minutes(minutes)?;
         let mut data = self
@@ -600,21 +756,27 @@ impl MonitorService {
         Ok(data.settings.clone())
     }
 
+    // 将一批设备发现结果发布为最新在线快照：先做去抖稳定处理，
+    // 再在必要时自动选中第一台可用设备，最后仅在快照真正变化时才广播事件。
     pub fn publish_online_devices(
         &self,
         app: &AppHandle,
         devices: Vec<DiscoveredMonitorDevice>,
     ) -> Result<Vec<DiscoveredMonitorDevice>, String> {
         let devices = if let Ok(mut missed_scans) = self.discovery_missed_scans.lock() {
+            // 取出上一轮在线快照作为对比基准。
             let previous = self
                 .online_devices
                 .read()
                 .map_or_else(|_| Vec::new(), |current| current.clone());
+            // 结合缺席计数做去抖，得到本轮稳定后的设备列表。
             stabilize_discovered_devices(&previous, devices, &mut missed_scans)
         } else {
             devices
         };
+        // 若当前选中设备已不在线，自动切换到列表中第一台可用设备。
         self.select_first_available_device_if_needed(&devices)?;
+        // 只有快照真正发生变化时才替换并向前端广播事件，避免无意义重绘。
         if self.replace_online_devices(&devices) {
             let _ = app.emit(MONITOR_DEVICES_CHANGED_EVENT, devices.clone());
         }
@@ -627,17 +789,21 @@ impl MonitorService {
         &self,
         devices: &[DiscoveredMonitorDevice],
     ) -> Result<bool, String> {
+        // 没有任何在线设备则无需处理。
         let Some(next) = devices.first() else {
             return Ok(false);
         };
         let settings = self.settings()?;
+        // 当前配置的设备 id 仍在在线列表中，无需切换。
         if devices.iter().any(|device| device.id == settings.device_id) {
             return Ok(false);
         }
+        // 否则切换到列表中的第一台设备。
         self.select_device(next)?;
         Ok(true)
     }
 
+    // 用新的在线设备列表替换内存快照；内容完全相同则不替换，返回是否发生了替换。
     fn replace_online_devices(&self, devices: &[DiscoveredMonitorDevice]) -> bool {
         let Ok(mut current) = self.online_devices.write() else {
             return false;
@@ -649,6 +815,7 @@ impl MonitorService {
         true
     }
 
+    // 读取当前持久化的设置数据（克隆一份返回，避免长期持有锁）。
     pub fn settings(&self) -> Result<MonitorSettings, String> {
         self.data
             .read()
@@ -656,6 +823,8 @@ impl MonitorService {
             .map_err(|_| "配置读取锁已损坏".to_owned())
     }
 
+    // 选中某台设备作为当前使用的监控设备：校验路由信息合法后写入设置，
+    // 同时把该设备的路由信息记录/更新进历史设备列表并按 id 排序。
     pub fn select_device(
         &self,
         device: &DiscoveredMonitorDevice,
@@ -666,16 +835,19 @@ impl MonitorService {
             .write()
             .map_err(|_| "配置写入锁已损坏".to_owned())?;
         let mut next_data = data.clone();
+        // 更新当前生效的 base_url / device_id / device_name。
         next_data.settings.base_url.clone_from(&route.base_url);
         next_data.settings.device_id.clone_from(&route.device_id);
         next_data
             .settings
             .device_name
             .clone_from(&route.device_name);
+        // 从历史设备列表中移除同 id 的旧记录，再插入本次最新的路由信息。
         next_data
             .devices
             .retain(|existing| existing.device_id != route.device_id);
         next_data.devices.push(route);
+        // 按设备 id 排序，保持列表顺序稳定。
         next_data
             .devices
             .sort_by(|left, right| left.device_id.cmp(&right.device_id));
@@ -684,6 +856,7 @@ impl MonitorService {
         Ok(data.settings.clone())
     }
 
+    // 保存用户名：先做领域层校验，再持久化写入设置。
     pub fn save_username(&self, username: &str) -> Result<MonitorSettings, String> {
         let username = validate_username(username)?;
         let mut data = self
@@ -703,10 +876,12 @@ impl MonitorService {
     /// 发现了设备时就放弃另一路会把只靠 UDP 广播现身的设备从列表里漏掉。
     /// 只有两路都出错才报错。
     pub(crate) fn discover_device_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
+        // 用 thread::scope 并发跑 mDNS 发现和 UDP 广播发现两路，互不阻塞。
         let (mdns_result, udp_result) = thread::scope(|scope| {
             let mdns = scope.spawn(Self::discover_mdns_candidates);
             let udp = scope.spawn(discover_udp_candidates);
             (
+                // 子线程 panic 时也转换成 Err，不让整个发现流程 panic。
                 mdns.join()
                     .unwrap_or_else(|_| Err("mDNS 发现线程异常退出".to_owned())),
                 udp.join()
@@ -714,61 +889,77 @@ impl MonitorService {
             )
         });
         match (mdns_result, udp_result) {
+            // 两路都成功：按设备 id 合并结果。
             (Ok(mdns_candidates), Ok(udp_candidates)) => {
                 Ok(merge_discovery_candidates(mdns_candidates, udp_candidates))
             }
+            // 只有一路成功：直接使用成功的一路，不因另一路失败而报错。
             (Ok(candidates), Err(_)) | (Err(_), Ok(candidates)) => Ok(candidates),
+            // 两路都失败才报错，并把两边的错误信息都带上。
             (Err(mdns_error), Err(udp_error)) => Err(format!(
                 "mDNS 发现失败：{mdns_error}；UDP 广播发现失败：{udp_error}"
             )),
         }
     }
 
+    // 通过 mDNS 浏览 `_aimonitor._tcp.local.` 服务类型，在超时时间内收集所有被解析出的设备。
     fn discover_mdns_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
+        // 创建 mDNS 守护实例。
         let daemon = ServiceDaemon::new().map_err(|error| format!("无法启动设备发现：{error}"))?;
+        // 缩短网卡状态刷新周期到 1 秒，尽量及时感知网络变化（如切换 Wi-Fi）。
         daemon
             .set_ip_check_interval(1)
             .map_err(|error| format!("无法启用网卡刷新：{error}"))?;
+        // 开始浏览指定服务类型，得到一个事件接收器。
         let receiver = daemon
             .browse(AIMONITOR_SERVICE_TYPE)
             .map_err(|error| format!("无法扫描 AIMonitor 设备：{error}"))?;
         let deadline = Instant::now() + DISCOVERY_TIMEOUT;
         let mut candidates: HashMap<String, DiscoveryCandidate> = HashMap::new();
 
+        // 循环接收事件，直到超时截止时间到达。
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match receiver.recv_timeout(remaining) {
                 Ok(ServiceEvent::ServiceResolved(service)) => {
+                    // 从服务的 TXT 属性中读取设备 id，缺省回退到服务全名。
                     let properties = service.get_properties();
                     let id = properties
                         .get_property_val_str("id")
                         .unwrap_or(service.get_fullname())
                         .to_owned();
+                    // 读取设备显示名称，缺省回退到服务全名。
                     let name = properties
                         .get_property_val_str("name")
                         .unwrap_or(service.get_fullname())
                         .to_owned();
+                    // 读取 API 版本号，缺省默认为 "1"。
                     let api_version = properties
                         .get_property_val_str("apiVersion")
                         .unwrap_or("1")
                         .to_owned();
+                    // 读取设备 API 路径前缀，缺省使用默认路径常量。
                     let path = properties
                         .get_property_val_str("path")
                         .unwrap_or(DEFAULT_DEVICE_API_PATH)
                         .to_owned();
+                    // 把服务解析出的所有地址转换为可用的 base url 候选列表。
                     let mut base_urls = service
                         .get_addresses()
                         .iter()
                         .filter_map(|address| discovery_base_url(address, service.get_port()))
                         .collect::<Vec<_>>();
+                    // 若地址解析全部失败，退而使用主机名拼出一个候选（依赖本地 DNS/mDNS 解析）。
                     if base_urls.is_empty() {
                         let host = service.get_hostname().trim_end_matches('.');
                         if !host.is_empty() {
                             base_urls.push(format!("http://{host}:{}", service.get_port()));
                         }
                     }
+                    // 按 IPv4 优先规则排序并去重。
                     base_urls.sort_by_key(|url| candidate_url_priority(url));
                     base_urls.dedup();
 
+                    // 按设备 id 取出或新建候选记录。
                     let candidate =
                         candidates
                             .entry(id.clone())
@@ -783,25 +974,32 @@ impl MonitorService {
                                 },
                                 base_urls: Vec::new(),
                             });
+                    // 每次收到新的解析事件都刷新设备的名称/版本/路径（可能会变化）。
                     candidate.device.name = name;
                     candidate.device.api_version = api_version;
                     candidate.device.path = path;
+                    // 合并新解析出的地址，再排序去重。
                     candidate.base_urls.extend(base_urls);
                     candidate
                         .base_urls
                         .sort_by_key(|url| candidate_url_priority(url));
                     candidate.base_urls.dedup();
+                    // 用排序后第一个候选地址更新设备的主 base_url。
                     if let Some(base_url) = candidate.base_urls.first() {
                         candidate.device.base_url.clone_from(base_url);
                     }
                 }
+                // 其他类型事件（如服务下线、搜索开始等）忽略不处理。
                 Ok(_) => {}
+                // 接收超时或通道关闭，跳出循环结束发现。
                 Err(_) => break,
             }
         }
 
+        // 收尾：停止浏览并关闭守护线程，忽略停止过程中的错误。
         let _ = daemon.stop_browse(AIMONITOR_SERVICE_TYPE);
         let _ = daemon.shutdown();
+        // 按设备名排序返回，保证结果顺序稳定。
         let mut candidates: Vec<_> = candidates.into_values().collect();
         candidates.sort_by(|left, right| left.device.name.cmp(&right.device.name));
         Ok(candidates)
@@ -816,24 +1014,30 @@ impl MonitorService {
         candidates: Vec<DiscoveryCandidate>,
     ) -> Result<Vec<DiscoveredMonitorDevice>, String> {
         let settings = self.settings()?;
+        // 先探测一次当前已保存设备的地址是否可达，后面多处会用到这个结果。
         let saved_is_reachable =
             !settings.device_id.is_empty() && self.is_reachable(&settings.base_url).await;
         let mut devices = Vec::with_capacity(candidates.len() + 1);
         for mut candidate in candidates {
             if let Some(base_url) = self.first_reachable_url(&candidate.base_urls).await {
+                // 候选自身有可达地址：直接采用第一个可达的 url。
                 candidate.device.base_url = base_url;
             } else if saved_is_reachable && candidate.device.id == settings.device_id {
+                // 候选本身探测失败，但恰好是当前保存设备且保存地址可达：回退用保存地址。
                 candidate.device.base_url.clone_from(&settings.base_url);
                 candidate.device.discovery_source = DiscoverySource::SavedAddress;
             } else {
+                // 完全不可达则跳过该候选，不计入结果。
                 continue;
             }
             devices.push(candidate.device);
         }
 
+        // 判断当前保存设备是否已经出现在结果列表中（按 id 或 base_url 匹配）。
         let saved_is_known = devices
             .iter()
             .any(|device| device.id == settings.device_id || device.base_url == settings.base_url);
+        // 若保存设备不在候选列表里但探测可达，额外补一条记录，避免它从列表消失。
         if !saved_is_known && saved_is_reachable {
             devices.push(DiscoveredMonitorDevice {
                 id: settings.device_id,
@@ -845,18 +1049,23 @@ impl MonitorService {
             });
         }
 
+        // 按名称排序返回。
         devices.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(devices)
     }
 
+    // 检测某个 base_url（未指定时用当前保存设置）的设备是否可连接，返回带提示信息的连接状态。
     pub async fn check_connection(
         &self,
         base_url: Option<&str>,
     ) -> Result<ConnectionStatus, String> {
         let base_url = match base_url {
+            // 显式传入 url 时先做归一化校验。
             Some(value) => normalize_base_url(value)?,
+            // 未传入则使用当前保存的设备地址。
             None => self.settings()?.base_url,
         };
+        // 请求设备的 /health 接口，超时时间放宽到 5 秒（比发现探测的超时更长，因为是用户主动触发的检测）。
         let result = self
             .client
             .get(format!("{base_url}/health"))
@@ -865,16 +1074,19 @@ impl MonitorService {
             .await;
 
         Ok(match result {
+            // HTTP 状态码成功：视为可达。
             Ok(response) if response.status().is_success() => ConnectionStatus {
                 reachable: true,
                 base_url,
                 message: "设备连接正常".to_owned(),
             },
+            // 有响应但状态码非成功：视为不可达，附带状态码。
             Ok(response) => ConnectionStatus {
                 reachable: false,
                 base_url,
                 message: format!("设备返回 HTTP {}", response.status().as_u16()),
             },
+            // 请求本身失败（网络错误等）：视为不可达，附带错误详情。
             Err(error) => ConnectionStatus {
                 reachable: false,
                 base_url,
@@ -883,6 +1095,7 @@ impl MonitorService {
         })
     }
 
+    // 依次探测一组候选地址，返回第一个可达的地址（找不到则 None）。
     async fn first_reachable_url(&self, base_urls: &[String]) -> Option<String> {
         for base_url in base_urls {
             if self.is_reachable(base_url).await {
@@ -892,6 +1105,7 @@ impl MonitorService {
         None
     }
 
+    // 探测单个 base_url 的 /health 接口是否可达（使用更短的探测超时，适合批量扫描）。
     async fn is_reachable(&self, base_url: &str) -> bool {
         matches!(
             self.client
@@ -903,6 +1117,7 @@ impl MonitorService {
         )
     }
 
+    // 获取设备端保存的所有图片：先拉取图片列表元数据，再逐张下载图片内容。
     pub async fn images(&self) -> Result<Vec<RemoteImage>, String> {
         let base_url = self.settings()?.base_url;
         let response = self
@@ -911,6 +1126,7 @@ impl MonitorService {
             .send()
             .await
             .map_err(|error| format!("无法读取远端图片：{error}"))?;
+        // 校验 HTTP 状态码，非成功状态转换为业务错误。
         let response = ensure_success(response).await?;
         let metadata = response
             .json::<ImageListResponse>()
@@ -929,12 +1145,14 @@ impl MonitorService {
         Ok(images)
     }
 
+    // 下载单张远端图片并转换为 base64 data url，同时做 MIME 类型和大小校验。
     async fn remote_image(
         &self,
         base_url: &str,
         metadata: RemoteImageMetadata,
     ) -> Result<RemoteImage, String> {
         let filename = metadata.filename.trim();
+        // 拼出图片下载 url（内部会对文件名做安全校验，防止路径穿越）。
         let url = remote_image_url(base_url, filename)?;
         let response = self
             .client
@@ -943,10 +1161,13 @@ impl MonitorService {
             .await
             .map_err(|error| format!("{filename} 读取失败：{error}"))?;
         let response = ensure_success(response).await?;
+        // 若响应头带有 Content-Length，提前校验大小是否超限，避免读取超大响应体。
         if let Some(length) = response.content_length() {
             ensure_image_size(length, filename)?;
         }
 
+        // 优先信任响应头里的 Content-Type（去掉可能的 charset 等参数），
+        // 找不到或不支持时回退使用元数据里记录的 MIME 类型。
         let header_mime = response
             .headers()
             .get(header::CONTENT_TYPE)
@@ -960,12 +1181,15 @@ impl MonitorService {
             .ok_or_else(|| format!("{filename} 返回了不支持的图片类型"))?
             .to_owned();
 
+        // 读取响应体全部字节。
         let bytes = response
             .bytes()
             .await
             .map_err(|error| format!("{filename} 读取失败：{error}"))?;
+        // 读取到实际字节后再次校验大小（防止 Content-Length 缺失或不准确的情况）。
         ensure_image_size(bytes.len() as u64, filename)?;
 
+        // 编码为 base64 data url，方便前端直接用作 img src。
         let image = format!("data:{mime_type};base64,{}", encode_base64(&bytes));
         Ok(RemoteImage {
             filename: filename.to_owned(),
@@ -974,6 +1198,7 @@ impl MonitorService {
         })
     }
 
+    // 批量上传图片到设备：先做业务校验，再逐张压缩后以 multipart 表单上传。
     pub async fn upload_images(&self, images: Vec<ImageUpload>) -> Result<Vec<String>, String> {
         validate_image_uploads(&images)?;
         let base_url = self.settings()?.base_url;
@@ -981,7 +1206,11 @@ impl MonitorService {
 
         for image in images {
             let filename = image.filename.clone();
-            let file_part = multipart::Part::bytes(image.bytes)
+            // 上传前先按目标 MIME 类型做缩放与压缩处理，减小体积。
+            let bytes = resize_and_compress_image(&image.bytes, &image.mime_type)
+                .map_err(|error| format!("{filename} 处理失败：{error}"))?;
+            // 构造 multipart 表单的文件分片。
+            let file_part = multipart::Part::bytes(bytes)
                 .file_name(filename.clone())
                 .mime_str(&image.mime_type)
                 .map_err(|error| format!("{filename} 的图片类型无效：{error}"))?;
@@ -1004,6 +1233,7 @@ impl MonitorService {
         Ok(uploaded)
     }
 
+    // 删除设备端的一张图片。
     pub async fn delete_image(&self, filename: &str) -> Result<(), String> {
         let base_url = self.settings()?.base_url;
         let response = self
@@ -1016,6 +1246,7 @@ impl MonitorService {
         Ok(())
     }
 
+    // 返回当前选中设备对应的所有 AI Profile（按 device_id 过滤）。
     pub fn profiles(&self) -> Result<Vec<AiProfile>, String> {
         self.data
             .read()
@@ -1029,6 +1260,7 @@ impl MonitorService {
             .map_err(|_| "AI 配置读取锁已损坏".to_owned())
     }
 
+    // 返回所有支持的 AI 工具各自的 Hook 配置文件位置信息。
     pub fn hook_config_locations(&self) -> Result<Vec<HookConfigLocation>, String> {
         let data = self
             .data
@@ -1040,6 +1272,7 @@ impl MonitorService {
             .collect())
     }
 
+    // 保存用户自定义的 Hook 配置目录（可为空字符串表示恢复使用默认目录）。
     pub fn save_hook_config_directory(
         &self,
         tool: AiTool,
@@ -1048,9 +1281,11 @@ impl MonitorService {
         let directory = directory.trim();
         if !directory.is_empty() {
             let path = Path::new(directory);
+            // 非空目录必须是绝对路径，防止相对路径产生歧义。
             if !path.is_absolute() {
                 return Err("Hooks 配置目录必须使用绝对路径".to_owned());
             }
+            // 若路径已存在，必须是文件夹而非普通文件。
             if path.exists() && !path.is_dir() {
                 return Err(format!("Hooks 配置目录不是文件夹：{}", path.display()));
             }
@@ -1070,22 +1305,28 @@ impl MonitorService {
         Ok(location)
     }
 
+    // 保存某个 AI 工具的展示 Profile：强制绑定当前选中设备的 device_id，
+    // 校验通过后按 (device_id, tool) 去重替换，再按 (device_id, slot) 排序持久化。
     pub fn save_profile(&self, profile: AiProfile) -> Result<AiProfile, String> {
         let mut data = self
             .data
             .write()
             .map_err(|_| "AI 配置写入锁已损坏".to_owned())?;
+        // 未选择设备时不允许保存 Profile。
         if data.settings.device_id.is_empty() {
             return Err("请先选择 AIMonitor 设备".to_owned());
         }
         let mut profile = profile;
+        // 强制使用当前设备 id，忽略调用方可能传入的其他值。
         profile.device_id.clone_from(&data.settings.device_id);
         let profile = validate_profile(profile)?;
         let mut next_data = data.clone();
+        // 移除同一设备同一工具的旧 Profile，保证每个 (device_id, tool) 只有一条记录。
         next_data.profiles.retain(|existing| {
             existing.device_id != profile.device_id || existing.tool != profile.tool
         });
         next_data.profiles.push(profile.clone());
+        // 按设备再按槽位排序，保证列表顺序稳定。
         next_data.profiles.sort_by(|left, right| {
             left.device_id
                 .cmp(&right.device_id)
@@ -1096,7 +1337,10 @@ impl MonitorService {
         Ok(profile)
     }
 
+    // 将某个 AI 工具的 Hook 配置写入其配置文件：生成新内容、与已有文件合并，
+    // 仅在内容真正变化时才落盘写入，并告知调用方该工具是否需要人工复核/重启。
     pub fn write_hook_config(&self, tool: AiTool) -> Result<HookConfigWriteResult, String> {
+        // 用互斥锁串行化配置文件写入，避免并发写入互相覆盖或撕裂文件内容。
         let _write_guard = self
             .hook_config_write_lock
             .lock()
@@ -1105,22 +1349,28 @@ impl MonitorService {
             .data
             .read()
             .map_err(|_| "Hooks 配置读取锁已损坏".to_owned())?;
+        // 找到当前设备对应该工具的展示 Profile，未保存过则直接报错提示。
         let profile = data
             .profiles
             .iter()
             .find(|profile| profile.device_id == data.settings.device_id && profile.tool == tool)
             .cloned()
             .ok_or_else(|| "请先在监控管理中保存该工具的展示配置".to_owned())?;
+        // 根据 Profile 生成该工具期望的 Hook 配置片段。
         let generated = generate_hook_config(profile)?;
         let config_path = self.hook_config_path(&data, tool);
+        // 读取磁盘上已有的配置内容（若文件不存在则为 None）。
         let existing = read_optional_config(&config_path)?;
+        // 将生成的配置与已有配置合并（保留用户手工添加的其他内容，只替换本应用管理的部分）。
         let mut merged = merge_hook_config(existing.as_deref(), &generated, tool)?;
         merged.filename = config_path.to_string_lossy().into_owned();
+        // 只有合并后的内容与磁盘现有内容不同才需要写入。
         let config_changed = existing.as_deref() != Some(merged.content.as_str());
         if config_changed {
             write_config(&config_path, &merged.content)?;
         }
         Ok(HookConfigWriteResult {
+            // Codex 配置发生变化时，需要用户复核并重启 Codex 才能生效。
             requires_review: tool == AiTool::Codex && config_changed,
             restart_required: tool == AiTool::Codex && config_changed,
             tool,
@@ -1129,6 +1379,7 @@ impl MonitorService {
         })
     }
 
+    // 计算某个工具的 Hook 配置目录与文件路径：优先用户自定义目录，否则使用探测到的默认目录。
     fn hook_config_location(&self, data: &SavedMonitorData, tool: AiTool) -> HookConfigLocation {
         let custom_directory = data.hook_config_directories.get(tool);
         let directory = if custom_directory.is_empty() {
@@ -1145,10 +1396,12 @@ impl MonitorService {
         }
     }
 
+    // 便捷方法：直接取出某工具 Hook 配置文件的完整路径。
     fn hook_config_path(&self, data: &SavedMonitorData, tool: AiTool) -> PathBuf {
         PathBuf::from(self.hook_config_location(data, tool).config_path)
     }
 
+    // 将内存中的数据序列化为格式化 JSON 并原子写入磁盘存储文件。
     fn persist(&self, data: &SavedMonitorData) -> Result<(), String> {
         let serialized = serde_json::to_string_pretty(data)
             .map_err(|error| format!("无法序列化配置：{error}"))?;
@@ -1156,13 +1409,17 @@ impl MonitorService {
     }
 }
 
+// 从 Hook 中继监听收到的 TCP 连接里读取并解析出一个 Hook 请求，返回涉及的 AI 工具与事件类型。
 fn read_hook_request(stream: &mut TcpStream) -> Result<(AiTool, String), String> {
+    // 读超时 3 秒，避免恶意或异常连接长期占用线程。
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .map_err(|error| format!("无法设置 Hook 请求超时：{error}"))?;
     let mut request = Vec::with_capacity(1024);
     let mut buffer = [0_u8; 1024];
+    // 循环读取数据直到找到 HTTP 头结束标志 \r\n\r\n，记录头部结束位置的下标。
     let header_end = loop {
+        // 每次读取一段数据追加进缓冲区。
         let read = stream
             .read(&mut buffer)
             .map_err(|error| format!("无法读取 Hook 请求：{error}"))?;
@@ -1170,33 +1427,40 @@ fn read_hook_request(stream: &mut TcpStream) -> Result<(AiTool, String), String>
             return Err("Hook 请求未完整发送".to_owned());
         }
         request.extend_from_slice(&buffer[..read]);
+        // 超过单次请求最大字节数限制则直接拒绝，防止恶意/异常连接耗尽内存。
         if request.len() > MAX_HOOK_REQUEST_BYTES {
             return Err("Hook 请求过大".to_owned());
         }
+        // 找到头部结束标志则跳出循环，记录结束位置（包含标志本身的 4 字节）。
         if let Some(index) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
             break index + 4;
         }
     };
 
+    // 头部部分必须是合法 UTF-8 文本。
     let headers = std::str::from_utf8(&request[..header_end])
         .map_err(|_| "Hook 请求头不是有效 UTF-8".to_owned())?;
     let mut lines = headers.split("\r\n");
+    // 第一行是请求行，例如 "POST /api/hooks/codex HTTP/1.1"。
     let request_line = lines
         .next()
         .ok_or_else(|| "Hook 请求缺少请求行".to_owned())?;
     let mut request_parts = request_line.split_whitespace();
+    // 只接受 POST 方法。
     if request_parts.next() != Some("POST") {
         return Err("Hook 接口只接受 POST".to_owned());
     }
     let path = request_parts
         .next()
         .ok_or_else(|| "Hook 请求缺少路径".to_owned())?;
+    // 根据路径后缀确定是哪个 AI 工具发来的 Hook 请求。
     let tool = match path.strip_prefix("/api/hooks/") {
         Some("codex") => AiTool::Codex,
         Some("claude-code") => AiTool::ClaudeCode,
         Some("cursor") => AiTool::Cursor,
         _ => return Err("Hook 请求中的 AI 工具无效".to_owned()),
     };
+    // 从头部行中查找 Content-Length（大小写不敏感），解析出请求体长度。
     let content_length = lines
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
@@ -1205,10 +1469,12 @@ fn read_hook_request(stream: &mut TcpStream) -> Result<(AiTool, String), String>
                 .flatten()
         })
         .ok_or_else(|| "Hook 请求缺少有效的 Content-Length".to_owned())?;
+    // 请求体长度必须大于 0 且不超过限制。
     if content_length == 0 || content_length > MAX_HOOK_BODY_BYTES {
         return Err("Hook 请求体大小无效".to_owned());
     }
 
+    // 继续读取直到已缓冲的数据长度覆盖了完整的请求体。
     while request.len() < header_end + content_length {
         let read = stream
             .read(&mut buffer)
@@ -1221,16 +1487,20 @@ fn read_hook_request(stream: &mut TcpStream) -> Result<(AiTool, String), String>
             return Err("Hook 请求过大".to_owned());
         }
     }
+    // 截取请求体部分并反序列化为 HookRequest。
     let body =
         serde_json::from_slice::<HookRequest>(&request[header_end..header_end + content_length])
             .map_err(|error| format!("Hook 请求 JSON 无效：{error}"))?;
     let hook_type = body.hook_type.trim();
+    // 事件类型字符串不能为空，也不能过长。
     if hook_type.is_empty() || hook_type.len() > 128 {
         return Err("Hook 类型不能为空且不能超过 128 个字符".to_owned());
     }
     Ok((tool, hook_type.to_owned()))
 }
 
+// 处理一个已通过去抖判定的 Hook 事件：转换为业务行为、找出所有配置了该工具的
+// 在线优先设备，并发转发过去，最终把结果（成功数/错误列表）记录进中继状态。
 fn relay_hook(
     client: &reqwest::blocking::Client,
     data: &Arc<RwLock<SavedMonitorData>>,
@@ -1239,6 +1509,7 @@ fn relay_hook(
     tool: AiTool,
     hook_type: &str,
 ) {
+    // 将原始事件类型转换为领域层定义的状态转换；不支持的类型直接记录失败并返回。
     let Some(transition) = hook_transition(tool, hook_type) else {
         record_hook_results(
             status,
@@ -1250,6 +1521,7 @@ fn relay_hook(
         );
         return;
     };
+    // 读取共享配置数据；锁损坏则记录失败并返回。
     let Ok(data) = data.read() else {
         record_hook_results(
             status,
@@ -1261,8 +1533,10 @@ fn relay_hook(
         );
         return;
     };
+    // 克隆出一份快照后立即释放读锁，避免长时间持锁阻塞其他操作。
     let snapshot = data.clone();
     drop(data);
+    // 读取当前在线设备快照（读取失败则视为没有在线设备）。
     let online_snapshot = online_devices
         .read()
         .map(|devices| devices.clone())
@@ -1271,6 +1545,7 @@ fn relay_hook(
         .iter()
         .map(|device| device.id.as_str())
         .collect::<HashSet<_>>();
+    // 找出所有已配置该 AI 工具展示 Profile 的历史设备记录（与 Profile 配对）。
     let mut targets = snapshot
         .profiles
         .iter()
@@ -1283,7 +1558,9 @@ fn relay_hook(
                 .map(|device| (device, profile))
         })
         .collect::<Vec<_>>();
+    // 让在线设备排在前面（不影响后续是否转发，只影响记录里的顺序倾向）。
     targets.sort_by_key(|(device, _)| !online_ids.contains(device.device_id.as_str()));
+    // 没有任何目标设备配置了该工具，记录提示信息并返回。
     if targets.is_empty() {
         record_hook_results(
             status,
@@ -1296,10 +1573,12 @@ fn relay_hook(
         return;
     }
 
+    // Display 转换携带具体行为类型；Release（释放/清空展示）没有行为类型。
     let behavior = match transition {
         HookTransition::Display(behavior) => Some(behavior),
         HookTransition::Release => None,
     };
+    // 并发转发给所有目标设备，汇总成功次数与错误信息列表。
     let (forwarded, errors) = forward_to_all_targets(
         client,
         tool,
@@ -1308,6 +1587,7 @@ fn relay_hook(
         targets,
         &online_snapshot,
     );
+    // 把本次转发的结果写入中继状态，供前端查询展示。
     record_hook_results(status, tool, hook_type, behavior, forwarded, &errors);
 }
 
@@ -1326,6 +1606,8 @@ fn forward_to_all_targets(
         targets
             .into_iter()
             .map(|(saved_device, profile)| {
+                // 若该设备当前在线，优先使用在线快照中的最新地址（可能比保存的地址更准确、更及时）；
+                // 否则回退使用保存的历史路由信息尝试连接。
                 let online_device = online_snapshot
                     .iter()
                     .find(|device| device.id == saved_device.device_id);
@@ -1337,6 +1619,7 @@ fn forward_to_all_targets(
                         device_name: device.name.clone(),
                     },
                 );
+                // 为每个目标设备单独开一个线程并发转发，互不阻塞。
                 scope.spawn(move || {
                     let result = forward_profile(
                         client,
@@ -1349,8 +1632,10 @@ fn forward_to_all_targets(
                     (effective_device.device_name, result)
                 })
             })
+            // 先收集成 Vec 触发所有线程实际 spawn（避免惰性求值导致串行执行）。
             .collect::<Vec<_>>()
             .into_iter()
+            // 再统一 join 等待每个线程结果；线程 panic 时转换为错误而不是让调用方 panic。
             .map(|handle| {
                 handle
                     .join()
@@ -1359,6 +1644,7 @@ fn forward_to_all_targets(
             .collect::<Vec<_>>()
     });
 
+    // 汇总所有设备的转发结果：成功计数与失败设备的错误信息列表。
     let mut forwarded = 0_u64;
     let mut errors = Vec::new();
     for (device_name, result) in outcomes {
@@ -1370,6 +1656,7 @@ fn forward_to_all_targets(
     (forwarded, errors)
 }
 
+// 把单个 AI 工具的状态转换（展示或释放）实际发送给单台设备的指定槽位。
 fn forward_profile(
     client: &reqwest::blocking::Client,
     tool: AiTool,
@@ -1378,11 +1665,13 @@ fn forward_profile(
     device: &MonitorDeviceRoute,
     profile: &AiProfile,
 ) -> Result<(), String> {
+    // 设备地址或用户名为空则无法发送，直接返回错误。
     if device.base_url.is_empty() || username.is_empty() {
         return Err("设备地址或显示用户名为空".to_owned());
     }
     let url = format!("{}/api/slots/{}", device.base_url, profile.slot);
     match transition {
+        // 展示行为：在 Profile 里找到该行为对应的展示内容（文案+图片），POST 给设备。
         HookTransition::Display(behavior) => profile
             .hooks
             .iter()
@@ -1401,6 +1690,7 @@ fn forward_profile(
                     "监控屏拒绝了状态更新",
                 )
             }),
+        // 释放行为：直接对该槽位发 DELETE 请求清空展示。
         HookTransition::Release => send_and_confirm(
             client.delete(&url),
             "释放监控屏位置失败",
@@ -1418,8 +1708,10 @@ fn send_and_confirm(
 ) -> Result<(), String> {
     request
         .send()
+        // 网络层失败（连不上/超时等）用 send_label 包装错误信息。
         .map_err(|error| format!("{send_label}：{error}"))
         .and_then(|response| {
+            // 收到响应但设备拒绝（非 2xx）用 reject_label 包装错误信息。
             ensure_success_blocking(response)
                 .map(|_| ())
                 .map_err(|error| format!("{reject_label}：{error}"))
@@ -1430,12 +1722,14 @@ fn send_and_confirm(
 /// `ErrorResponse.error`，解析不到（包括 204 无正文的情况）时退回到
 /// HTTP 状态码文案。供阻塞版和异步版 `ensure_success*` 共用。
 fn device_error_message(status: StatusCode, parsed_body: Option<ErrorResponse>) -> String {
+    // 优先使用设备返回的错误正文；解析不到（比如 204 无正文）则退回状态码文案。
     parsed_body.map_or_else(
         || format!("设备请求失败（HTTP {}）", status.as_u16()),
         |body| body.error,
     )
 }
 
+// 阻塞版的响应成功性校验：非 2xx 时尝试解析错误正文并转换为业务错误。
 fn ensure_success_blocking(
     response: reqwest::blocking::Response,
 ) -> Result<reqwest::blocking::Response, String> {
@@ -1443,6 +1737,7 @@ fn ensure_success_blocking(
     if status.is_success() {
         return Ok(response);
     }
+    // 204 No Content 没有正文可解析，直接跳过解析步骤。
     let parsed_body = if status == StatusCode::NO_CONTENT {
         None
     } else {
@@ -1454,12 +1749,16 @@ fn ensure_success_blocking(
 /// 记录一次 Hook 事件已处理完成的公共字段，成功/抑制两条路径在此基础上
 /// 各自补充结果专属字段，避免重复维护同一份计数逻辑。
 fn begin_hook_completion(current: &mut HookRelayStatus, tool: AiTool, hook_type: &str) {
+    // 收到总数加一。
     current.received_count += 1;
+    // 待处理计数减一（不会低于 0）。
     current.pending_count = current.pending_count.saturating_sub(1);
+    // 记录最近一次涉及的工具和事件类型。
     current.last_tool = Some(tool);
     hook_type.clone_into(&mut current.last_hook_type);
 }
 
+// 记录一次真实转发（非抑制）的处理结果：成功次数、失败次数、最近行为与错误信息。
 fn record_hook_results(
     status: &Arc<RwLock<HookRelayStatus>>,
     tool: AiTool,
@@ -1473,20 +1772,25 @@ fn record_hook_results(
         current.forwarded_count += forwarded;
         current.failed_count += errors.len() as u64;
         current.last_behavior = behavior;
+        // 多个设备的错误信息用中文顿号拼接展示。
         current.last_error = errors.join("；");
     }
 }
 
+// 判断某个事件是否应被抑制：终止态事件之后收到的“迟到”完成类事件在保护窗口内会被忽略，
+// 避免旧的完成事件覆盖掉之后已经开始的新一轮工作状态。
 fn should_suppress_late_event(
     terminal_states: &mut HashMap<AiTool, Instant>,
     tool: AiTool,
     hook_type: &str,
 ) -> bool {
     let now = Instant::now();
+    // 权威终止事件：记录发生时间，本身不被抑制。
     if is_authoritative_terminal_event(tool, hook_type) {
         terminal_states.insert(tool, now);
         return false;
     }
+    // 若是“迟到完成”类事件，且距离最近一次终止态仍在保护窗口内，则抑制。
     if is_late_completion_event(hook_type)
         && terminal_states
             .get(&tool)
@@ -1494,21 +1798,25 @@ fn should_suppress_late_event(
     {
         return true;
     }
+    // 非迟到完成类事件（说明有新工作开始）：清除该工具的终止态记录。
     if !is_late_completion_event(hook_type) {
         terminal_states.remove(&tool);
     }
     false
 }
 
+// 记录一次被抑制（未真正转发）的 Hook 事件：仍计入收到总数，但归入抑制计数。
 fn record_suppressed_hook(status: &Arc<RwLock<HookRelayStatus>>, tool: AiTool, hook_type: &str) {
     if let Ok(mut current) = status.write() {
         begin_hook_completion(&mut current, tool, hook_type);
         current.suppressed_count += 1;
+        // 被抑制的事件视为“空闲”状态展示，且不携带错误信息。
         current.last_behavior = Some(HookBehavior::Idle);
         current.last_error.clear();
     }
 }
 
+// 记录一次中继层面的失败（如监听启动失败、请求解析失败等，与具体转发无关）。
 fn record_relay_failure(status: &Arc<RwLock<HookRelayStatus>>, error: String) {
     if let Ok(mut current) = status.write() {
         current.failed_count += 1;
@@ -1516,6 +1824,7 @@ fn record_relay_failure(status: &Arc<RwLock<HookRelayStatus>>, error: String) {
     }
 }
 
+// 向 Hook 中继的本地连接写回一个最简单的 HTTP 响应（无正文），随后关闭连接。
 fn write_http_response(stream: &mut TcpStream, status: u16, reason: &str) {
     let response =
         format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -1523,7 +1832,9 @@ fn write_http_response(stream: &mut TcpStream, status: u16, reason: &str) {
     let _ = stream.flush();
 }
 
+// 拼出下载单张图片的完整 URL，同时校验文件名合法，防止路径穿越攻击。
 fn remote_image_url(base_url: &str, filename: &str) -> Result<Url, String> {
+    // 拒绝空文件名、"." "/.." 以及包含路径分隔符的文件名。
     if filename.is_empty() || filename == "." || filename == ".." || filename.contains(['/', '\\'])
     {
         return Err("远端图片文件名无效".to_owned());
@@ -1531,6 +1842,8 @@ fn remote_image_url(base_url: &str, filename: &str) -> Result<Url, String> {
 
     let mut url = Url::parse(&format!("{base_url}/api/images/"))
         .map_err(|error| format!("设备图片地址无效：{error}"))?;
+    // 通过 path_segments_mut 安全地追加文件名段（会自动做 URL 编码），
+    // 而不是用字符串拼接，避免特殊字符导致的问题。
     url.path_segments_mut()
         .map_err(|()| "设备图片地址不能包含路径段".to_owned())?
         .pop_if_empty()
@@ -1538,10 +1851,12 @@ fn remote_image_url(base_url: &str, filename: &str) -> Result<Url, String> {
     Ok(url)
 }
 
+// 判断 MIME 类型是否属于支持的图片格式（JPEG/PNG/GIF）。
 fn is_supported_image_mime(mime_type: &str) -> bool {
     matches!(mime_type, "image/jpeg" | "image/png" | "image/gif")
 }
 
+// 校验图片字节长度不超过最大限制。
 fn ensure_image_size(len: u64, filename: &str) -> Result<(), String> {
     if len > MAX_REMOTE_IMAGE_BYTES as u64 {
         return Err(format!("{filename} 不能超过 8 MiB"));
@@ -1549,6 +1864,8 @@ fn ensure_image_size(len: u64, filename: &str) -> Result<(), String> {
     Ok(())
 }
 
+// 上传前的批量校验：必须至少选择一张图片，且每张图片文件名非空、内容非空、
+// 大小不超限、MIME 类型受支持；任意一张不满足都直接整体拒绝（不做部分上传）。
 fn validate_image_uploads(images: &[ImageUpload]) -> Result<(), String> {
     if images.is_empty() {
         return Err("请选择要上传的图片".to_owned());
@@ -1570,6 +1887,7 @@ fn validate_image_uploads(images: &[ImageUpload]) -> Result<(), String> {
     Ok(())
 }
 
+// 读取配置文件内容；文件不存在时返回 Ok(None) 而不是错误（首次写入时很常见）。
 fn read_optional_config(path: &Path) -> Result<Option<String>, String> {
     match fs::read_to_string(path) {
         Ok(content) => Ok(Some(content)),
@@ -1578,14 +1896,17 @@ fn read_optional_config(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
+// 写入 Hook 配置文件，复用通用的原子写入逻辑。
 fn write_config(path: &Path, content: &str) -> Result<(), String> {
     write_atomic_file(path, content, "Hooks 配置")
 }
 
+// 原子写入文件：先写临时文件，再重命名/替换为目标文件，避免写入过程中崩溃导致文件损坏或内容截断。
 fn write_atomic_file(path: &Path, content: &str, label: &str) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("无法确定 {} 的配置目录", path.display()))?;
+    // 确保目标目录存在。
     fs::create_dir_all(parent)
         .map_err(|error| format!("无法创建配置目录 {}：{error}", parent.display()))?;
 
@@ -1593,22 +1914,27 @@ fn write_atomic_file(path: &Path, content: &str, label: &str) -> Result<(), Stri
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("配置文件路径无效：{}", path.display()))?;
+    // 临时文件名以 . 开头并带特殊后缀，避免与正常文件冲突或被误读。
     let temporary_path = parent.join(format!(".{filename}.aimonitor.tmp"));
     fs::write(&temporary_path, content)
         .map_err(|error| format!("无法写入临时配置 {}：{error}", temporary_path.display()))?;
 
+    // 类 Unix 系统上 rename 是原子操作，可以安全地替换目标文件；
+    // Windows 上 rename 到已存在文件会失败，因此改用直接写入+删除临时文件的方式。
     #[cfg(not(windows))]
     let replace_result = fs::rename(&temporary_path, path);
     #[cfg(windows)]
     let replace_result = fs::write(path, content).and_then(|()| fs::remove_file(&temporary_path));
 
     if let Err(error) = replace_result {
+        // 替换失败时尽力清理临时文件，避免遗留垃圾文件。
         let _ = fs::remove_file(&temporary_path);
         return Err(format!("无法写入{label} {}：{error}", path.display()));
     }
     Ok(())
 }
 
+// 异步版的响应成功性校验（对应阻塞版 ensure_success_blocking），逻辑相同。
 async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, String> {
     let status = response.status();
     if status.is_success() {
@@ -1624,15 +1950,19 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
 
 #[cfg(test)]
 mod tests {
+    // 测试专用导入：IP 地址类型、系统时间。
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    // mDNS 测试辅助类型：接口标识、作用域 IPv4 地址。
     use mdns_sd::{InterfaceId, ScopedIpV4};
 
     use crate::domain::monitor::{HookBehavior, HookContent};
 
+    // 引入外层模块（本文件）的全部公共/私有项，便于直接测试内部函数。
     use super::*;
 
+    // 构造一个测试用的 AI Profile：Codex 工具、槽位 1，四种行为各配一张示例图片。
     fn test_profile() -> AiProfile {
         AiProfile {
             device_id: "screen-1".to_owned(),
@@ -1654,6 +1984,8 @@ mod tests {
         }
     }
 
+    // 验证 read_hook_request 能正确解析一个合法的最小 Hook 请求：
+    // 只有工具路径和 type 字段的请求体应被成功解析出 (工具, 事件类型)。
     #[test]
     fn local_hook_request_accepts_only_tool_path_and_type_body() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -1664,6 +1996,7 @@ mod tests {
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
+        // 用另一个线程模拟客户端连接并发送请求。
         let sender = thread::spawn(move || {
             let mut stream = TcpStream::connect(address).unwrap();
             stream.write_all(request.as_bytes()).unwrap();
@@ -1673,9 +2006,12 @@ mod tests {
         let request = read_hook_request(&mut stream).unwrap();
 
         sender.join().unwrap();
+        // 期望解析出 Codex 工具与 SessionStart 事件类型。
         assert_eq!(request, (AiTool::Codex, "SessionStart".to_owned()));
     }
 
+    // 验证请求体中携带业务字段（如 image）时会被拒绝：
+    // HookRequest 使用 deny_unknown_fields，本地 Hook 请求不应该允许伪造业务负载。
     #[test]
     fn local_hook_request_rejects_business_payload_fields() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -1695,11 +2031,15 @@ mod tests {
         let error = read_hook_request(&mut stream).unwrap_err();
 
         sender.join().unwrap();
+        // 期望返回的错误信息里包含 "unknown field" 字样，证明是被 deny_unknown_fields 拒绝的。
         assert!(error.contains("unknown field"));
     }
 
+    // 验证 relay_hook 能根据事件类型计算出正确的行为状态，并转发到已配置的设备路由，
+    // 同时正确更新中继状态（收到数、转发数、最近行为、无错误信息）。
     #[test]
     fn relay_computes_state_and_uses_a_configured_device_route() {
+        // 启动一个本地监听器模拟设备端，接收请求后立即回 200。
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let receiver = thread::spawn(move || {
@@ -1710,6 +2050,7 @@ mod tests {
                 .unwrap();
             String::from_utf8(request).unwrap()
         });
+        // 构造保存的配置数据：当前设备指向刚才的模拟监听地址，并带上一个 Codex Profile。
         let data = Arc::new(RwLock::new(SavedMonitorData {
             settings: MonitorSettings {
                 base_url: format!("http://{address}"),
@@ -1727,8 +2068,10 @@ mod tests {
             hook_config_directories: HookConfigDirectories::default(),
         }));
         let status = Arc::new(RwLock::new(HookRelayStatus::default()));
+        // 在线设备列表为空，验证会回退使用保存的设备路由。
         let online_devices = Arc::new(RwLock::new(Vec::new()));
 
+        // 触发一次 UserPromptSubmit 事件（应转换为 Running 行为）。
         relay_hook(
             &reqwest::blocking::Client::new(),
             &data,
@@ -1739,24 +2082,31 @@ mod tests {
         );
 
         let request = receiver.join().unwrap();
+        // 断言请求路径、用户名、AI 名称、行为、图片内容均正确携带。
         assert!(request.starts_with("POST /api/slots/1 HTTP/1.1"));
         assert!(request.contains(r#""username":"Manon""#));
         assert!(request.contains(r#""aiName":"Codex""#));
         assert!(request.contains(r#""behavior":"running""#));
         assert!(request.contains(r#""image":"running.gif""#));
         let status = status.read().unwrap();
+        // 断言中继状态被正确更新：收到 1 次，转发成功 1 次，最近行为为 Running，无错误。
         assert_eq!(status.received_count, 1);
         assert_eq!(status.forwarded_count, 1);
         assert_eq!(status.last_behavior, Some(HookBehavior::Running));
         assert!(status.last_error.is_empty());
     }
 
+    // 验证转发时会优先使用在线快照中的最新地址：设备 screen-1 保存的地址不可达（已 drop 掉监听器），
+    // 设备 screen-2 保存的地址同样不可达，但在线快照里提供了它的新地址 available_address；
+    // 两台设备各触发一次转发（一次失败一次成功），断言实际收到请求的是使用了在线新地址的那台。
     #[test]
     fn relay_prioritizes_online_routes_and_uses_their_latest_address() {
+        // 绑定后立即 drop，得到一个必定连接失败的地址。
         let unavailable_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let unavailable_address = unavailable_listener.local_addr().unwrap();
         drop(unavailable_listener);
 
+        // 真正可用的模拟设备服务器。
         let available_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let available_address = available_listener.local_addr().unwrap();
         let receiver = thread::spawn(move || {
@@ -1768,6 +2118,7 @@ mod tests {
             String::from_utf8(request).unwrap()
         });
 
+        // 第二台设备（screen-2）的 Profile，使用不同槽位号 7 便于断言区分。
         let mut available_profile = test_profile();
         available_profile.device_id = "screen-2".to_owned();
         available_profile.slot = 7;
@@ -1779,6 +2130,7 @@ mod tests {
                 device_name: "Desk".to_owned(),
                 ..MonitorSettings::default()
             },
+            // 两台设备的历史保存地址都指向不可达地址。
             devices: vec![
                 MonitorDeviceRoute {
                     base_url: format!("http://{unavailable_address}"),
@@ -1795,6 +2147,7 @@ mod tests {
             hook_config_directories: HookConfigDirectories::default(),
         }));
         let status = Arc::new(RwLock::new(HookRelayStatus::default()));
+        // 在线快照只包含 screen-2，且地址是真正可用的 available_address。
         let online_devices = Arc::new(RwLock::new(vec![DiscoveredMonitorDevice {
             id: "screen-2".to_owned(),
             name: "Studio".to_owned(),
@@ -1814,9 +2167,11 @@ mod tests {
         );
 
         let request = receiver.join().unwrap();
+        // 实际收到的请求应该是 screen-2 的槽位 7（证明使用了在线地址而非保存的不可达地址）。
         assert!(request.starts_with("POST /api/slots/7 HTTP/1.1"));
         assert!(request.contains(r#""username":"Desk user""#));
         let status = status.read().unwrap();
+        // 收到一次事件，成功转发 1 次（screen-2），失败 1 次（screen-1 用的仍是不可达保存地址）。
         assert_eq!(status.received_count, 1);
         assert_eq!(status.forwarded_count, 1);
         assert_eq!(status.failed_count, 1);
@@ -1832,12 +2187,15 @@ mod tests {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 2048];
         loop {
+            // 持续读取并追加数据。
             let length = stream.read(&mut buffer).unwrap();
             request.extend_from_slice(&buffer[..length]);
+            // 头部结束标志还没出现，继续读。
             let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
                 continue;
             };
             let header_end = header_end + 4;
+            // 解析出 Content-Length，判断请求体是否已经读完整。
             let headers = std::str::from_utf8(&request[..header_end]).unwrap();
             let content_length = headers
                 .split("\r\n")
@@ -1862,6 +2220,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             read_test_http_request(&mut stream);
+            // 读完整个请求后先睡眠指定延迟，再回复，模拟一台响应缓慢的设备。
             thread::sleep(delay);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
@@ -1870,6 +2229,8 @@ mod tests {
         (address, handle)
     }
 
+    // 验证转发给多台设备是真正并发执行的：两台设备各自延迟 400ms 才响应，
+    // 若串行转发耗时应接近 800ms，若并发则应明显小于两倍延迟。
     #[test]
     fn relay_forwards_to_multiple_devices_concurrently_instead_of_one_at_a_time() {
         let delay = Duration::from_millis(400);
@@ -1909,6 +2270,7 @@ mod tests {
         // one-off cost unrelated to what this test measures.
         let client = reqwest::blocking::Client::new();
 
+        // 记录开始时间，触发一次会同时转发给两台设备的事件。
         let started = Instant::now();
         relay_hook(
             &client,
@@ -1922,13 +2284,19 @@ mod tests {
 
         server_one.join().unwrap();
         server_two.join().unwrap();
+        // 两台设备都应转发成功。
         assert_eq!(status.read().unwrap().forwarded_count, 2);
+        // 关键断言：总耗时应明显小于两台设备延迟之和，证明是并发而非串行转发。
         assert!(
             elapsed < delay * 2,
             "two devices answering in {delay:?} should overlap, not add up (took {elapsed:?})"
         );
     }
 
+    // 验证终止态保护窗口的行为：Stop 是权威终止事件（不会被抑制，且会记录终止时间点）；
+    // 紧随其后的 SubagentStop 属于“迟到完成”类事件，应被抑制；
+    // 而 UserPromptSubmit（新一轮工作开始）应清除终止态并放行；
+    // 清除之后再来的 PostToolUse 也应正常放行（不再处于保护窗口逻辑内）。
     #[test]
     fn terminal_state_guard_suppresses_late_completion_but_not_new_work() {
         let mut terminals = HashMap::new();
@@ -1954,8 +2322,11 @@ mod tests {
         ));
     }
 
+    // 验证切换当前设备后，profiles() 只返回新设备的 Profile（而不是混合了旧设备的）；
+    // 同时验证切回旧设备后能重新看到旧设备的 Profile，且历史设备记录、用户名等不会丢失。
     #[test]
     fn switching_current_device_loads_that_devices_profiles() {
+        // 用当前时间戳+进程号构造一个唯一的临时目录，避免测试间相互干扰。
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1969,6 +2340,7 @@ mod tests {
         fs::create_dir_all(&app_data).unwrap();
         let service = MonitorService::load(&app_data, &config_home).unwrap();
         service.save_username("Manon").unwrap();
+        // 选中设备一（screen-1）并保存一个 Profile。
         service
             .select_device(&DiscoveredMonitorDevice {
                 id: "screen-1".to_owned(),
@@ -1981,6 +2353,7 @@ mod tests {
             .unwrap();
         service.save_profile(test_profile()).unwrap();
 
+        // 切换到设备二（screen-2）。
         service
             .select_device(&DiscoveredMonitorDevice {
                 id: "screen-2".to_owned(),
@@ -1992,6 +2365,7 @@ mod tests {
             })
             .unwrap();
 
+        // 设备二还没有保存过任何 Profile，应为空列表。
         assert!(service.profiles().unwrap().is_empty());
         let mut studio_profile = test_profile();
         studio_profile.slot = 9;
@@ -1999,6 +2373,7 @@ mod tests {
         let saved_studio_profile = service.profiles().unwrap().remove(0);
         assert_eq!(saved_studio_profile.device_id, "screen-2");
         assert_eq!(saved_studio_profile.slot, 9);
+        // 切回设备一。
         service
             .select_device(&DiscoveredMonitorDevice {
                 id: "screen-1".to_owned(),
@@ -2009,11 +2384,14 @@ mod tests {
                 discovery_source: DiscoverySource::Mdns,
             })
             .unwrap();
+        // 应该重新看到设备一之前保存的 Profile（槽位 1）。
         let profile = service.profiles().unwrap().remove(0);
         assert_eq!(profile.tool, AiTool::Codex);
         assert_eq!(profile.device_id, "screen-1");
         assert_eq!(profile.slot, 1);
+        // 用户名在切换设备过程中应保持不变。
         assert_eq!(service.settings().unwrap().username, "Manon");
+        // 历史设备列表应同时保留两台设备的记录。
         let saved = service.data.read().unwrap();
         assert_eq!(saved.devices.len(), 2);
         assert!(
@@ -2025,6 +2403,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    // 验证当前选中设备不在在线列表中时会自动切换到第一台在线设备，
+    // 并且这次自动切换会被持久化（重新加载服务后仍是新设备）。
     #[test]
     fn unavailable_current_device_switches_to_first_online_device_and_persists() {
         let unique = SystemTime::now()
@@ -2057,12 +2437,14 @@ mod tests {
         };
         service.select_device(&current).unwrap();
 
+        // 在线列表为空：不应触发切换，仍然选中原设备。
         assert!(
             !service
                 .select_first_available_device_if_needed(&[])
                 .unwrap()
         );
         assert_eq!(service.settings().unwrap().device_id, "screen-1");
+        // 在线列表只包含另一台设备（不含当前选中设备）：应触发切换。
         assert!(
             service
                 .select_first_available_device_if_needed(std::slice::from_ref(&next))
@@ -2070,6 +2452,7 @@ mod tests {
         );
         assert_eq!(service.settings().unwrap().device_id, "screen-2");
 
+        // 重新加载服务（模拟应用重启），验证切换结果已被持久化。
         drop(service);
         let reloaded = MonitorService::load(&app_data, &config_home).unwrap();
         assert_eq!(reloaded.settings().unwrap().device_id, "screen-2");
@@ -2077,6 +2460,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    // 验证批量图片上传校验会检查列表中的每一个文件，而不是遇到第一个合法文件就通过；
+    // 列表里混入一个不支持的 webp 格式应导致整体校验失败。
     #[test]
     fn batch_image_validation_checks_every_file_before_upload() {
         let images = vec![
@@ -2092,12 +2477,14 @@ mod tests {
             },
         ];
 
+        // 即使第一个文件合法，只要列表中有一个不支持的类型，整体也应报错。
         assert_eq!(
             validate_image_uploads(&images),
             Err("invalid.webp 不是支持的 JPEG、PNG 或 GIF 图片".to_owned())
         );
     }
 
+    // 验证空的图片选择会被拒绝，提示用户先选择图片。
     #[test]
     fn batch_image_validation_rejects_an_empty_selection() {
         assert_eq!(
@@ -2106,6 +2493,8 @@ mod tests {
         );
     }
 
+    // 验证 remote_image_url 会对文件名做正确的 URL 编码（含中文、空格、# 等特殊字符），
+    // 同时验证包含路径穿越（"../secret"）的文件名会被拒绝。
     #[test]
     fn remote_image_url_encodes_one_filename_path_segment() {
         let url = remote_image_url("http://192.168.50.20:8080", "状态 图片 #1.gif").unwrap();
@@ -2117,6 +2506,7 @@ mod tests {
         assert!(remote_image_url("http://192.168.50.20:8080", "../secret").is_err());
     }
 
+    // 验证 IPv4 候选地址排序时排在 IPv6 之前。
     #[test]
     fn discovery_prefers_ipv4_candidates_before_ipv6() {
         let mut urls = [
@@ -2129,6 +2519,7 @@ mod tests {
         assert_eq!(urls[0], "http://192.168.50.20:8080");
     }
 
+    // 测试辅助函数：快速构造一个只有单个 base_url 的发现候选。
     fn discovery_candidate(
         id: &str,
         name: &str,
@@ -2148,6 +2539,8 @@ mod tests {
         }
     }
 
+    // 验证合并 mDNS 与 UDP 两路发现结果时，只在其中一路出现的设备不会丢失，
+    // 同一设备在两路都出现时其候选地址会被正确取并集。
     #[test]
     fn merging_discovery_sources_keeps_devices_only_seen_on_one_protocol() {
         // Regression test: two physical devices both running the app, but only
@@ -2155,24 +2548,28 @@ mod tests {
         // while both answer UDP broadcast. The old short-circuit logic
         // (`if mdns non-empty, ignore udp entirely`) silently dropped the
         // second device from the list.
+        // 只出现在 mDNS 一路的设备。
         let mdns_only = discovery_candidate(
             "device-a",
             "Living Room",
             "http://192.168.1.10:8080",
             DiscoverySource::Mdns,
         );
+        // 两路都会出现的设备（mDNS 那份）。
         let mdns_and_udp = discovery_candidate(
             "device-c",
             "Kitchen",
             "http://192.168.1.30:8080",
             DiscoverySource::Mdns,
         );
+        // 只出现在 UDP 一路的设备。
         let udp_only = discovery_candidate(
             "device-b",
             "Bedroom",
             "http://192.168.1.20:8080",
             DiscoverySource::UdpBroadcast,
         );
+        // 两路都出现的设备（UDP 那份），但带了一个 mDNS 那份没有的额外地址。
         let mut udp_duplicate_with_extra_address = discovery_candidate(
             "device-c",
             "Kitchen",
@@ -2190,6 +2587,7 @@ mod tests {
             .iter()
             .map(|candidate| candidate.device.id.as_str())
             .collect::<Vec<_>>();
+        // 三台设备（仅 mDNS、仅 UDP、两路都有）都应存活在合并结果中。
         assert_eq!(
             ids.len(),
             3,
@@ -2198,6 +2596,7 @@ mod tests {
         assert!(ids.contains(&"device-a"));
         assert!(ids.contains(&"device-b"));
 
+        // 两路都出现的设备（Kitchen），其候选地址应该是两路地址的并集。
         let kitchen = merged
             .iter()
             .find(|candidate| candidate.device.id == "device-c")
@@ -2212,6 +2611,8 @@ mod tests {
         );
     }
 
+    // 验证设备需要连续两轮未被发现才会真正从在线快照移除（去抖机制），
+    // 单轮偶发漏报应该被容忍，不影响设备继续显示在线。
     #[test]
     fn online_snapshot_requires_two_consecutive_misses_before_removing_a_device() {
         let device_a = discovery_candidate(
@@ -2231,10 +2632,12 @@ mod tests {
         let previous = vec![device_a.clone(), device_b.clone()];
         let mut missed_scans = HashMap::new();
 
+        // 第一轮只发现了 device_a：device_b 缺席 1 次，但未达到移除阈值，仍应保留在结果中。
         let after_one_miss =
             stabilize_discovered_devices(&previous, vec![device_a.clone()], &mut missed_scans);
         assert_eq!(after_one_miss.len(), 2);
 
+        // 第二轮仍只发现 device_a：device_b 累计缺席 2 次，达到阈值，应从结果中移除。
         let after_two_misses = stabilize_discovered_devices(
             &after_one_miss,
             vec![device_a.clone()],
@@ -2244,6 +2647,7 @@ mod tests {
         assert_eq!(missed_scans.get("device-b"), Some(&2));
     }
 
+    // 验证发现间隔的默认值、非法值拒绝以及保存后立即生效（无需重启服务）。
     #[test]
     fn discovery_interval_is_saved_and_read_back_without_restarting_the_service() {
         let unique = SystemTime::now()
@@ -2259,14 +2663,18 @@ mod tests {
         fs::create_dir_all(&app_data).unwrap();
         let service = MonitorService::load(&app_data, &config_home).unwrap();
 
+        // 默认间隔应为 1 分钟。
         assert_eq!(service.discovery_interval(), Duration::from_mins(1));
+        // 0 分钟是非法值，应被拒绝。
         assert!(service.save_discovery_interval(0).is_err());
 
+        // 保存 15 分钟后，无需重启服务即可立即读到新值。
         let updated = service.save_discovery_interval(15).unwrap();
         assert_eq!(updated.discovery_interval_minutes, 15);
         assert_eq!(service.discovery_interval(), Duration::from_mins(15));
     }
 
+    // 验证 discovery_base_url 对 IPv4 与 IPv6（链路本地）地址都能正确拼出可直接探测的 URL。
     #[test]
     fn discovery_formats_addresses_for_direct_health_probes() {
         let ipv4 = ScopedIp::V4(ScopedIpV4::new(
@@ -2288,6 +2696,7 @@ mod tests {
         );
     }
 
+    // 验证根据 IP 和子网掩码计算定向广播地址的正确性（不同掩码长度）。
     #[test]
     fn directed_broadcast_uses_the_interface_netmask() {
         assert_eq!(
@@ -2303,6 +2712,8 @@ mod tests {
         );
     }
 
+    // 验证 UDP 发现响应解析：base_url 使用的是数据包实际来源 IP（而非响应体里可能伪造的字段），
+    // 端口使用响应体中通告的端口；同时验证中文名称能被正确解析。
     #[test]
     fn udp_response_uses_the_datagram_source_ip_and_advertised_port() {
         let device = parse_udp_discovery_response(
@@ -2318,6 +2729,7 @@ mod tests {
         assert_eq!(device.discovery_source, DiscoverySource::UdpBroadcast);
     }
 
+    // 验证非法元数据（id 为空、端口为 0）都会被拒绝解析，返回 None。
     #[test]
     fn udp_response_rejects_invalid_metadata() {
         assert!(
@@ -2336,6 +2748,9 @@ mod tests {
         );
     }
 
+    // 端到端验证 UDP 发现的完整往返流程：本地起一个模拟设备 UDP 服务器，
+    // 验证收到的探测报文与协议约定的固定内容一致（与 Android 端协议匹配），
+    // 并验证响应能被正确解析为发现候选。
     #[test]
     fn udp_discovery_round_trip_matches_the_android_protocol() {
         let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -2343,6 +2758,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
         let port = server.local_addr().unwrap().port();
+        // 模拟设备端：接收探测请求，校验报文内容，回复设备信息。
         let responder = thread::spawn(move || {
             let mut request = [0_u8; 256];
             let (length, source) = server.recv_from(&mut request).unwrap();
@@ -2356,6 +2772,7 @@ mod tests {
                 .unwrap();
         });
 
+        // 用回环地址作为广播目标（测试环境无法真正广播），触发一次完整发现。
         let candidates = discover_udp_on_targets(
             &[UdpBroadcastTarget {
                 local_ip: Ipv4Addr::LOCALHOST,
@@ -2367,11 +2784,15 @@ mod tests {
         .unwrap();
         responder.join().unwrap();
 
+        // 应该正确发现到这一台模拟设备。
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].device.id, "device-loopback");
         assert_eq!(candidates[0].device.base_url, "http://127.0.0.1:8080");
     }
 
+    // 验证保存 Profile 时若持久化到磁盘失败（此处故意把 data_path 指向一个目录而非文件，
+    // 制造写入失败），不会产生"内存已更新但磁盘未写入"的不一致状态：
+    // save_profile 应返回错误，且内存中的 profiles 仍应为空，Hook 配置文件也不应被生成。
     #[test]
     fn profile_save_does_not_write_hooks_when_data_persistence_fails() {
         let unique = SystemTime::now()
@@ -2383,9 +2804,11 @@ mod tests {
             std::process::id()
         ));
         let config_home = root.join("home");
+        // 故意让 data_path 指向一个目录（而非文件），这样写入配置时必然失败。
         let invalid_data_path = root.join("data-path-is-a-directory");
         fs::create_dir_all(&invalid_data_path).unwrap();
 
+        // 手工构造 MonitorService（而非走 load()），以便注入这个必然失败的 data_path。
         let service = MonitorService {
             client: Client::new(),
             data_path: invalid_data_path,
@@ -2414,12 +2837,15 @@ mod tests {
 
         let result = service.save_profile(test_profile());
 
+        // 保存应失败，且没有留下任何副作用：既没写 hooks.json，内存里的 profiles 也仍为空。
         assert!(result.is_err());
         assert!(!config_home.join(".codex/hooks.json").exists());
         assert!(service.profiles().unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
+    // 验证自定义 Hook 配置目录能被正确持久化，并且 write_hook_config 会写入到该自定义目录
+    // 而非默认目录；重新加载服务后自定义目录设置依然生效；清空自定义目录后能恢复默认目录。
     #[test]
     fn custom_hook_directory_is_persisted_and_used_for_hook_writes() {
         let unique = SystemTime::now()
@@ -2445,6 +2871,7 @@ mod tests {
             })
             .unwrap();
         let custom_directory = root.join("custom-codex");
+        // 记录下切换自定义目录之前系统探测到的默认目录，后面用于验证"清空自定义目录后能恢复默认值"。
         let detected_directory = service
             .hook_config_locations()
             .unwrap()
@@ -2453,20 +2880,25 @@ mod tests {
             .unwrap()
             .directory;
 
+        // 保存自定义目录。
         let location = service
             .save_hook_config_directory(AiTool::Codex, &custom_directory.to_string_lossy())
             .unwrap();
 
+        // 保存后应标记为自定义，且配置文件路径应指向自定义目录下的 hooks.json。
         assert!(location.is_custom);
         assert_eq!(
             PathBuf::from(&location.config_path),
             custom_directory.join("hooks.json")
         );
         service.save_profile(test_profile()).unwrap();
+        // 仅保存 Profile 还不会触发写文件。
         assert!(!custom_directory.join("hooks.json").exists());
         service.write_hook_config(AiTool::Codex).unwrap();
+        // 写入后应出现在自定义目录，而不是默认目录。
         assert!(custom_directory.join("hooks.json").exists());
         assert!(!config_home.join(".codex/hooks.json").exists());
+        // 重新加载服务（模拟重启），自定义目录设置应仍然生效。
         let reloaded = MonitorService::load(&app_data, &config_home).unwrap();
         let reloaded_location = reloaded
             .hook_config_locations()
@@ -2477,6 +2909,7 @@ mod tests {
         assert_eq!(reloaded_location.directory, location.directory);
         assert!(reloaded_location.is_custom);
 
+        // 传入空字符串应恢复为默认探测目录，且不再标记为自定义。
         let default_location = reloaded
             .save_hook_config_directory(AiTool::Codex, "")
             .unwrap();
@@ -2485,6 +2918,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    // 验证保存 Hook 配置目录时会拒绝相对路径，也会拒绝指向一个已存在普通文件（而非目录）的路径。
     #[test]
     fn hook_directory_rejects_relative_and_file_paths() {
         let unique = SystemTime::now()
@@ -2502,11 +2936,13 @@ mod tests {
         let file_path = root.join("not-a-directory");
         fs::write(&file_path, "content").unwrap();
 
+        // 相对路径应被拒绝。
         assert!(
             service
                 .save_hook_config_directory(AiTool::Cursor, "relative/path")
                 .is_err()
         );
+        // 指向一个已存在的普通文件（非目录）也应被拒绝。
         assert!(
             service
                 .save_hook_config_directory(AiTool::ClaudeCode, &file_path.to_string_lossy())

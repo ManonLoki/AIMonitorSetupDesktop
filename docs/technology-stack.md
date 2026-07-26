@@ -1,6 +1,6 @@
 # 技术栈与版本
 
-最后核对：2026-07-24。JavaScript 版本来自 npm registry，Rust crate
+最后核对：2026-07-26。JavaScript 版本来自 npm registry，Rust crate
 版本来自 crates.io；`pnpm-lock.yaml` 和 `src-tauri/Cargo.lock` 是可复现构建的
 最终依据。
 
@@ -31,6 +31,7 @@
 | 用途 | 选择 | 当前锁定版本 | 使用边界 |
 | --- | --- | --- | --- |
 | 远端 HTTP | reqwest | 0.12.28 | 仅由 Rust application 层访问 AiMonitor 设备接口 |
+| 图片解码/缩放/编码 | image（仅启用 `jpeg`、`png` feature） | 0.25.10 | 仅由 Rust domain 层在图片上传前使用：长边超过 800px 等比缩小（展示屏实际分辨率达不到更高），并重新编码压缩，降低展示屏（Android 端）解码大图的负担；GIF 原样透传 |
 | 局域网服务发现 | mdns-sd | 0.20.2 | 仅由 Rust application 层发现 `_aimonitor._tcp.local.` 设备 |
 | 网卡与广播地址 | if-addrs | 0.15.0 | 仅由 Rust application 层枚举可用 IPv4 网卡并发送 UDP 定向广播 |
 | JSON 持久化 | serde_json | 1.0.151 | 保存设备设置与 AI 实例配置 |

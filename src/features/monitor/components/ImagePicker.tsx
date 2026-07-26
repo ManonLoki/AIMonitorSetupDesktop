@@ -13,6 +13,7 @@ import type { RemoteImage } from "../api/monitor";
 import { useImageCategoryFilter } from "../hooks/useImageCategoryFilter";
 import { LineIcon } from "../../../shared/ui/LineIcon";
 
+// images 为可选图片列表，value 为当前已选图片的文件名，onChange 在选择/清除时回调
 interface ImagePickerProps {
   images: RemoteImage[];
   value: string;
@@ -26,14 +27,19 @@ export function ImagePicker({
   disabled,
   onChange,
 }: ImagePickerProps) {
+  // 控制弹出层（Popover）的展开/收起状态
   const [opened, setOpened] = useState(false);
+  // 图片分类筛选 hook：提供当前分类、切换分类方法、按分类过滤后的图片、各分类数量
   const { category, setCategory, filteredImages, counts } =
     useImageCategoryFilter(images);
+  // 生成唯一 id，用于关联标签文本与触发按钮的无障碍属性
   const labelId = useId();
+  // 根据 value 在全部图片中查找当前已选中的图片对象
   const selectedImage = images.find((image) => image.filename === value);
 
   return (
     <div>
+      {/* 字段标题行：展示"展示图片"标签，若已选图片则显示清除按钮 */}
       <Group justify="space-between" mb={7}>
         <Text component="span" size="sm" fw={500} id={labelId}>
           展示图片 <span className="required-mark">*</span>
@@ -53,6 +59,7 @@ export function ImagePicker({
         )}
       </Group>
 
+      {/* 图片选择弹出层：点击触发按钮展开，内部按分类展示图片九宫格供选择 */}
       <Popover
         opened={opened}
         onChange={setOpened}
@@ -62,6 +69,7 @@ export function ImagePicker({
         withinPortal
       >
         <Popover.Target>
+          {/* 触发按钮：已选图片时展示图片预览与"更换图片"遮罩，未选时展示空态提示 */}
           <UnstyledButton
             type="button"
             className="image-picker-trigger"
@@ -90,6 +98,7 @@ export function ImagePicker({
         </Popover.Target>
 
         <Popover.Dropdown p="sm">
+          {/* 弹出层头部：标题、按当前分类展示的图片计数、关闭按钮 */}
           <Group justify="space-between" mb="sm">
             <div>
               <Text size="sm" fw={650}>
@@ -111,6 +120,7 @@ export function ImagePicker({
             </ActionIcon>
           </Group>
 
+          {/* 分类切换控件：全部/JPEG/PNG/GIF，各项附带对应数量 */}
           <SegmentedControl
             fullWidth
             size="xs"
@@ -127,6 +137,7 @@ export function ImagePicker({
             ]}
           />
 
+          {/* 图片九宫格区域：有图片时按分类渲染四列网格，无图片时展示空态文案 */}
           <div className="image-picker-options" role="listbox">
             {filteredImages.length ? (
               <SimpleGrid cols={4} spacing="xs">
@@ -140,12 +151,14 @@ export function ImagePicker({
                       className="image-picker-option"
                       data-selected={image.filename === value || undefined}
                       onClick={() => {
+                        // 点击图片后回填选中的文件名并关闭弹出层
                         onChange(image.filename);
                         setOpened(false);
                       }}
                     >
                       <img src={image.image} alt="" />
                       {image.filename === value && (
+                        // 已选中的图片右上角展示对勾图标
                         <span className="image-picker-check">
                           <LineIcon name="check" size={14} />
                         </span>
