@@ -111,7 +111,7 @@ export function ImagesPage() {
           hidden
           type="file"
           multiple
-          accept="image/jpeg,image/png,image/gif"
+          accept=".bmp,.jpg,.jpeg,.gif,.png,.webp,image/bmp,image/jpeg,image/gif,image/png,image/webp"
           // 选中文件后触发上传 mutation，并清空 input 的值以便下次可重复选择同一文件
           onChange={(event) => {
             const files = Array.from(event.currentTarget.files ?? []);

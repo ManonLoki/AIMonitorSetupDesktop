@@ -28,7 +28,7 @@ use crate::domain::monitor::{
     HookEventDecision, HookStateMachine, HookTransition, MonitorDeviceRoute, MonitorSettings,
     SavedMonitorData, ai_tool_name, encode_base64, generate_hook_auxiliary_configs,
     generate_hook_config, hook_config_filename, hook_requires_review, hook_restart_required,
-    merge_hook_config, normalize_base_url, normalize_enabled_ai_tools, resize_and_compress_image,
+    merge_hook_config, normalize_base_url, normalize_enabled_ai_tools, process_image_upload,
     tool_from_slug, validate_device_route, validate_discovery_interval_minutes, validate_profile,
     validate_saved_monitor_data, validate_username,
 };
@@ -1295,28 +1295,29 @@ impl MonitorService {
         let mut uploaded = Vec::with_capacity(images.len());
 
         for image in images {
-            let filename = image.filename.clone();
-            // 上传前先按目标 MIME 类型做缩放与压缩处理，减小体积。
-            let bytes = resize_and_compress_image(&image.bytes, &image.mime_type)
-                .map_err(|error| format!("{filename} 处理失败：{error}"))?;
+            let source_filename = image.filename.clone();
+            // 上传前在 Rust domain 层完成格式校验、缩放及兼容格式转换。
+            let processed = process_image_upload(&source_filename, &image.bytes, &image.mime_type)
+                .map_err(|error| format!("{source_filename} 处理失败：{error}"))?;
+            ensure_image_size(processed.bytes.len() as u64, &processed.filename)?;
             // 构造 multipart 表单的文件分片。
-            let file_part = multipart::Part::bytes(bytes)
-                .file_name(filename.clone())
-                .mime_str(&image.mime_type)
-                .map_err(|error| format!("{filename} 的图片类型无效：{error}"))?;
+            let file_part = multipart::Part::bytes(processed.bytes)
+                .file_name(processed.filename.clone())
+                .mime_str(processed.mime_type)
+                .map_err(|error| format!("{source_filename} 的图片类型无效：{error}"))?;
             let response = self
                 .client
                 .post(format!("{base_url}/api/images"))
                 .multipart(multipart::Form::new().part("file", file_part))
                 .send()
                 .await
-                .map_err(|error| format!("{filename} 上传失败：{error}"))?;
+                .map_err(|error| format!("{source_filename} 上传失败：{error}"))?;
             let response = ensure_success(response).await?;
             let uploaded_filename = response
                 .json::<UploadResponse>()
                 .await
                 .map(|body| body.filename)
-                .map_err(|error| format!("{filename} 的上传响应格式错误：{error}"))?;
+                .map_err(|error| format!("{source_filename} 的上传响应格式错误：{error}"))?;
             uploaded.push(uploaded_filename);
         }
 
@@ -2250,9 +2251,17 @@ fn remote_image_url(base_url: &str, filename: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-// 判断 MIME 类型是否属于支持的图片格式（JPEG/PNG/GIF）。
+// 判断设备端返回的 MIME 类型是否属于其原生支持的图片格式。
 fn is_supported_image_mime(mime_type: &str) -> bool {
     matches!(mime_type, "image/jpeg" | "image/png" | "image/gif")
+}
+
+// 判断桌面端可以接收并在上传前处理的图片 MIME 类型。
+fn is_supported_upload_image_mime(mime_type: &str) -> bool {
+    matches!(
+        mime_type,
+        "image/bmp" | "image/x-ms-bmp" | "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    )
 }
 
 // 校验图片字节长度不超过最大限制。
@@ -2275,9 +2284,9 @@ fn validate_image_uploads(images: &[ImageUpload]) -> Result<(), String> {
             return Err("所选图片中包含空文件".to_owned());
         }
         ensure_image_size(image.bytes.len() as u64, &image.filename)?;
-        if !is_supported_image_mime(&image.mime_type) {
+        if !is_supported_upload_image_mime(&image.mime_type) {
             return Err(format!(
-                "{} 不是支持的 JPEG、PNG 或 GIF 图片",
+                "{} 不是支持的 BMP、JPEG、GIF、PNG 或 WebP 图片",
                 image.filename
             ));
         }
@@ -3255,7 +3264,7 @@ mod tests {
     }
 
     // 验证批量图片上传校验会检查列表中的每一个文件，而不是遇到第一个合法文件就通过；
-    // 列表里混入一个不支持的 webp 格式应导致整体校验失败。
+    // 列表里混入一个不支持的 TIFF 格式应导致整体校验失败。
     #[test]
     fn batch_image_validation_checks_every_file_before_upload() {
         let images = vec![
@@ -3265,8 +3274,8 @@ mod tests {
                 bytes: vec![1],
             },
             ImageUpload {
-                filename: "invalid.webp".to_owned(),
-                mime_type: "image/webp".to_owned(),
+                filename: "invalid.tiff".to_owned(),
+                mime_type: "image/tiff".to_owned(),
                 bytes: vec![1],
             },
         ];
@@ -3274,8 +3283,27 @@ mod tests {
         // 即使第一个文件合法，只要列表中有一个不支持的类型，整体也应报错。
         assert_eq!(
             validate_image_uploads(&images),
-            Err("invalid.webp 不是支持的 JPEG、PNG 或 GIF 图片".to_owned())
+            Err("invalid.tiff 不是支持的 BMP、JPEG、GIF、PNG 或 WebP 图片".to_owned())
         );
+    }
+
+    #[test]
+    fn batch_image_validation_accepts_all_supported_upload_types() {
+        let images = [
+            ("legacy.bmp", "image/bmp"),
+            ("photo.jpg", "image/jpeg"),
+            ("photo.jpeg", "image/jpeg"),
+            ("moving.gif", "image/gif"),
+            ("graphic.png", "image/png"),
+            ("modern.webp", "image/webp"),
+        ]
+        .map(|(filename, mime_type)| ImageUpload {
+            filename: filename.to_owned(),
+            mime_type: mime_type.to_owned(),
+            bytes: vec![1],
+        });
+
+        assert!(validate_image_uploads(&images).is_ok());
     }
 
     // 验证空的图片选择会被拒绝，提示用户先选择图片。

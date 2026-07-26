@@ -1,6 +1,6 @@
 [package]
 name = "ai-monitor-setup"
-version = "2.0.8"
+version = "2.0.9"
 description = "AI monitor desktop application"
 authors = ["ManonLoki"]
 edition = "2024"
@@ -20,7 +20,7 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 if-addrs = "0.15.0"
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 mdns-sd = "0.20.2"
 reqwest = { version = "0.12.22", features = ["blocking", "json", "multipart"] }
 serde = { version = "1.0.229", features = ["derive"] }
