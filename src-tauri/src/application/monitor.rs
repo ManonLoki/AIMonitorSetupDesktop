@@ -1688,32 +1688,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let receiver = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 2048];
-            loop {
-                let length = stream.read(&mut buffer).unwrap();
-                request.extend_from_slice(&buffer[..length]);
-                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
-                else {
-                    continue;
-                };
-                let header_end = header_end + 4;
-                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
-                let content_length = headers
-                    .split("\r\n")
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap();
-                if request.len() >= header_end + content_length {
-                    break;
-                }
-            }
+            let request = read_test_http_request(&mut stream);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();
@@ -1770,32 +1745,7 @@ mod tests {
         let available_address = available_listener.local_addr().unwrap();
         let receiver = thread::spawn(move || {
             let (mut stream, _) = available_listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 2048];
-            loop {
-                let length = stream.read(&mut buffer).unwrap();
-                request.extend_from_slice(&buffer[..length]);
-                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
-                else {
-                    continue;
-                };
-                let header_end = header_end + 4;
-                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
-                let content_length = headers
-                    .split("\r\n")
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap();
-                if request.len() >= header_end + content_length {
-                    break;
-                }
-            }
+            let request = read_test_http_request(&mut stream);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();
@@ -1857,6 +1807,37 @@ mod tests {
         assert!(status.last_error.contains("Desk"));
     }
 
+    /// 从测试用 `TcpStream` 中读出一份完整的 HTTP 请求（读到请求头结束，
+    /// 再按 Content-Length 读满请求体），供本模块的伪造设备服务器共用。
+    fn read_test_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 2048];
+        loop {
+            let length = stream.read(&mut buffer).unwrap();
+            request.extend_from_slice(&buffer[..length]);
+            let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+                continue;
+            };
+            let header_end = header_end + 4;
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .split("\r\n")
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            if request.len() >= header_end + content_length {
+                break;
+            }
+        }
+        request
+    }
+
     /// 启动一个只接受一次连接、读完完整请求后先睡眠再回 200 的测试服务器，
     /// 用来验证多设备转发是否真的并发执行（而不是排队等前一台超时/变慢）。
     fn slow_test_server(delay: Duration) -> (SocketAddr, thread::JoinHandle<()>) {
@@ -1864,32 +1845,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 2048];
-            loop {
-                let length = stream.read(&mut buffer).unwrap();
-                request.extend_from_slice(&buffer[..length]);
-                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
-                else {
-                    continue;
-                };
-                let header_end = header_end + 4;
-                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
-                let content_length = headers
-                    .split("\r\n")
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap();
-                if request.len() >= header_end + content_length {
-                    break;
-                }
-            }
+            read_test_http_request(&mut stream);
             thread::sleep(delay);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")

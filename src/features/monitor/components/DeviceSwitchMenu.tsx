@@ -8,8 +8,13 @@ interface DeviceSwitchMenuProps {
 }
 
 export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
-  const { settings, devices, connectedDevice, otherDevices, isPending } =
-    useMonitorConnection();
+  const {
+    settings,
+    connectedDevice,
+    otherDevices,
+    isPending,
+    hasAvailableDevice,
+  } = useMonitorConnection();
   const connect = useConnectDevice();
   const savedDevice = settings.data;
   const currentName = connectedDevice?.name ?? savedDevice?.deviceName;
@@ -17,7 +22,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
   const currentAvailable = Boolean(connectedDevice);
 
   if (isPending) return <Loader size={16} />;
-  if ((devices.data?.length ?? 0) === 0) {
+  if (!hasAvailableDevice) {
     return collapsed ? (
       <ActionIcon
         variant="subtle"
