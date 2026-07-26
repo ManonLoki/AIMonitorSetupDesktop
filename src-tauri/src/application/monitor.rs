@@ -1389,33 +1389,41 @@ fn forward_profile(
             .find(|state| state.behavior == behavior)
             .ok_or_else(|| "AI 状态配置不完整".to_owned())
             .and_then(|state| {
-                client
-                    .post(&url)
-                    .json(&SlotUpdateRequest {
+                send_and_confirm(
+                    client.post(&url).json(&SlotUpdateRequest {
                         username,
                         ai_name: ai_tool_name(tool),
                         behavior,
                         content: &state.content,
                         image: &state.image,
-                    })
-                    .send()
-                    .map_err(|error| format!("转发到监控屏失败：{error}"))
-                    .and_then(|response| {
-                        ensure_success_blocking(response)
-                            .map(|_| ())
-                            .map_err(|error| format!("监控屏拒绝了状态更新：{error}"))
-                    })
+                    }),
+                    "转发到监控屏失败",
+                    "监控屏拒绝了状态更新",
+                )
             }),
-        HookTransition::Release => client
-            .delete(&url)
-            .send()
-            .map_err(|error| format!("释放监控屏位置失败：{error}"))
-            .and_then(|response| {
-                ensure_success_blocking(response)
-                    .map(|_| ())
-                    .map_err(|error| format!("监控屏拒绝了位置释放：{error}"))
-            }),
+        HookTransition::Release => send_and_confirm(
+            client.delete(&url),
+            "释放监控屏位置失败",
+            "监控屏拒绝了位置释放",
+        ),
     }
+}
+
+/// 发送请求并确认设备接受：`send_label` 用于网络层失败（连不上/超时），
+/// `reject_label` 用于设备返回非成功状态（连上了但拒绝了这次操作）。
+fn send_and_confirm(
+    request: reqwest::blocking::RequestBuilder,
+    send_label: &str,
+    reject_label: &str,
+) -> Result<(), String> {
+    request
+        .send()
+        .map_err(|error| format!("{send_label}：{error}"))
+        .and_then(|response| {
+            ensure_success_blocking(response)
+                .map(|_| ())
+                .map_err(|error| format!("{reject_label}：{error}"))
+        })
 }
 
 /// 把设备的非 2xx 响应转成对用户有意义的错误：优先使用设备返回的

@@ -133,8 +133,7 @@ pub struct AiProfile {
     pub hooks: Vec<HookContent>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
 pub struct HookConfigPreview {
     pub filename: String,
     pub content: String,
