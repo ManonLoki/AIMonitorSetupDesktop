@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::super::{
     MANAGED_HOOK_PREFIX, generate_hook_auxiliary_configs, hook_transition, managed_hook_marker,
+    protocol, tool_from_slug,
 };
 use super::{command_has_marker, contains_managed_hook_config, generate_hook_config};
 use crate::domain::monitor::{
@@ -13,6 +14,45 @@ use crate::domain::monitor::{
 
 fn generate_test_hook_config(tool: AiTool) -> Result<HookConfigPreview, String> {
     generate_hook_config(tool, Path::new("/opt/AIMonitor/AIMonitor"))
+}
+
+#[test]
+fn every_generated_hook_contract_uses_canonical_slugs_events_and_markers() {
+    for tool in AiTool::ALL {
+        let protocol = protocol(tool);
+        let slug = protocol.slug();
+        let marker = managed_hook_marker(tool);
+        let preview = generate_test_hook_config(tool).unwrap();
+
+        assert_eq!(tool_from_slug(slug), Some(tool));
+        assert_eq!(marker, format!("AIMonitor|tool={slug}"));
+        assert!(preview.content.contains(&marker));
+        for event in protocol.events() {
+            assert!(
+                preview.content.contains(event.name),
+                "{} 的生成配置缺少协议事件 {}",
+                protocol.name(),
+                event.name
+            );
+        }
+
+        if protocol.standalone_config().is_some() {
+            assert!(preview.content.contains(&format!("/api/hooks/{slug}")));
+            assert!(preview.content.contains("X-AIMonitor-Hook-Type"));
+            assert!(preview.content.contains("hook_event_name"));
+            assert!(preview.content.contains("session_id"));
+            assert!(preview.content.contains("status"));
+            assert!(
+                generate_hook_auxiliary_configs(tool)
+                    .iter()
+                    .all(|file| file.content.contains(&marker))
+            );
+        } else {
+            assert!(preview.content.contains("--aimonitor-hook-relay"));
+            assert!(preview.content.contains(&format!("'{slug}'")));
+            assert!(preview.content.contains("--managed-by"));
+        }
+    }
 }
 
 // 验证 Cursor 生成的 Hooks 配置：事件名使用 camelCase，包含预期事件，

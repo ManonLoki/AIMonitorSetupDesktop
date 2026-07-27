@@ -5,16 +5,18 @@
 //! 小信封提交给已运行桌面实例的环回 listener。
 
 use std::{
+    ffi::{OsStr, OsString},
     io::{self, Read, Write},
-    thread,
+    iter, thread,
     time::Duration,
 };
 
+use clap::Parser;
 use reqwest::blocking::Client;
 
 use crate::domain::monitor::{
-    AiTool, DEFAULT_HOOK_RELAY_PORT, MAX_NATIVE_HOOK_INPUT_BYTES, minimize_native_hook_payload,
-    tool_from_slug,
+    AiTool, DEFAULT_HOOK_RELAY_PORT, MAX_NATIVE_HOOK_INPUT_BYTES, managed_hook_marker,
+    minimize_native_hook_payload, tool_from_slug,
 };
 
 pub const HOOK_RELAY_ARGUMENT: &str = "--aimonitor-hook-relay";
@@ -25,31 +27,30 @@ const LOCAL_RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 // 整个请求（含 listener 入队处理）的超时，略宽松于连接超时。
 const LOCAL_RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
+#[derive(Debug, Parser, PartialEq, Eq)]
+#[command(name = "AIMonitor")]
+struct HookRelayArguments {
+    #[arg(long = "aimonitor-hook-relay", value_name = "AI_TOOL")]
+    tool_slug: String,
+    #[arg(value_name = "EVENT")]
+    event: String,
+    #[arg(long = "managed-by", value_name = "MARKER")]
+    managed_by: String,
+}
+
 /// 若当前进程参数是 Hook relay 模式则执行并返回退出码；否则让调用方继续启动 GUI。
 pub fn run_from_process_args() -> Option<i32> {
-    let mut arguments = std::env::args();
-    let _executable = arguments.next();
-    if arguments.next().as_deref() != Some(HOOK_RELAY_ARGUMENT) {
-        return None;
-    }
-    let result = arguments
-        .next()
-        .ok_or_else(|| "Hook relay 缺少 AI 工具参数".to_owned())
-        .and_then(|tool_slug| {
-            let tool = tool_from_slug(&tool_slug)
-                .ok_or_else(|| format!("Hook relay 不支持 AI 工具：{tool_slug}"))?;
-            let event = arguments
-                .next()
-                .ok_or_else(|| "Hook relay 缺少事件类型参数".to_owned())?;
-            let expected_marker = format!("AIMonitor|tool={tool_slug}");
-            if arguments.next().as_deref() != Some("--managed-by")
-                || arguments.next().as_deref() != Some(expected_marker.as_str())
-                || arguments.next().is_some()
-            {
-                return Err("Hook relay 收到了多余参数".to_owned());
-            }
-            relay_stdin(tool, &tool_slug, &event)
-        });
+    let arguments = parse_relay_arguments(std::env::args_os())?;
+    let arguments = match arguments {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            let exit_code = error.exit_code();
+            let _ = error.print();
+            return Some(exit_code);
+        }
+    };
+    let result = validate_relay_arguments(&arguments)
+        .and_then(|tool| relay_stdin(tool, &arguments.tool_slug, &arguments.event));
     Some(match result {
         Ok(()) => 0,
         Err(error) => {
@@ -57,6 +58,34 @@ pub fn run_from_process_args() -> Option<i32> {
             1
         }
     })
+}
+
+fn parse_relay_arguments<I, T>(arguments: I) -> Option<Result<HookRelayArguments, clap::Error>>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let mut arguments = arguments.into_iter();
+    let executable = arguments.next()?;
+    let first_argument = arguments.next()?;
+    if first_argument.clone().into() != OsStr::new(HOOK_RELAY_ARGUMENT) {
+        return None;
+    }
+    Some(HookRelayArguments::try_parse_from(
+        iter::once(executable)
+            .chain(iter::once(first_argument))
+            .chain(arguments),
+    ))
+}
+
+fn validate_relay_arguments(arguments: &HookRelayArguments) -> Result<AiTool, String> {
+    let tool = tool_from_slug(&arguments.tool_slug)
+        .ok_or_else(|| format!("Hook relay 不支持 AI 工具：{}", arguments.tool_slug))?;
+    let expected_marker = managed_hook_marker(tool);
+    if arguments.managed_by != expected_marker {
+        return Err("Hook relay 的管理标识与 AI 工具不匹配".to_owned());
+    }
+    Ok(tool)
 }
 
 fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> Result<(), String> {
@@ -123,6 +152,102 @@ mod tests {
 
     use super::*;
     use crate::domain::monitor::{MinimalHookPayload, minimize_native_hook_payload};
+
+    #[test]
+    fn clap_parses_managed_hook_relay_arguments() {
+        let parsed = parse_relay_arguments([
+            "AIMonitor",
+            HOOK_RELAY_ARGUMENT,
+            "codex",
+            "PostToolUse",
+            "--managed-by",
+            "AIMonitor|tool=codex",
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            parsed,
+            HookRelayArguments {
+                tool_slug: "codex".to_owned(),
+                event: "PostToolUse".to_owned(),
+                managed_by: "AIMonitor|tool=codex".to_owned(),
+            }
+        );
+        assert_eq!(validate_relay_arguments(&parsed), Ok(AiTool::Codex));
+    }
+
+    #[test]
+    fn clap_relay_accepts_every_configured_tool_slug_and_canonical_marker() {
+        for (slug, tool) in [
+            ("codex", AiTool::Codex),
+            ("claude-code", AiTool::ClaudeCode),
+            ("cursor", AiTool::Cursor),
+            ("opencode", AiTool::OpenCode),
+            ("workbuddy", AiTool::WorkBuddy),
+            ("hermes", AiTool::Hermes),
+            ("openclaw", AiTool::OpenClaw),
+            ("codebuddy", AiTool::CodeBuddy),
+        ] {
+            let marker = managed_hook_marker(tool);
+            let parsed = parse_relay_arguments([
+                "AIMonitor",
+                HOOK_RELAY_ARGUMENT,
+                slug,
+                "contract-probe",
+                "--managed-by",
+                &marker,
+            ])
+            .unwrap()
+            .unwrap();
+
+            assert_eq!(validate_relay_arguments(&parsed), Ok(tool));
+        }
+    }
+
+    #[test]
+    fn clap_rejects_incomplete_or_extra_relay_arguments() {
+        let missing_marker =
+            parse_relay_arguments(["AIMonitor", HOOK_RELAY_ARGUMENT, "codex", "Stop"]).unwrap();
+        assert!(missing_marker.is_err());
+
+        let extra = parse_relay_arguments([
+            "AIMonitor",
+            HOOK_RELAY_ARGUMENT,
+            "codex",
+            "Stop",
+            "--managed-by",
+            "AIMonitor|tool=codex",
+            "unexpected",
+        ])
+        .unwrap();
+        assert!(extra.is_err());
+    }
+
+    #[test]
+    fn non_relay_process_arguments_leave_tauri_startup_untouched() {
+        assert!(parse_relay_arguments(["AIMonitor", "--silent"]).is_none());
+        assert!(parse_relay_arguments(["AIMonitor"]).is_none());
+    }
+
+    #[test]
+    fn relay_management_marker_must_match_the_tool() {
+        let parsed = parse_relay_arguments([
+            "AIMonitor",
+            HOOK_RELAY_ARGUMENT,
+            "codex",
+            "Stop",
+            "--managed-by",
+            "AIMonitor|tool=cursor",
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            validate_relay_arguments(&parsed),
+            Err("Hook relay 的管理标识与 AI 工具不匹配".to_owned())
+        );
+    }
 
     #[test]
     fn relay_http_request_contains_only_the_minimal_envelope() {

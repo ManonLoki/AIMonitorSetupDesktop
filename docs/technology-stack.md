@@ -32,6 +32,7 @@
 | 用途 | 选择 | 当前锁定版本 | 使用边界 |
 | --- | --- | --- | --- |
 | 远端 HTTP | reqwest | 0.12.28 | 仅由 Rust application 层访问 AiMonitor 设备接口 |
+| 命令行解析 | Clap | 4.6.4 | 仅用于解析并校验轻量 Hook relay 的内部命令行参数；桌面 GUI 启动参数不进入 Clap |
 | 图片解码/缩放/编码 | image（启用 `bmp`、`gif`、`jpeg`、`png`、`webp` feature） | 0.25.10 | 仅由 Rust domain 层在图片上传前使用：JPEG/PNG 长边超过 800px 时等比缩小并重新编码；GIF 校验后原样透传；BMP 与静态 WebP 转 PNG，动画 WebP 保留帧和延时转 GIF，避免依赖展示屏的 WebP 支持 |
 | 局域网服务发现 | mdns-sd | 0.20.2 | 仅由 Rust application 层发现 `_aimonitor._tcp.local.` 设备 |
 | 网卡与广播地址 | if-addrs | 0.15.0 | 仅由 Rust application 层枚举可用 IPv4 网卡并发送 UDP 定向广播 |
@@ -48,7 +49,8 @@ macOS 都显示 `AIMonitor`，不会退回 Cargo 包名 `ai-monitor-setup`。
 本机 Hook 接口使用 Rust 标准库 `TcpListener`，仅绑定
 `127.0.0.1:10240`，协议面只覆盖短连接 POST JSON，不引入通用 Web
 框架或额外 runner 脚本。命令型 Hook 复用同一个 `AIMonitor` 二进制的
-`--aimonitor-hook-relay` 轻量模式，把 AI 原生 stdin 归约为四字段小信封；Windows
+`--aimonitor-hook-relay` 轻量模式，并由 Clap 严格解析其工具、事件与管理标识参数，
+再把 AI 原生 stdin 归约为四字段小信封；Windows
 不依赖 PowerShell/curl，因此不受 PowerShell 5.1 代码页和 CLIXML 错误流影响。
 APK/Desktop 转发继续使用 `reqwest`；`blocking` feature 同时供轻量 relay 和
 后台设备投递线程使用，均不占用 Tauri UI 线程。

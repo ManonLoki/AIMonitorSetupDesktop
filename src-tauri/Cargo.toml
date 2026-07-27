@@ -1,6 +1,6 @@
 [package]
 name = "ai-monitor-setup"
-version = "2.0.12"
+version = "2.1.0"
 description = "AI monitor desktop application"
 authors = ["ManonLoki"]
 edition = "2024"
@@ -20,6 +20,7 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+clap = { version = "4.6.4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
 if-addrs = "0.15.0"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 mdns-sd = "0.20.2"

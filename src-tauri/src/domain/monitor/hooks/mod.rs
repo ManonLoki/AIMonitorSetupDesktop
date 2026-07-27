@@ -244,7 +244,7 @@ fn entry_is_managed<P: HookProtocol + ?Sized>(entry: &Value, protocol: &P) -> bo
         .any(|command| command_has_marker(command, &managed_hook_marker(protocol.tool())))
 }
 
-pub(super) fn managed_hook_marker(tool: AiTool) -> String {
+pub(crate) fn managed_hook_marker(tool: AiTool) -> String {
     format!("{MANAGED_HOOK_PREFIX}|tool={}", protocol(tool).slug())
 }
 
