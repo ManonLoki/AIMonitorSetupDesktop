@@ -20,11 +20,11 @@ fn every_generated_hook_contract_uses_canonical_slugs_events_and_markers() {
         let slug = protocol.slug();
         let marker = managed_hook_marker(tool);
         let preview = generate_test_hook_config(tool).unwrap();
-        let normalized_content = preview.content.replace("^`|", "|");
 
         assert_eq!(tool_from_slug(slug), Some(tool));
-        assert_eq!(marker, format!("AIMonitor|tool={slug}"));
-        assert!(normalized_content.contains(&marker));
+        assert_eq!(marker, format!("AIMonitor:tool={slug}"));
+        assert!(preview.content.contains(&marker));
+        assert!(!preview.content.contains("AIMonitor|tool="));
         for event in protocol.events() {
             assert!(
                 preview.content.contains(event.name),
@@ -51,7 +51,7 @@ fn every_generated_hook_contract_uses_canonical_slugs_events_and_markers() {
             if matches!(tool, AiTool::CodeBuddy | AiTool::WorkBuddy) {
                 assert!(preview.content.contains(&format!("'{slug}'")));
             } else {
-                assert!(preview.content.contains(&format!("\\\"{slug}\\\"")));
+                assert!(preview.content.contains(slug));
             }
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             assert!(preview.content.contains(&format!("'{slug}'")));
@@ -80,7 +80,7 @@ fn cursor_preview_uses_cursor_event_names_and_shape() {
     assert!(preview.content.contains("\"sessionEnd\""));
     assert!(preview.content.contains("--aimonitor-hook-relay"));
     assert!(preview.content.contains("cursor"));
-    assert!(preview.content.contains("AIMonitor|tool=cursor"));
+    assert!(preview.content.contains("AIMonitor:tool=cursor"));
     // 不应出现 Claude Code 专属的 Notification 事件（小写形式）。
     assert!(!preview.content.contains("\"notification\""));
     // Cursor 的条目结构没有 "type": "command" 字段（这是 Claude/Codex 的结构）。
@@ -102,7 +102,7 @@ fn claude_preview_covers_permission_and_lifecycle_events() {
     assert!(preview.content.contains("\"StopFailure\""));
     assert!(preview.content.contains("\"SessionEnd\""));
     assert!(preview.content.contains("\"Notification\""));
-    assert!(preview.content.contains("AIMonitor|tool=claude-code"));
+    assert!(preview.content.contains("AIMonitor:tool=claude-code"));
     assert!(preview.content.contains("--aimonitor-hook-relay"));
     let value: Value = serde_json::from_str(&preview.content).unwrap();
     // Notification 事件应带有 idle_prompt matcher，用于区分具体子类型。
@@ -126,12 +126,7 @@ fn codex_preview_uses_pascal_case_and_nested_handlers() {
     assert!(!preview.content.contains("\"Error\""));
     assert!(preview.content.contains("\"PostToolUse\""));
     assert!(preview.content.contains("\"SessionEnd\""));
-    assert!(
-        preview
-            .content
-            .replace("^`|", "|")
-            .contains("AIMonitor|tool=codex")
-    );
+    assert!(preview.content.contains("AIMonitor:tool=codex"));
     assert!(preview.content.contains("\"type\": \"command\""));
     assert!(!preview.content.contains("\"commandWindows\""));
     assert!(!preview.content.contains("powershell.exe"));
@@ -171,14 +166,58 @@ fn windows_hook_command_quotes_the_installed_executable_without_powershell() {
         .as_str()
         .unwrap();
 
-    assert!(command.starts_with("cmd.exe /d /s /c \"\"C:\\Program Files"));
-    assert!(command.contains("AIMonitor.exe\" --aimonitor-hook-relay"));
-    assert!(command.ends_with("--managed-by AIMonitor^`|tool=codex\""));
+    assert!(command.starts_with("cmd.exe /d /s /c \"`\"C:\\Program Files"));
+    assert!(command.contains("AIMonitor.exe`\" --aimonitor-hook-relay"));
+    assert!(command.ends_with("--managed-by `\"AIMonitor:tool=codex`\"\""));
     assert!(!command.contains("powershell"));
     assert!(command_has_marker(
         command,
         &managed_hook_marker(AiTool::Codex)
     ));
+}
+
+#[test]
+#[cfg(target_os = "windows")]
+fn windows_command_variants_survive_a_powershell_host_without_creating_a_pipeline() {
+    use std::{
+        fs,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aimonitor hook command {unique}"));
+    fs::create_dir_all(&root).unwrap();
+    let probe = root.join("argument probe.cmd");
+    let output = root.join("arguments.txt");
+    fs::write(
+        &probe,
+        format!("@echo off\r\n>\"{}\" echo %*\r\n", output.display()),
+    )
+    .unwrap();
+
+    for tool in [AiTool::Codex, AiTool::Cursor] {
+        let protocol = protocol(tool);
+        let commands = super::managed_commands(protocol, protocol.events()[0].name, &probe);
+        let command = &commands.windows_powershell_host;
+        let result = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", command])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}: {}",
+            protocol.name(),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let arguments = fs::read_to_string(&output).unwrap();
+        assert!(arguments.contains(&format!("AIMonitor:tool={}", protocol.slug())));
+    }
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -188,7 +227,7 @@ fn work_buddy_preview_targets_its_independent_settings_file() {
     assert_eq!(preview.filename, ".workbuddy/settings.json");
     assert!(preview.content.contains("\"SessionStart\""));
     assert!(preview.content.contains("\"PermissionRequest\""));
-    assert!(preview.content.contains("AIMonitor|tool=workbuddy"));
+    assert!(preview.content.contains("AIMonitor:tool=workbuddy"));
     let value: Value = serde_json::from_str(&preview.content).unwrap();
     let command = value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
         .as_str()
@@ -203,7 +242,7 @@ fn open_code_preview_is_a_managed_global_plugin() {
     let preview = generate_test_hook_config(AiTool::OpenCode).unwrap();
 
     assert_eq!(preview.filename, ".config/opencode/plugins/aimonitor.js");
-    assert!(preview.content.contains("AIMonitor|tool=opencode"));
+    assert!(preview.content.contains("AIMonitor:tool=opencode"));
     assert!(preview.content.contains("session.status"));
     assert!(preview.content.contains("permission.asked"));
     assert!(preview.content.contains("/api/hooks/opencode"));
@@ -229,7 +268,7 @@ fn code_buddy_preview_uses_its_native_config_and_posix_hook_command() {
 
     assert_eq!(preview.filename, ".codebuddy/settings.json");
     assert!(preview.content.contains("\"PermissionRequest\""));
-    assert!(preview.content.contains("AIMonitor|tool=codebuddy"));
+    assert!(preview.content.contains("AIMonitor:tool=codebuddy"));
     assert!(preview.content.contains("--aimonitor-hook-relay"));
     assert!(!preview.content.contains("powershell.exe"));
 }
@@ -240,7 +279,7 @@ fn hermes_preview_contains_a_complete_managed_plugin() {
     let auxiliary = generate_hook_auxiliary_configs(AiTool::Hermes);
 
     assert_eq!(preview.filename, ".hermes/plugins/aimonitor/__init__.py");
-    assert!(preview.content.contains("AIMonitor|tool=hermes"));
+    assert!(preview.content.contains("AIMonitor:tool=hermes"));
     assert!(preview.content.contains("ctx.register_hook"));
     assert!(preview.content.contains("pre_approval_request"));
     assert!(preview.content.contains("api_request_error"));
@@ -266,7 +305,7 @@ fn open_claw_preview_contains_a_complete_managed_plugin() {
     let preview = generate_test_hook_config(AiTool::OpenClaw).unwrap();
     let auxiliary = generate_hook_auxiliary_configs(AiTool::OpenClaw);
 
-    assert!(preview.content.contains("AIMonitor|tool=openclaw"));
+    assert!(preview.content.contains("AIMonitor:tool=openclaw"));
     assert!(preview.content.contains("before_agent_run"));
     assert!(preview.content.contains("agent_end"));
     assert!(preview.content.contains("/api/hooks/openclaw"));
@@ -279,6 +318,6 @@ fn open_claw_preview_contains_a_complete_managed_plugin() {
     assert!(
         auxiliary
             .iter()
-            .all(|file| file.content.contains("AIMonitor|tool=openclaw"))
+            .all(|file| file.content.contains("AIMonitor:tool=openclaw"))
     );
 }

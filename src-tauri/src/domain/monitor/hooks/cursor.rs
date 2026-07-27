@@ -1,8 +1,8 @@
 use serde_json::{Map, Value, json};
 
-use super::{
-    HookEvent, HookEventKind, HookProtocol, ManagedCommands, entry_is_managed, platform_command,
-};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use super::platform_command;
+use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands, entry_is_managed};
 use crate::domain::monitor::{AiTool, HookBehavior};
 
 pub(super) static CURSOR: CursorProtocol = CursorProtocol;
@@ -101,7 +101,11 @@ impl HookProtocol for CursorProtocol {
     // Cursor 的条目本身就是 `{ command }`，不像其他工具需要额外套一层
     // `{ hooks: [...] }`。
     fn handler(&self, _event: &HookEvent, commands: &ManagedCommands) -> Value {
-        json!([{ "command": platform_command(commands) }])
+        #[cfg(target_os = "windows")]
+        let command = &commands.windows_powershell_host;
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let command = platform_command(commands);
+        json!([{ "command": command }])
     }
 
     // Cursor 的配置文件根节点需要额外的 `version` 字段。

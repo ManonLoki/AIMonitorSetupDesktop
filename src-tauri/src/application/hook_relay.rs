@@ -174,7 +174,7 @@ mod tests {
             "codex",
             "PostToolUse",
             "--managed-by",
-            "AIMonitor|tool=codex",
+            "AIMonitor:tool=codex",
         ])
         .unwrap()
         .unwrap();
@@ -184,7 +184,7 @@ mod tests {
             HookRelayArguments {
                 tool_slug: "codex".to_owned(),
                 event: "PostToolUse".to_owned(),
-                managed_by: "AIMonitor|tool=codex".to_owned(),
+                managed_by: "AIMonitor:tool=codex".to_owned(),
             }
         );
         assert_eq!(validate_relay_arguments(&parsed), Ok(AiTool::Codex));
@@ -230,7 +230,7 @@ mod tests {
             "codex",
             "Stop",
             "--managed-by",
-            "AIMonitor|tool=codex",
+            "AIMonitor:tool=codex",
             "unexpected",
         ])
         .unwrap();
@@ -251,7 +251,7 @@ mod tests {
             "codex",
             "Stop",
             "--managed-by",
-            "AIMonitor|tool=cursor",
+            "AIMonitor:tool=cursor",
         ])
         .unwrap()
         .unwrap();

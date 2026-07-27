@@ -27,7 +27,8 @@ pub fn minimize_native_hook_payload(
     if native_json.is_empty() || native_json.len() > MAX_NATIVE_HOOK_INPUT_BYTES {
         return Err("AI Hook 原始输入为空或过大".to_owned());
     }
-    let source = serde_json::from_slice::<Value>(native_json)
+    let decoded = decode_native_json(native_json)?;
+    let source = serde_json::from_str::<Value>(&decoded)
         .map_err(|error| format!("AI Hook 原始 JSON 无效：{error}"))?;
     let source = source
         .as_object()
@@ -59,6 +60,38 @@ pub fn minimize_native_hook_payload(
         ),
         status: scalar_field(source, "status"),
     })
+}
+
+// Hook 宿主在 Windows 上可能给 UTF-8 JSON 添加 BOM，也可能通过原生文本管道
+// 输出 UTF-16LE/BE。统一在业务解析边界去掉 BOM 并转成 Rust UTF-8 字符串，避免
+// serde_json 把 BOM 当成 JSON 的第一个非法字符。
+fn decode_native_json(native_json: &[u8]) -> Result<String, String> {
+    if let Some(utf8) = native_json.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return std::str::from_utf8(utf8)
+            .map(str::to_owned)
+            .map_err(|error| format!("AI Hook 原始 JSON 不是有效 UTF-8：{error}"));
+    }
+    if let Some(utf16_le) = native_json.strip_prefix(&[0xFF, 0xFE]) {
+        return decode_utf16(utf16_le, u16::from_le_bytes);
+    }
+    if let Some(utf16_be) = native_json.strip_prefix(&[0xFE, 0xFF]) {
+        return decode_utf16(utf16_be, u16::from_be_bytes);
+    }
+    std::str::from_utf8(native_json)
+        .map(str::to_owned)
+        .map_err(|error| format!("AI Hook 原始 JSON 不是有效 UTF-8：{error}"))
+}
+
+fn decode_utf16(bytes: &[u8], decode_unit: fn([u8; 2]) -> u16) -> Result<String, String> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err("AI Hook 原始 UTF-16 JSON 的字节数无效".to_owned());
+    }
+    let units = bytes
+        .chunks_exact(2)
+        .map(|chunk| decode_unit([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16(&units)
+        .map_err(|error| format!("AI Hook 原始 JSON 不是有效 UTF-16：{error}"))
 }
 
 // 按候选字段名列表依次查找第一个存在的字符串值；不同工具对同一概念
@@ -126,5 +159,29 @@ mod tests {
 
         assert_eq!(payload.session_id.as_deref(), Some("workbuddy-session-1"));
         assert_eq!(payload.turn_id.as_deref(), Some("workbuddy-turn-2"));
+    }
+
+    #[test]
+    fn native_hook_payload_accepts_utf8_and_utf16_boms() {
+        let json = r#"{"hook_event_name":"stop","conversation_id":"会话-1"}"#;
+        let mut utf8_bom = vec![0xEF, 0xBB, 0xBF];
+        utf8_bom.extend_from_slice(json.as_bytes());
+
+        let utf16 = json.encode_utf16().collect::<Vec<_>>();
+        let mut windows_unicode = vec![0xFF, 0xFE];
+        windows_unicode.extend(utf16.iter().flat_map(|unit| unit.to_le_bytes()));
+        let mut big_endian_unicode = vec![0xFE, 0xFF];
+        big_endian_unicode.extend(utf16.iter().flat_map(|unit| unit.to_be_bytes()));
+
+        for native in [utf8_bom, windows_unicode, big_endian_unicode] {
+            let payload = minimize_native_hook_payload(&native, "stop").unwrap();
+            assert_eq!(payload.session_id.as_deref(), Some("会话-1"));
+        }
+    }
+
+    #[test]
+    fn malformed_utf16_bom_input_is_rejected_without_panicking() {
+        let error = minimize_native_hook_payload(&[0xFF, 0xFE, b'{'], "stop").unwrap_err();
+        assert!(error.contains("UTF-16"));
     }
 }

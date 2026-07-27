@@ -304,7 +304,7 @@ fn hermes_plugin_is_written_as_one_managed_set() {
     let plugin_root = hermes_home.join("plugins/aimonitor");
     let entrypoint = fs::read_to_string(plugin_root.join("__init__.py")).unwrap();
     let manifest = fs::read_to_string(plugin_root.join("plugin.yaml")).unwrap();
-    assert!(entrypoint.contains("AIMonitor|tool=hermes"));
+    assert!(entrypoint.contains("AIMonitor:tool=hermes"));
     assert!(entrypoint.contains("/api/hooks/hermes"));
     assert!(manifest.contains("name: aimonitor"));
 

@@ -4,7 +4,7 @@ use serde_json::{Map, Value, json};
 
 use super::{
     AiTool, HookConfigPreview, HookProtocol, MANAGED_HOOK_PREFIX, ManagedCommands,
-    managed_hook_marker, protocol, shell_quote,
+    contains_managed_marker, managed_hook_marker, protocol, shell_quote,
 };
 
 // 为一个工具生成完整的主配置文件内容：独立配置文件路线的工具直接返回其
@@ -118,9 +118,8 @@ pub fn merge_hook_config(
 /// 文件即使位于默认目录，也不能因为应用升级而被自动加入新条目。
 pub fn contains_managed_hook_config(existing_content: &str, tool: AiTool) -> bool {
     let protocol = protocol(tool);
-    let marker = managed_hook_marker(tool);
     if protocol.standalone_config().is_some() {
-        return existing_content.contains(&marker);
+        return contains_managed_marker(existing_content, tool);
     }
     let Ok(existing) = serde_json::from_str::<Value>(existing_content) else {
         return false;
@@ -168,15 +167,12 @@ fn managed_commands(
         windows_quote(event),
         windows_quote(&marker),
     );
-    // Codex Desktop 在 Windows 上先用 PowerShell 解析 command，再交给 CMD。
-    // 同时转义两层 shell 的管道符，避免管理标识中的 `|` 被当成管道执行。
-    let powershell_marker = marker.replace('|', "^`|");
     let windows_powershell_host = format!(
         "cmd.exe /d /s /c \"{} --aimonitor-hook-relay {} {} --managed-by {}\"",
-        windows_quote(&executable),
-        windows_quote(protocol.slug()),
-        windows_quote(event),
-        powershell_marker,
+        powershell_host_quote(&executable),
+        powershell_host_quote(protocol.slug()),
+        powershell_host_quote(event),
+        powershell_host_quote(&marker),
     );
     ManagedCommands {
         posix,
@@ -190,6 +186,12 @@ fn windows_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+// PowerShell 会先解析整条 command，再把 `/c` 后的文本交给 CMD。用反引号保护
+// 内层双引号，才能同时保住含空格的安装路径和参数边界。
+fn powershell_host_quote(value: &str) -> String {
+    format!("`\"{}`\"", value.replace('`', "``").replace('"', "`\""))
+}
+
 // 判断一条已写入配置的命令字符串是否携带指定的管理标识；除了直接文本匹配，
 // 还要能识别被 PowerShell `-EncodedCommand` 编码过的旧版本命令。
 pub(super) fn command_has_marker(command: &str, marker: &str) -> bool {
@@ -197,6 +199,7 @@ pub(super) fn command_has_marker(command: &str, marker: &str) -> bool {
         value.contains(&format!("{marker}'")) || value.contains(&format!("{marker}\""))
     };
     contains_marker(command)
+        || contains_marker(&command.replace("`\"", "\""))
         || contains_marker(&command.replace("^`|", "|"))
         || decoded_hook_command(command)
             .as_deref()

@@ -35,7 +35,6 @@ fn codex_merge_is_idempotent_and_preserves_other_commands() {
     // 同一托管 handler 只有当前平台命令携带一个标记，没有因重复合并继续累积。
     assert_eq!(
         serialized
-            .replace("^`|", "|")
             .matches(&managed_hook_marker(AiTool::Codex))
             .count(),
         1
@@ -46,7 +45,7 @@ fn codex_merge_is_idempotent_and_preserves_other_commands() {
 
 #[test]
 fn managed_marker_still_recognizes_legacy_powershell_commands() {
-    let marker = managed_hook_marker(AiTool::Codex);
+    let marker = "AIMonitor|tool=codex";
     let script = format!("$null = '{marker}'; Invoke-RestMethod -Uri 'http://127.0.0.1'");
     let encoded = script
         .encode_utf16()
@@ -57,12 +56,12 @@ fn managed_marker_still_recognizes_legacy_powershell_commands() {
         encode_base64(&encoded)
     );
 
-    assert!(command_has_marker(&command, &marker));
+    assert!(command_has_marker(&command, marker));
 }
 
 #[test]
 fn managed_config_detection_finds_legacy_command_but_not_user_hooks() {
-    let marker = managed_hook_marker(AiTool::Codex);
+    let marker = "AIMonitor|tool=codex";
     let script = format!("$null = '{marker}'; Invoke-RestMethod -Body $body");
     let encoded = script
         .encode_utf16()
@@ -112,7 +111,8 @@ fn cursor_merge_is_idempotent_and_preserves_other_commands() {
     let stop = serde_json::to_string(&value["hooks"]["stop"]).unwrap();
 
     assert_eq!(stop.matches("other-app stop").count(), 1);
-    assert_eq!(stop.matches("AIMonitor|tool=cursor").count(), 1);
+    assert_eq!(stop.matches("AIMonitor:tool=cursor").count(), 1);
+    assert!(!stop.contains("AIMonitor|tool=cursor"));
 }
 
 // 验证当现有配置的根结构不合法（hooks 应为对象却是数组）时，合并应返回错误而不是崩溃。

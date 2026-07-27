@@ -131,7 +131,9 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
   relay 会对本机中继的连接拒绝额外重试 5 次、每次间隔 1 秒。该重试只覆盖
   工具到本机中继的启动竞态，不改变中继到设备“一次转换只投递一次”的规则。
 - 所有新托管 Hook 命令统一携带大小写固定的 `AIMonitor` 前缀（完整标识如
-  `AIMonitor|tool=codex`）。合并、覆盖和后续删除只按该前缀识别。
+  `AIMonitor:tool=codex`）。标识不包含 shell 元字符，避免 Windows Hook 宿主在
+  `cmd.exe` 前额外经过 PowerShell 时把参数拆成管道。合并、覆盖和后续删除只按
+  该前缀识别；旧版 `AIMonitor|tool=...` 标识仅用于识别并自动迁移。
 - Windows 原生 command Hook 执行器只写入标准 `cmd.exe` 命令；不同时混入
   POSIX `command` 与 `commandWindows`。WorkBuddy、CodeBuddy 是例外：客户端自身
   固定通过随产品提供的 Git Bash/POSIX shell 执行 Hook，因此配置直接启动
