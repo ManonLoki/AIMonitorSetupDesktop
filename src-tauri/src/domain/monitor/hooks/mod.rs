@@ -311,6 +311,34 @@ pub fn merge_hook_config(
     })
 }
 
+/// 判断现有配置中是否包含指定工具的 `AIMonitor` 受管条目。
+///
+/// 启动时的升级修复只允许重写已经由 `AIMonitor` 管理的配置；用户自己的 Hook
+/// 文件即使位于默认目录，也不能因为应用升级而被自动加入新条目。
+pub fn contains_managed_hook_config(existing_content: &str, tool: AiTool) -> bool {
+    let protocol = protocol(tool);
+    let marker = managed_hook_marker(tool);
+    if protocol.standalone_config().is_some() {
+        return existing_content.contains(&marker);
+    }
+    let Ok(existing) = serde_json::from_str::<Value>(existing_content) else {
+        return false;
+    };
+    existing
+        .get("hooks")
+        .and_then(Value::as_object)
+        .is_some_and(|hooks| {
+            hooks.values().any(|entries| {
+                let Some(entries) = entries.as_array() else {
+                    return false;
+                };
+                let mut remaining = entries.clone();
+                protocol.remove_managed_entries(&mut remaining);
+                remaining != *entries
+            })
+        })
+}
+
 fn managed_commands(
     protocol: &dyn HookProtocol,
     event: &str,

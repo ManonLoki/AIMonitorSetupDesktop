@@ -73,6 +73,10 @@ pub fn run() {
             // 加载监控服务：基于应用数据目录与用户主目录初始化状态，失败则转换为 io::Error
             let service =
                 MonitorService::load(&app_data_dir, &config_home).map_err(std::io::Error::other)?;
+            // 升级后自动替换已存在的 AIMonitor 旧 Hook 命令，避免 Windows 上旧版
+            // PowerShell 条目继续把 transcript_path 等原始字段直接发给严格 listener。
+            // 迁移失败不阻止桌面端启动；用户仍可在 Hooks 管理中手动重写并看到错误。
+            let _ = service.migrate_existing_managed_hook_configs();
             // 启动 hook 监听器，接收外部工具发来的 hook 事件
             service.start_hook_listener();
             // 启动后台设备发现任务，定期在局域网内扫描监控设备

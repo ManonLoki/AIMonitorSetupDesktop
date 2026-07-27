@@ -132,8 +132,10 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
   工具到本机中继的启动竞态，不改变中继到设备“一次转换只投递一次”的规则。
 - 所有新托管 Hook 命令统一携带大小写固定的 `AIMonitor` 前缀（完整标识如
   `AIMonitor|tool=codex`）。合并、覆盖和后续删除只按该前缀识别。
-- 不包含旧 Hook 标识、runner 文件或旧 Profile 字段/行为的兼容与迁移层；
-  当前规则只按 `AIMonitor` 标识幂等更新，非 AIMonitor Hook 始终保留。
+- 启动时只迁移配置文件中已存在且带 `AIMonitor` 标识的受管 Hook 条目，用于把
+  旧版直接转发原始 stdin 的命令升级为当前轻量 relay；不会为未配置的工具创建
+  Hook，也不会修改非 AIMonitor Hook。除此之外不保留旧 Hook 标识、runner 文件
+  或旧 Profile 字段/行为的兼容层。
 - Profile 按“设备 ID + AI 工具”隔离保存显示位置及四种显示状态，不保存
   设备名称或地址。设备名称和地址作为独立设备路由保存在桌面端；显示用户名是
   所有设备共享的全局设置。左下角当前设备只决定监控管理页正在编辑哪台设备。

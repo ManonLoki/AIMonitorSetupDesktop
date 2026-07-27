@@ -12,8 +12,9 @@ use hooks::{HookEventKind, event_kind};
 #[cfg(test)]
 use hooks::{MANAGED_HOOK_PREFIX, command_has_marker, hook_transition, managed_hook_marker};
 pub use hooks::{
-    ai_tool_name, generate_hook_auxiliary_configs, generate_hook_config, hook_config_filename,
-    hook_requires_review, hook_restart_required, merge_hook_config, tool_from_slug,
+    ai_tool_name, contains_managed_hook_config, generate_hook_auxiliary_configs,
+    generate_hook_config, hook_config_filename, hook_requires_review, hook_restart_required,
+    merge_hook_config, tool_from_slug,
 };
 
 // 未配置设备时的占位基地址，仅用于默认值展示。
@@ -1130,11 +1131,12 @@ mod tests {
         HookConfigDirectories, HookConfigPreview, HookContent, HookEventDecision, HookPhase,
         HookStateMachine, HookTransition, MANAGED_HOOK_PREFIX, MAX_DISCOVERY_INTERVAL_MINUTES,
         MAX_TRACKED_HOOK_SESSIONS, MAX_UPLOAD_IMAGE_EDGE, MonitorDeviceRoute, MonitorSettings,
-        SavedMonitorData, command_has_marker, default_enabled_ai_tools, encode_base64,
-        generate_hook_auxiliary_configs, generate_hook_config, hook_transition,
-        managed_hook_marker, merge_hook_config, minimize_native_hook_payload, normalize_base_url,
-        normalize_enabled_ai_tools, process_image_upload, validate_discovery_interval_minutes,
-        validate_profile, validate_saved_monitor_data, validate_username,
+        SavedMonitorData, command_has_marker, contains_managed_hook_config,
+        default_enabled_ai_tools, encode_base64, generate_hook_auxiliary_configs,
+        generate_hook_config, hook_transition, managed_hook_marker, merge_hook_config,
+        minimize_native_hook_payload, normalize_base_url, normalize_enabled_ai_tools,
+        process_image_upload, validate_discovery_interval_minutes, validate_profile,
+        validate_saved_monitor_data, validate_username,
     };
 
     fn generate_test_hook_config(tool: AiTool) -> Result<HookConfigPreview, String> {
@@ -1546,6 +1548,36 @@ mod tests {
         );
 
         assert!(command_has_marker(&command, &marker));
+    }
+
+    #[test]
+    fn managed_config_detection_finds_legacy_command_but_not_user_hooks() {
+        let marker = managed_hook_marker(AiTool::Codex);
+        let script = format!("$null = '{marker}'; Invoke-RestMethod -Body $body");
+        let encoded = script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let legacy = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "hooks": [{
+                        "type": "command",
+                        "commandWindows": format!(
+                            "powershell.exe -EncodedCommand {}",
+                            encode_base64(&encoded)
+                        )
+                    }]
+                }]
+            }
+        });
+        let user_only = r#"{"hooks":{"PostToolUse":[{"hooks":[{"command":"my notifier"}]}]}}"#;
+
+        assert!(contains_managed_hook_config(
+            &legacy.to_string(),
+            AiTool::Codex
+        ));
+        assert!(!contains_managed_hook_config(user_only, AiTool::Codex));
     }
 
     // 验证 Cursor 的合并逻辑同样幂等，且能正确保留用户命令、去重已有的托管条目。

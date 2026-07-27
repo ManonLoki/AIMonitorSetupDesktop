@@ -26,7 +26,7 @@ use crate::domain::monitor::{
     AiProfile, AiTool, DEFAULT_HOOK_RELAY_PORT, DiscoveredMonitorDevice, DiscoverySource,
     HookBehavior, HookConfigDirectories, HookConfigLocation, HookConfigWriteResult,
     HookEventDecision, HookStateMachine, HookTransition, MinimalHookPayload, MonitorDeviceRoute,
-    MonitorSettings, SavedMonitorData, ai_tool_name, encode_base64,
+    MonitorSettings, SavedMonitorData, ai_tool_name, contains_managed_hook_config, encode_base64,
     generate_hook_auxiliary_configs, generate_hook_config, hook_config_filename,
     hook_requires_review, hook_restart_required, merge_hook_config, normalize_base_url,
     normalize_enabled_ai_tools, process_image_upload, tool_from_slug, validate_device_route,
@@ -667,6 +667,56 @@ impl MonitorService {
                 ..HookRelayStatus::default()
             })),
         })
+    }
+
+    /// 升级应用后自动刷新已经存在的 `AIMonitor` Hook 条目。
+    ///
+    /// v2.0.10 及更早版本的 Windows 命令会把 AI 客户端原始 stdin 直接 POST
+    /// 到 listener；新版 listener 只接受最小信封。仅靠升级可执行文件不会修改
+    /// 已落盘的旧命令，因此这里在启动时做一次受控迁移。没有 `AIMonitor` 标识的
+    /// 用户配置保持原样，也不会为尚未配置的工具创建文件。
+    pub fn migrate_existing_managed_hook_configs(&self) -> Result<usize, String> {
+        let _write_guard = self
+            .hook_config_write_lock
+            .lock()
+            .map_err(|_| "Hooks 配置迁移锁已损坏".to_owned())?;
+        let data = self
+            .data
+            .read()
+            .map_err(|_| "Hooks 配置迁移读取锁已损坏".to_owned())?;
+        let relay_executable = std::env::current_exe()
+            .map_err(|error| format!("无法定位 AIMonitor Hook relay：{error}"))?;
+        let mut migrated_files = 0;
+
+        for tool in AiTool::ALL {
+            let location = self.hook_config_location(&data, tool);
+            let config_path = PathBuf::from(&location.config_path);
+            let generated = generate_hook_config(tool, &relay_executable)?;
+            let mut generated_files = vec![(config_path, generated)];
+            generated_files.extend(generate_hook_auxiliary_configs(tool).into_iter().map(
+                |preview| {
+                    (
+                        Path::new(&location.directory).join(&preview.filename),
+                        preview,
+                    )
+                },
+            ));
+
+            for (path, generated) in generated_files {
+                let Some(existing) = read_optional_config(&path)? else {
+                    continue;
+                };
+                if !contains_managed_hook_config(&existing, tool) {
+                    continue;
+                }
+                let merged = merge_hook_config(Some(&existing), &generated, tool)?;
+                if merged.content != existing {
+                    write_config(&path, &merged.content)?;
+                    migrated_files += 1;
+                }
+            }
+        }
+        Ok(migrated_files)
     }
 
     // 启动本机 Hook 中继：开一个 TCP 监听线程接收本地 Hook 请求，
@@ -3763,6 +3813,52 @@ mod tests {
             .unwrap();
         assert!(!default_location.is_custom);
         assert_eq!(default_location.directory, detected_directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_migration_replaces_legacy_windows_relay_without_touching_user_only_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-hook-migration-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("home");
+        let codex_dir = config_home.join(".codex");
+        let claude_dir = config_home.join(".claude");
+        fs::create_dir_all(&app_data).unwrap();
+        fs::create_dir_all(&codex_dir).unwrap();
+        fs::create_dir_all(&claude_dir).unwrap();
+        let legacy = r#"{
+          "hooks": {
+            "PostToolUse": [{
+              "hooks": [{
+                "type": "command",
+                "command": "other-app notify",
+                "commandWindows": ": 'AIMonitor|tool=codex'; powershell.exe Invoke-RestMethod -Body $body"
+              }]
+            }]
+          }
+        }"#;
+        let user_only = r#"{"hooks":{"Stop":[{"hooks":[{"command":"my notifier"}]}]}}"#;
+        fs::write(codex_dir.join("hooks.json"), legacy).unwrap();
+        fs::write(claude_dir.join("settings.json"), user_only).unwrap();
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+
+        assert_eq!(service.migrate_existing_managed_hook_configs().unwrap(), 1);
+        let migrated = fs::read_to_string(codex_dir.join("hooks.json")).unwrap();
+        assert!(migrated.contains("--aimonitor-hook-relay"));
+        assert!(!migrated.contains("Invoke-RestMethod"));
+        assert_eq!(
+            fs::read_to_string(claude_dir.join("settings.json")).unwrap(),
+            user_only
+        );
+        assert_eq!(service.migrate_existing_managed_hook_configs().unwrap(), 0);
+
         fs::remove_dir_all(root).unwrap();
     }
 
