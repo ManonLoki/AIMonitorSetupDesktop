@@ -190,7 +190,26 @@ fn expiring_sessions_batches_changes_into_one_final_aggregate_transition() {
     assert_eq!(machine.tracked_session_count(), 1);
     assert_eq!(
         machine.expire_inactive_sessions(Duration::from_secs(26), Duration::from_secs(10),),
-        HookEventDecision::Forward(HookTransition::Release)
+        HookEventDecision::Ignore
+    );
+    assert_eq!(machine.tracked_session_count(), 0);
+}
+
+#[test]
+fn expiring_last_active_session_falls_back_to_idle_without_releasing_slot() {
+    let mut machine = HookStateMachine::default();
+    machine.apply_event_with_status_at(
+        AiTool::ClaudeCode,
+        "UserPromptSubmit",
+        Some("active"),
+        Some("turn"),
+        None,
+        Duration::ZERO,
+    );
+
+    assert_eq!(
+        machine.expire_inactive_sessions(Duration::from_secs(11), Duration::from_secs(10)),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
     );
     assert_eq!(machine.tracked_session_count(), 0);
 }

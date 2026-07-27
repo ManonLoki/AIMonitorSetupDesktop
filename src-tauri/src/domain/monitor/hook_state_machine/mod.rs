@@ -275,6 +275,8 @@ impl HookStateMachine {
     }
 
     /// 一次性清理所有到期记录，并只根据清理前后的最终聚合状态返回一个决定。
+    /// 超时仅用于回收内部记录，不能等同于明确的 `SessionEnd` 并释放设备槽位：
+    /// 最后一个空闲会话到期时保留设备上的空闲内容，非空闲状态则回落为空闲展示。
     /// 使用 `saturating_sub` 防御调用方意外传入较小时间值，避免下溢。
     pub(crate) fn expire_inactive_sessions(
         &mut self,
@@ -284,7 +286,17 @@ impl HookStateMachine {
         let previous = self.aggregate_phase();
         self.sessions
             .retain(|_, session| observed_at.saturating_sub(session.last_seen_at) < timeout);
-        phase_decision(previous, self.aggregate_phase())
+        let next = self.aggregate_phase();
+        if next != HookPhase::Released {
+            return phase_decision(previous, next);
+        }
+
+        match previous {
+            HookPhase::Running | HookPhase::Asking | HookPhase::Error => {
+                HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+            }
+            HookPhase::Released | HookPhase::Idle => HookEventDecision::Ignore,
+        }
     }
 
     /// 为新会话腾出一个位置：优先淘汰最旧墓碑，其次最旧非活跃会话，

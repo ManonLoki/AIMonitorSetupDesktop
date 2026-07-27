@@ -236,7 +236,7 @@ fn timeout_and_real_hook_mailbox_replacements_keep_hook_metrics_exact() {
     let timeout = || PendingHookRelay {
         tool: AiTool::Codex,
         hook_type: "SessionTimeout".to_owned(),
-        transition: HookTransition::Release,
+        transition: HookTransition::Display(HookBehavior::Idle),
         counts_as_hook: false,
     };
     let real_hook = || PendingHookRelay {

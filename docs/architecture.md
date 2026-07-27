@@ -171,8 +171,10 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
   `session_id` 隔离任务、按 `turn_id` 拒绝旧轮次事件，再聚合为工具的唯一展示
   状态，因此一个任务的 Stop/退出不会覆盖另一个仍在工作的任务。时间只用于
   有界回收：调用方注入单调时间，连续 30 分钟没有事件的会话或终止 tombstone
-  会被批量清理；每个工具同时最多跟踪 256 个会话，洪峰超过上限时优先淘汰最旧
-  tombstone 和非活跃会话。`SessionStart` 建立空闲展示，`UserPromptSubmit`
+  会被批量清理；超时只回收内部记录，不释放设备槽位，最后的非空闲状态会回落
+  到空闲展示，而已处于空闲的面板内容保持不变。每个工具同时最多跟踪 256 个会话，
+  洪峰超过上限时优先淘汰最旧 tombstone 和非活跃会话。`SessionStart` 建立空闲展示，
+  `UserPromptSubmit`
   等真实工作起点进入运行，`Stop`（包括用户中断后的轮次停止）回到空闲；
   `SessionEnd` 清空会话内容并留下有时限的终止 tombstone，重算剩余会话后仅在
   确实没有其他任务时释放展示位。Stop/End 后的 `PostToolUse`、`SubagentStop`、

@@ -69,8 +69,8 @@ const HOOK_EVENT_QUEUE_CAPACITY: usize = 256;
 // 每个工具在自己的投递 worker 前最多只需要一个唤醒令牌：若该工具已经有
 // 一个待发送的最新状态，后续事件只覆盖 mailbox，不再重复排队唤醒。
 const HOOK_RELAY_WAKE_QUEUE_CAPACITY: usize = 1;
-// 会话长时间没有任何事件时视为孤儿并回收。新事件仍可按当前事件语义重新建立
-// 隐式会话，因此超时不会让后续真实状态永久丢失。
+// 会话长时间没有任何事件时视为孤儿并回收。超时只清理内部记录，不释放设备槽位；
+// 新事件仍可按当前事件语义重新建立隐式会话，因此不会让后续真实状态永久丢失。
 const HOOK_SESSION_INACTIVITY_TIMEOUT: Duration = Duration::from_mins(30);
 // 即使没有新 Hook，也按此粒度清扫一次超时会话。
 const HOOK_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
