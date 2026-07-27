@@ -17,10 +17,12 @@
    或其他浏览器 HTTP 客户端。远端网络访问应由 Rust 实现。
 6. React 组件中不得直接裸调用 `invoke`；调用必须经过 feature 的 `api/`
    和 `queries/` 层。
-7. Command 只做传输适配；业务判断放入 Rust `domain/` 或后续
+7. Command 只做传输适配；业务判断放入 Rust `domain/` 或
    `application/` 层。
 8. 不添加未使用依赖。依赖变更必须同步锁文件与
    `docs/technology-stack.md`。
+9. 单个源文件不得超过 400 行；超出时按职责拆分为子模块（`domain/monitor/`
+   与 `application/monitor/` 已按此原则拆分为多个文件/子目录）。
 
 ## 完成标准
 

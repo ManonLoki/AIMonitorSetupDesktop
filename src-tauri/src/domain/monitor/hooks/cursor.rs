@@ -89,6 +89,8 @@ impl HookProtocol for CursorProtocol {
         EVENTS
     }
 
+    // Cursor 的 `stop` 事件通过 `status == "error"` 区分正常完成与异常结束，
+    // 而不是像其他工具那样用独立的事件名表达错误。
     fn event_kind(&self, event: &HookEvent, status: Option<&str>) -> HookEventKind {
         if event.name == "stop" && status == Some("error") {
             return HookEventKind::State(HookBehavior::Error);
@@ -96,14 +98,19 @@ impl HookProtocol for CursorProtocol {
         event.kind
     }
 
+    // Cursor 的条目本身就是 `{ command }`，不像其他工具需要额外套一层
+    // `{ hooks: [...] }`。
     fn handler(&self, _event: &HookEvent, commands: &ManagedCommands) -> Value {
         json!([{ "command": platform_command(commands) }])
     }
 
+    // Cursor 的配置文件根节点需要额外的 `version` 字段。
     fn config_root(&self, hooks: Map<String, Value>) -> Value {
         json!({ "version": 1, "hooks": Value::Object(hooks) })
     }
 
+    // 条目结构比其他工具更扁平（没有嵌套的 `hooks` 数组），因此过滤逻辑
+    // 直接对条目本身判断，而不是像默认实现那样先展开内层处理器列表。
     fn remove_managed_entries(&self, entries: &mut Vec<Value>) {
         entries.retain(|entry| !entry_is_managed(entry, self));
     }

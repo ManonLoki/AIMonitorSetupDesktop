@@ -61,12 +61,16 @@ pub fn minimize_native_hook_payload(
     })
 }
 
+// 按候选字段名列表依次查找第一个存在的字符串值；不同工具对同一概念
+// （如 turn_id/turnId/generation_id）命名不一致，因此需要多个候选名。
 fn string_field(source: &Map<String, Value>, names: &[&str]) -> Option<String> {
     names
         .iter()
         .find_map(|name| source.get(*name).and_then(Value::as_str).map(str::to_owned))
 }
 
+// 读取一个字段并转成字符串，兼容字符串/布尔/数字三种 JSON 标量类型
+// （如 Cursor 的 `status` 字段可能是布尔值）。
 fn scalar_field(source: &Map<String, Value>, name: &str) -> Option<String> {
     match source.get(name) {
         Some(Value::String(value)) => Some(value.clone()),

@@ -81,7 +81,7 @@ Never copy Rust-returned data into Jotai — that creates a second source of tru
 3. Jotai is for client UI state only — never backend data or Query results.
 4. Frontend talks to Rust only via typed Tauri `invoke` (through `shared/tauri/invoke-command.ts` → feature `api/`). No Axios/fetch/other HTTP clients in the frontend; remote network access is implemented in Rust (currently `reqwest`, used only from the Rust application layer to talk to AiMonitor device HTTP APIs; `mdns-sd` is used only from the Rust application layer for `_aimonitor._tcp.local.` discovery).
 5. React components must never call raw `invoke` directly — always go through a feature's `api/` and `queries/` layers.
-6. Tauri commands do transport adaptation only; business decisions belong in Rust `domain/` (or a future `application/` layer), never in the command handler.
+6. Tauri commands do transport adaptation only; business decisions belong in Rust `domain/` or `application/`, never in the command handler.
 7. Don't add unused dependencies. Any dependency change must update the lockfile and `docs/technology-stack.md` together.
 8. Rust DTOs serialize with serde `camelCase` to match TypeScript. Command failures must return serializable, UI-meaningful errors — don't parse free-text errors on the frontend to infer business state.
 

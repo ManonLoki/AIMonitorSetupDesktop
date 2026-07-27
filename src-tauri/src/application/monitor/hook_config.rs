@@ -37,6 +37,7 @@ pub(super) fn detect_hook_config_directories(config_home: &Path) -> HookConfigDi
     }
 }
 
+// Windows 上 Hermes 默认安装在 %LOCALAPPDATA%\hermes。
 #[cfg(target_os = "windows")]
 fn default_hermes_home(config_home: &Path) -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -46,6 +47,7 @@ fn default_hermes_home(config_home: &Path) -> PathBuf {
         .join("hermes")
 }
 
+// POSIX 系统上 Hermes 默认安装在 ~/.hermes。
 #[cfg(not(target_os = "windows"))]
 fn default_hermes_home(config_home: &Path) -> PathBuf {
     config_home.join(".hermes")

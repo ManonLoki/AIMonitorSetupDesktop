@@ -31,6 +31,8 @@ pub(super) fn record_hook_results(
     record_hook_results_with_accounting(status, tool, hook_type, behavior, forwarded, errors, true);
 }
 
+// `record_hook_results` 的通用实现：`counts_as_hook` 为 false 时（内部超时
+// 释放）跳过收到数/待处理数的记账，只更新最近工具/类型/转发结果。
 pub(super) fn record_hook_results_with_accounting(
     status: &Arc<RwLock<HookRelayStatus>>,
     tool: AiTool,

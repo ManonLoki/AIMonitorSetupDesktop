@@ -52,6 +52,8 @@ fn relay_hook(
     relay_hook_with_accounting(client, data, online_devices, status, &pending);
 }
 
+// 处理一个已通过去抖判定的 Hook 事件：找出所有配置了该工具的设备（在线
+// 快照优先），并发转发，最终把结果（成功数/错误列表）记录进中继状态。
 pub(super) fn relay_hook_with_accounting(
     client: &reqwest::blocking::Client,
     data: &Arc<RwLock<SavedMonitorData>>,

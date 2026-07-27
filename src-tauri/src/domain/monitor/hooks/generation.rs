@@ -7,6 +7,8 @@ use super::{
     managed_hook_marker, protocol, shell_quote,
 };
 
+// 为一个工具生成完整的主配置文件内容：独立配置文件路线的工具直接返回其
+// `standalone_config`；否则按该工具声明的事件表逐个生成 handler 并组装。
 pub fn generate_hook_config(
     tool: AiTool,
     relay_executable: &Path,
@@ -33,6 +35,8 @@ pub fn generate_hook_config(
     })
 }
 
+// 把新生成的配置与现有文件合并：先移除现有文件中该工具的旧受管条目，
+// 再插入新生成的条目，用户手动添加的其他事件/命令原样保留。
 pub fn merge_hook_config(
     existing_content: Option<&str>,
     generated: &HookConfigPreview,
@@ -136,6 +140,8 @@ pub fn contains_managed_hook_config(existing_content: &str, tool: AiTool) -> boo
         })
 }
 
+// 为一个事件生成三种平台变体的托管命令字符串（POSIX shell、Windows CMD、
+// 经 PowerShell 转发到 CMD），供各工具的 `handler` 按自身协议组装配置条目。
 fn managed_commands(
     protocol: &dyn HookProtocol,
     event: &str,
@@ -179,10 +185,13 @@ fn managed_commands(
     }
 }
 
+// 按 Windows CMD 双引号规则转义一个参数。
 fn windows_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+// 判断一条已写入配置的命令字符串是否携带指定的管理标识；除了直接文本匹配，
+// 还要能识别被 PowerShell `-EncodedCommand` 编码过的旧版本命令。
 pub(super) fn command_has_marker(command: &str, marker: &str) -> bool {
     let contains_marker = |value: &str| {
         value.contains(&format!("{marker}'")) || value.contains(&format!("{marker}\""))
@@ -194,6 +203,8 @@ pub(super) fn command_has_marker(command: &str, marker: &str) -> bool {
             .is_some_and(contains_marker)
 }
 
+// 若命令已是明文则原样返回；否则尝试从 `-EncodedCommand <base64>` 参数中解码出
+// PowerShell 用的 UTF-16LE 编码原文，用于兼容旧版本生成的托管命令。
 fn decoded_hook_command(command: &str) -> Option<String> {
     if command.contains(MANAGED_HOOK_PREFIX) {
         return Some(command.to_owned());
@@ -212,7 +223,9 @@ fn decoded_hook_command(command: &str) -> Option<String> {
     String::from_utf16(&utf16).ok()
 }
 
+// 标准 Base64 解码（自实现，配套 `encode_base64`），非法字符或长度直接返回 None。
 fn decode_base64(value: &str) -> Option<Vec<u8>> {
+    // 把一个 Base64 字符映射回它代表的 6 位数值。
     fn sextet(byte: u8) -> Option<u8> {
         match byte {
             b'A'..=b'Z' => Some(byte - b'A'),
@@ -246,3 +259,5 @@ fn decode_base64(value: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_merge;

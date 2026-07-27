@@ -93,6 +93,8 @@ fn parse_hook_envelope(
     })
 }
 
+// 清理并校验一个可选的上下文字段（session_id/turn_id/status）：去除首尾空白，
+// 空字符串规整为 None，超出长度上限则拒绝，避免把畸形值一路带进状态机和队列。
 fn normalize_hook_context_field(
     value: Option<String>,
     field: &str,

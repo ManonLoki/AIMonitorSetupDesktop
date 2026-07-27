@@ -50,6 +50,8 @@ pub fn process_image_upload(
     }
 }
 
+// 解码静态图片，超出最大边长时按比例缩放，`convert_to_png` 为真时
+// 重新编码为 PNG（用于设备端原生不支持的格式），否则保留原格式重新编码。
 fn process_static_upload(
     filename: &str,
     bytes: &[u8],
@@ -126,6 +128,8 @@ fn process_static_upload(
     })
 }
 
+// WebP 需要单独处理：静态图直接走通用缩放/转码路径；动图设备端不支持，
+// 转成动图 GIF 保留动画效果（GIF 是设备原生支持的动图格式）。
 fn process_webp_upload(filename: &str, bytes: &[u8]) -> Result<ProcessedUploadImage, String> {
     use image::AnimationDecoder as _;
 
@@ -180,6 +184,8 @@ fn process_webp_upload(filename: &str, bytes: &[u8]) -> Result<ProcessedUploadIm
     })
 }
 
+// 格式转换后文件名后缀需要同步更新（如 .webp → .gif），否则设备端会按
+// 旧后缀误判格式。
 fn replace_image_extension(filename: &str, extension: &str) -> String {
     std::path::Path::new(filename)
         .with_extension(extension)

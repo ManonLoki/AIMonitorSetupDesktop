@@ -77,7 +77,12 @@ impl HookEvent {
 
 pub(super) struct ManagedCommands {
     pub posix: String,
+    // 这两个字段只在 `#[cfg(target_os = "windows")]` 分支中被读取
+    // （见 `platform_command` 与 `codex.rs` 的 `handler`），非 Windows 平台
+    // 编译时会被 dead_code 检查误判为未使用，因此显式允许。
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub windows: String,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub windows_powershell_host: String,
 }
 
@@ -132,6 +137,8 @@ pub(super) trait HookProtocol: Sync {
         json!({ "hooks": Value::Object(hooks) })
     }
 
+    /// 从一组 hooks 事件条目中过滤掉本工具的受管处理器；一个条目的处理器
+    /// 全部被移除后，连同这个条目本身一起丢弃，避免留下空壳分组。
     fn remove_managed_entries(&self, entries: &mut Vec<Value>) {
         entries.retain_mut(|group| {
             let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
@@ -153,6 +160,7 @@ pub(super) trait HookProtocol: Sync {
     }
 }
 
+// 按 AI 工具类型分发到对应的静态协议实现，是本模块内所有分发函数的唯一入口。
 pub(super) fn protocol(tool: AiTool) -> &'static dyn HookProtocol {
     match tool {
         AiTool::Codex => &codex::CODEX,
@@ -166,10 +174,12 @@ pub(super) fn protocol(tool: AiTool) -> &'static dyn HookProtocol {
     }
 }
 
+// 返回该工具主配置文件的文件名，供 application 层拼出完整配置路径。
 pub fn hook_config_filename(tool: AiTool) -> &'static str {
     protocol(tool).config_filename()
 }
 
+// 返回该工具的展示名称，用于转发请求体的 `aiName` 字段等面向用户的场景。
 pub fn ai_tool_name(tool: AiTool) -> &'static str {
     protocol(tool).name()
 }
@@ -191,6 +201,7 @@ pub fn tool_from_slug(slug: &str) -> Option<AiTool> {
         .find(|tool| protocol(*tool).slug() == slug)
 }
 
+// 返回该工具随主配置一同写入的辅助文件（如插件清单），未实现的工具返回空列表。
 pub fn generate_hook_auxiliary_configs(tool: AiTool) -> Vec<HookConfigPreview> {
     protocol(tool).auxiliary_configs()
 }
@@ -227,6 +238,7 @@ pub(super) fn command_group(command: &str, matcher: Option<&str>) -> Value {
     Value::Array(vec![group])
 }
 
+// 按编译目标平台选取应写入配置的命令变体（Windows 用 PowerShell 包装，POSIX 直接执行）。
 pub(super) fn platform_command(commands: &ManagedCommands) -> &str {
     #[cfg(target_os = "windows")]
     {
@@ -249,6 +261,8 @@ pub(crate) fn forwards_every_event(tool: AiTool) -> bool {
     )
 }
 
+// 判断一条 hooks 配置条目是否携带该工具的 AIMonitor 管理标识，
+// 供 `remove_managed_entries` 默认实现筛选出可安全移除的条目。
 fn entry_is_managed<P: HookProtocol + ?Sized>(entry: &Value, protocol: &P) -> bool {
     ["command", "commandWindows"]
         .into_iter()
@@ -256,10 +270,13 @@ fn entry_is_managed<P: HookProtocol + ?Sized>(entry: &Value, protocol: &P) -> bo
         .any(|command| command_has_marker(command, &managed_hook_marker(protocol.tool())))
 }
 
+// 生成写入配置命令中的 `--managed-by` 标识：relay 子进程与 `entry_is_managed`
+// 都据此判断一条 hooks 记录是否由本应用生成/管理。
 pub(crate) fn managed_hook_marker(tool: AiTool) -> String {
     format!("{MANAGED_HOOK_PREFIX}|tool={}", protocol(tool).slug())
 }
 
+// 按 POSIX shell 单引号规则转义一个参数，供拼接进生成的托管命令字符串。
 pub(super) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

@@ -14,6 +14,7 @@ use crate::domain::monitor::{
     SavedMonitorData, device::HookContent,
 };
 
+// 构造一个测试用的 AI Profile：Codex 工具、槽位 1，四种行为各配一张示例图片。
 pub(super) fn test_profile() -> AiProfile {
     AiProfile {
         device_id: "screen-1".to_owned(),
@@ -35,6 +36,8 @@ pub(super) fn test_profile() -> AiProfile {
     }
 }
 
+// 构造两台设备各配一个 AI 工具（Codex/ClaudeCode）的已保存数据，
+// 供跨工具投递隔离性测试使用。
 pub(super) fn two_tool_delivery_data(
     codex_address: SocketAddr,
     claude_address: SocketAddr,

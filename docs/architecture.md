@@ -172,7 +172,7 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
   listener 正文上限为 4 KiB，并以 `deny_unknown_fields` 严格拒绝契约外字段；
   `X-AIMonitor-Hook-Type` 必须存在且必须与正文事件一致。
   事件到状态的归一化、重复事件消除、迟到完成事件抑制和会话释放全部由
-  `domain/monitor.rs` 的状态机决定。事件先后与迟到判断不依赖时间窗口：状态机按
+  `domain/monitor/hook_state_machine` 的状态机决定。事件先后与迟到判断不依赖时间窗口：状态机按
   `session_id` 隔离任务、按 `turn_id` 拒绝旧轮次事件，再聚合为工具的唯一展示
   状态，因此一个任务的 Stop/退出不会覆盖另一个仍在工作的任务。时间只用于
   有界回收：调用方注入单调时间，连续 30 分钟没有事件的会话或终止 tombstone

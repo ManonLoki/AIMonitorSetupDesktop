@@ -37,6 +37,8 @@ pub(super) struct PendingHookRelay {
 pub(super) type PendingHookRelays = Arc<Mutex<HashMap<AiTool, VecDeque<PendingHookRelay>>>>;
 type HookRelayWakeSenders = HashMap<AiTool, mpsc::SyncSender<()>>;
 
+// 启动状态机线程与其背后的每工具投递 worker：从 `receiver` 收到的原始事件
+// 先推进状态机，产出的转发/超时决定再交给 `enqueue_latest_hook_relay` 排队。
 pub(crate) fn spawn_hook_worker(
     client: &reqwest::blocking::Client,
     receiver: mpsc::Receiver<IncomingHookEvent>,
@@ -136,6 +138,8 @@ pub(crate) fn spawn_hook_worker(
     });
 }
 
+// 为每个 AI 工具各起一个独立的投递 worker 与唤醒通道，返回这些通道供
+// enqueue/expire 逻辑按工具寻址唤醒，实现跨工具互不阻塞的并行投递。
 fn spawn_hook_delivery_workers(
     client: &reqwest::blocking::Client,
     pending_relays: &PendingHookRelays,
@@ -160,6 +164,8 @@ fn spawn_hook_delivery_workers(
     wake_senders
 }
 
+// 单个工具的投递 worker：每次被唤醒后持续从该工具的队列头部取出待投递项，
+// 逐个转发给设备，直到队列清空才重新阻塞等待下一次唤醒。
 fn spawn_hook_delivery_worker(
     tool: AiTool,
     client: reqwest::blocking::Client,
@@ -189,6 +195,11 @@ fn spawn_hook_delivery_worker(
     });
 }
 
+// 把一个待转发状态放进对应工具的队列，并在队列由空变为非空时唤醒投递
+// worker。两种排队策略二选一（按 `forwards_every_event` 判断）：
+// - 未经状态机验证的工具：整队直通，每个事件都单独入队，不做任何合并；
+// - 经状态机验证的四个工具：沿用 latest-wins 语义，新状态只替换队尾（保留
+//   投递 worker 正在处理的队首），旧的队尾状态被覆盖时仍需完成记账。
 fn enqueue_latest_hook_relay(
     pending_relays: &PendingHookRelays,
     wake_senders: &HookRelayWakeSenders,
@@ -200,9 +211,11 @@ fn enqueue_latest_hook_relay(
         let queue = pending.entry(tool).or_default();
         let should_wake = queue.is_empty();
         let displaced = if forwards_every_event(tool) {
+            // 直通模式：不合并，直接追加到队尾。
             queue.push_back(relay);
             None
         } else {
+            // latest-wins 模式：弹出旧队尾（若存在）后压入新状态。
             let displaced = queue.pop_back();
             queue.push_back(relay);
             displaced
@@ -267,6 +280,8 @@ fn enqueue_latest_hook_relay(
     }
 }
 
+// 扫描所有工具的状态机，回收长时间无事件的孤儿会话；每个产生的内部释放
+// 转换都按普通事件一样入队投递（`counts_as_hook: false`，不计入收到数）。
 fn expire_inactive_hook_sessions(
     state_machines: &mut HashMap<AiTool, HookStateMachine>,
     observed_at: Duration,

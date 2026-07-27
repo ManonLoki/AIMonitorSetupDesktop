@@ -27,6 +27,9 @@ const LOCAL_RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 // 整个请求（含 listener 入队处理）的超时，略宽松于连接超时。
 const LOCAL_RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
+// Hook relay 子进程模式的命令行参数：`--aimonitor-hook-relay <tool> <event>
+// --managed-by <marker>`。由 clap 负责解析与校验参数形状，值本身的合法性
+// （工具是否存在、marker 是否匹配该工具）在 `validate_relay_arguments` 中检查。
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(name = "AIMonitor")]
 struct HookRelayArguments {
@@ -60,6 +63,9 @@ pub fn run_from_process_args() -> Option<i32> {
     })
 }
 
+// 只有当第二个参数正好是 `--aimonitor-hook-relay` 时才进入 relay 模式（返回
+// `Some`）；否则返回 `None`，让调用方继续走正常的 Tauri GUI 启动路径。
+// 命中 relay 模式后交给 clap 解析剩余参数，形状错误由 `Some(Err(..))` 承载。
 fn parse_relay_arguments<I, T>(arguments: I) -> Option<Result<HookRelayArguments, clap::Error>>
 where
     I: IntoIterator<Item = T>,
@@ -78,6 +84,9 @@ where
     ))
 }
 
+// 校验 relay 参数的语义（clap 只保证了形状）：tool_slug 必须是受支持的 AI
+// 工具，且 marker 必须与该工具的 `managed_hook_marker` 完全一致，防止配置
+// 文件被篡改后触发跨工具的 Hook 请求。
 fn validate_relay_arguments(arguments: &HookRelayArguments) -> Result<AiTool, String> {
     let tool = tool_from_slug(&arguments.tool_slug)
         .ok_or_else(|| format!("Hook relay 不支持 AI 工具：{}", arguments.tool_slug))?;
@@ -88,6 +97,8 @@ fn validate_relay_arguments(arguments: &HookRelayArguments) -> Result<AiTool, St
     Ok(tool)
 }
 
+// 读取 AI 工具通过 stdin 传来的原生 Hook JSON，压缩成最小信封后 POST 给本机
+// listener；Cursor 要求 command Hook 的 stdout 必须是合法 JSON。
 fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> Result<(), String> {
     let mut native_json = Vec::new();
     io::stdin()
@@ -111,6 +122,8 @@ fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> Result<(), String>
     Ok(())
 }
 
+// 把最小信封 POST 给本机 listener；仅在连接失败（listener 可能还没起来）时
+// 按固定次数/间隔重试，设备侧拒绝或其他网络错误直接返回错误不重试。
 fn post_minimal_payload(
     client: &Client,
     endpoint: &str,

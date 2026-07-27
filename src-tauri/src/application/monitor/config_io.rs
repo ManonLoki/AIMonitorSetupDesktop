@@ -2,6 +2,8 @@
 // 供 `service_lifecycle.rs` 里持久化配置/Hook 文件的逻辑使用。
 use std::{fs, path::Path};
 
+// 读取一个可能尚不存在的配置文件；文件缺失视为正常情况（返回 None），
+// 而不是错误——首次写入前，Hook 配置和应用存储文件都可能还不存在。
 pub(super) fn read_optional_config(path: &Path) -> Result<Option<String>, String> {
     match fs::read_to_string(path) {
         Ok(content) => Ok(Some(content)),
