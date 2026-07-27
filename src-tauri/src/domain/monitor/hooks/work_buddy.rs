@@ -1,8 +1,6 @@
 use serde_json::Value;
 
-use super::{
-    HookEvent, HookEventKind, HookProtocol, ManagedCommands, command_group, platform_command,
-};
+use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands, command_group};
 use crate::domain::monitor::{AiTool, HookBehavior};
 
 pub(super) static WORK_BUDDY: WorkBuddyProtocol = WorkBuddyProtocol;
@@ -74,11 +72,18 @@ impl HookProtocol for WorkBuddyProtocol {
     }
 
     fn handler(&self, event: &HookEvent, commands: &ManagedCommands) -> Value {
-        command_group(platform_command(commands), event.matcher)
+        // WorkBuddy 的内置 CodeBuddy 引擎在 Windows 上也固定使用 Git Bash
+        // 执行 command Hook；cmd.exe 包装命令会被 Bash 错误解析。
+        command_group(&commands.posix, event.matcher)
     }
 
     // WorkBuddy 需要在 Hooks 配置面板中审核并信任新增规则。
     fn requires_review(&self) -> bool {
+        true
+    }
+
+    // WorkBuddy 会在会话启动时快照用户 Hooks，写入后需重启或新建会话。
+    fn restart_required(&self) -> bool {
         true
     }
 }

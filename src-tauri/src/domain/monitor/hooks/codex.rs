@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use super::platform_command;
 use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands};
 use crate::domain::monitor::{AiTool, HookBehavior};
 
@@ -63,10 +65,13 @@ impl HookProtocol for CodexProtocol {
     }
 
     fn handler(&self, event: &HookEvent, commands: &ManagedCommands) -> Value {
+        #[cfg(target_os = "windows")]
+        let command = &commands.windows_powershell_host;
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let command = platform_command(commands);
         let mut command = json!({
             "type": "command",
-            "command": commands.posix,
-            "commandWindows": commands.windows,
+            "command": command,
         });
         if event.name == "SessionEnd" {
             command["timeout"] = json!(3);

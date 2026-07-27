@@ -3,8 +3,8 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::super::{
-    MANAGED_HOOK_PREFIX, generate_hook_auxiliary_configs, hook_transition, managed_hook_marker,
-    protocol, tool_from_slug,
+    MANAGED_HOOK_PREFIX, generate_hook_auxiliary_configs, hook_restart_required, hook_transition,
+    managed_hook_marker, protocol, tool_from_slug,
 };
 use super::{command_has_marker, contains_managed_hook_config, generate_hook_config};
 use crate::domain::monitor::{
@@ -23,10 +23,11 @@ fn every_generated_hook_contract_uses_canonical_slugs_events_and_markers() {
         let slug = protocol.slug();
         let marker = managed_hook_marker(tool);
         let preview = generate_test_hook_config(tool).unwrap();
+        let normalized_content = preview.content.replace("^`|", "|");
 
         assert_eq!(tool_from_slug(slug), Some(tool));
         assert_eq!(marker, format!("AIMonitor|tool={slug}"));
-        assert!(preview.content.contains(&marker));
+        assert!(normalized_content.contains(&marker));
         for event in protocol.events() {
             assert!(
                 preview.content.contains(event.name),
@@ -49,6 +50,13 @@ fn every_generated_hook_contract_uses_canonical_slugs_events_and_markers() {
             );
         } else {
             assert!(preview.content.contains("--aimonitor-hook-relay"));
+            #[cfg(target_os = "windows")]
+            if matches!(tool, AiTool::CodeBuddy | AiTool::WorkBuddy) {
+                assert!(preview.content.contains(&format!("'{slug}'")));
+            } else {
+                assert!(preview.content.contains(&format!("\\\"{slug}\\\"")));
+            }
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             assert!(preview.content.contains(&format!("'{slug}'")));
             assert!(preview.content.contains("--managed-by"));
         }
@@ -107,8 +115,8 @@ fn claude_preview_covers_permission_and_lifecycle_events() {
 }
 
 // 验证 Codex 生成的 Hooks 配置：事件名使用 PascalCase 且没有独立 Error 事件；
-// 每个 handler 同时包含 POSIX 命令和 Windows 命令，二者都直接调用当前
-// AIMonitor 可执行文件的轻量 relay 子命令，不依赖 PowerShell/curl。
+// 每个 handler 只写入当前编译目标对应的命令，直接调用 AIMonitor 自身的
+// 轻量 relay 子命令，不依赖 PowerShell/curl。
 #[test]
 fn codex_preview_uses_pascal_case_and_nested_handlers() {
     let preview = generate_test_hook_config(AiTool::Codex).unwrap();
@@ -121,14 +129,19 @@ fn codex_preview_uses_pascal_case_and_nested_handlers() {
     assert!(!preview.content.contains("\"Error\""));
     assert!(preview.content.contains("\"PostToolUse\""));
     assert!(preview.content.contains("\"SessionEnd\""));
-    assert!(preview.content.contains("AIMonitor|tool=codex"));
+    assert!(
+        preview
+            .content
+            .replace("^`|", "|")
+            .contains("AIMonitor|tool=codex")
+    );
     assert!(preview.content.contains("\"type\": \"command\""));
-    assert!(preview.content.contains("\"commandWindows\""));
+    assert!(!preview.content.contains("\"commandWindows\""));
     assert!(!preview.content.contains("powershell.exe"));
     assert!(!preview.content.contains("Invoke-RestMethod"));
     assert!(preview.content.contains("/opt/AIMonitor/AIMonitor"));
     let value: Value = serde_json::from_str(&preview.content).unwrap();
-    // 取出 SessionEnd 的 POSIX 命令，确认其中携带 relay 子命令和事件名。
+    // 取出 SessionEnd 的当前平台命令，确认其中携带 relay 子命令和事件名。
     let session_end = value["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
@@ -136,20 +149,20 @@ fn codex_preview_uses_pascal_case_and_nested_handlers() {
     assert!(session_end.contains("codex"));
     assert!(session_end.contains("SessionEnd"));
     assert_eq!(value["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
-    // Windows 命令保持明文、携带托管标记，旧版 EncodedCommand 仍可由清理逻辑识别。
-    let windows = value["hooks"]["Stop"][0]["hooks"][0]["commandWindows"]
+    let command = value["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    assert!(windows.contains("--aimonitor-hook-relay"));
-    assert!(windows.contains(MANAGED_HOOK_PREFIX));
+    assert!(command.contains("--aimonitor-hook-relay"));
+    assert!(command.contains(MANAGED_HOOK_PREFIX));
     // command_has_marker 应能在未解码的编码命令上直接识别出托管标记。
     assert!(command_has_marker(
-        windows,
+        command,
         &managed_hook_marker(AiTool::Codex)
     ));
 }
 
 #[test]
+#[cfg(target_os = "windows")]
 fn windows_hook_command_quotes_the_installed_executable_without_powershell() {
     let preview = generate_hook_config(
         AiTool::Codex,
@@ -157,14 +170,18 @@ fn windows_hook_command_quotes_the_installed_executable_without_powershell() {
     )
     .unwrap();
     let value: Value = serde_json::from_str(&preview.content).unwrap();
-    let command = value["hooks"]["PostToolUse"][0]["hooks"][0]["commandWindows"]
+    let command = value["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
 
     assert!(command.starts_with("cmd.exe /d /s /c \"\"C:\\Program Files"));
     assert!(command.contains("AIMonitor.exe\" --aimonitor-hook-relay"));
-    assert!(command.ends_with("--managed-by \"AIMonitor|tool=codex\"\""));
+    assert!(command.ends_with("--managed-by AIMonitor^`|tool=codex\""));
     assert!(!command.contains("powershell"));
+    assert!(command_has_marker(
+        command,
+        &managed_hook_marker(AiTool::Codex)
+    ));
 }
 
 #[test]
@@ -175,6 +192,13 @@ fn work_buddy_preview_targets_its_independent_settings_file() {
     assert!(preview.content.contains("\"SessionStart\""));
     assert!(preview.content.contains("\"PermissionRequest\""));
     assert!(preview.content.contains("AIMonitor|tool=workbuddy"));
+    let value: Value = serde_json::from_str(&preview.content).unwrap();
+    let command = value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(command.starts_with("'/opt/AIMonitor/AIMonitor'"));
+    assert!(!command.contains("cmd.exe"));
+    assert!(hook_restart_required(AiTool::WorkBuddy));
 }
 
 #[test]
@@ -287,13 +311,13 @@ fn codex_merge_is_idempotent_and_preserves_other_commands() {
 
     // 用户的 "other-app notify" 命令应恰好保留一份，没有被重复或删除。
     assert_eq!(serialized.matches("other-app notify").count(), 1);
-    // 同一托管 handler 的 POSIX/Windows 命令各带一个标记；总计两个说明
-    // 只有一组托管 handler，没有因重复合并继续累积。
+    // 同一托管 handler 只有当前平台命令携带一个标记，没有因重复合并继续累积。
     assert_eq!(
         serialized
+            .replace("^`|", "|")
             .matches(&managed_hook_marker(AiTool::Codex))
             .count(),
-        2
+        1
     );
     // 用户手工添加的 permissions 字段应被完整保留。
     assert_eq!(value["permissions"]["allow"][0], "Bash");

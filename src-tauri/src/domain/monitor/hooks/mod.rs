@@ -78,6 +78,7 @@ impl HookEvent {
 pub(super) struct ManagedCommands {
     pub posix: String,
     pub windows: String,
+    pub windows_powershell_host: String,
 }
 
 /// 单个工具必须实现的完整 Hook 协议契约。
@@ -227,14 +228,25 @@ pub(super) fn command_group(command: &str, matcher: Option<&str>) -> Value {
 }
 
 pub(super) fn platform_command(commands: &ManagedCommands) -> &str {
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     {
         &commands.windows
     }
-    #[cfg(not(windows))]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         &commands.posix
     }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    compile_error!("AIMonitor Hook command generation only supports Windows, macOS, and Linux");
+}
+
+pub(crate) fn forwards_every_event(tool: AiTool) -> bool {
+    // 只有具备稳定会话/轮次语义并经过状态机适配验证的四个工具执行抑制；
+    // 其他协议按事件到达顺序直通，避免公共状态机误丢上游事件。
+    !matches!(
+        tool,
+        AiTool::Codex | AiTool::ClaudeCode | AiTool::Cursor | AiTool::OpenCode
+    )
 }
 
 fn entry_is_managed<P: HookProtocol + ?Sized>(entry: &Value, protocol: &P) -> bool {

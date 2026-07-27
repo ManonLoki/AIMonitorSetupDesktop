@@ -132,6 +132,10 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
   工具到本机中继的启动竞态，不改变中继到设备“一次转换只投递一次”的规则。
 - 所有新托管 Hook 命令统一携带大小写固定的 `AIMonitor` 前缀（完整标识如
   `AIMonitor|tool=codex`）。合并、覆盖和后续删除只按该前缀识别。
+- Windows 原生 command Hook 执行器只写入标准 `cmd.exe` 命令；不同时混入
+  POSIX `command` 与 `commandWindows`。WorkBuddy、CodeBuddy 是例外：客户端自身
+  固定通过随产品提供的 Git Bash/POSIX shell 执行 Hook，因此配置直接启动
+  `AIMonitor.exe`，不调用外部脚本、curl 或用户另行安装的 Bash。
 - 启动时只迁移配置文件中已存在且带 `AIMonitor` 标识的受管 Hook 条目，用于把
   旧版直接转发原始 stdin 的命令升级为当前轻量 relay；不会为未配置的工具创建
   Hook，也不会修改非 AIMonitor Hook。除此之外不保留旧 Hook 标识、runner 文件
@@ -162,7 +166,8 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
   入口禁用，页面也不发起设备业务请求；侧栏明确显示“无可用设备”。
 - 命令型 Hook 的轻量 relay 在 HTTP 之前解析工具写入 stdin 的原生 JSON，只保留
   `hook_event_name`、`session_id`、`turn_id`、`status`；同时兼容从原生输入读取
-  Cursor 的 `conversation_id`/`generation_id`，但在线路上统一使用规范字段。
+  Cursor 的 `conversation_id`/`generation_id` 与 WorkBuddy 的 camelCase
+  `sessionId`/`turnId`，但在线路上统一使用规范字段。
   prompt、transcript、tool input/output 等无关或敏感大字段不会进入 listener。
   listener 正文上限为 4 KiB，并以 `deny_unknown_fields` 严格拒绝契约外字段；
   `X-AIMonitor-Hook-Type` 必须存在且必须与正文事件一致。
@@ -181,6 +186,9 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
   `PostCompact` 不会重新激活状态，直到出现新的明确工作起点。桌面端晚于 AI
   会话启动时，真实工作起点、进度、询问、异常或停止事件可以建立隐式会话并立即
   更新展示；单独到达的完成类事件没有足够信息证明仍在运行，直接忽略且不留记录。
+  只有 Codex、Claude Code、Cursor、OpenCode 执行重复状态消除、旧轮次判断、
+  结束墓碑和多会话聚合抑制；其他 AI 工具统一采用逐事件直通策略，每个受支持
+  Hook 均按协议映射立即转发，不进行抑制。
 - Codex、Claude Code、Cursor、OpenCode、WorkBuddy、Hermes、OpenClaw、CodeBuddy
   的协议实现分别位于 `domain/monitor/hooks/`
   下的独立文件，并统一实现 `HookProtocol`。Trait 负责约束工具元数据、事件语义、
@@ -189,7 +197,9 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
   轻量 relay 边界归一化为 session/turn，`stop.status=error` 归一化为异常展示。
   OpenCode 使用官方自动发现的全局插件文件订阅公开事件流，独立文件只允许覆盖
   带 AIMonitor 标识的内容；WorkBuddy 使用其内置 CodeBuddy Agent 引擎自 v2.48
-  起独立的 `~/.workbuddy/settings.json`，不与 CodeBuddy CLI 配置混用。
+  起独立的 `~/.workbuddy/settings.json`，不与 CodeBuddy CLI 配置混用；其 command
+  Hook 在所有平台均由内置 Git Bash/POSIX shell 执行，写入后需重启 WorkBuddy
+  或新建会话以重新加载配置。
   Hermes 以 `~/.hermes/plugins/aimonitor/` 原生插件订阅官方 observer hooks，
   使用会话、轮次、工具、审批与 API 异常事件计算状态；插件需由用户执行
   `hermes plugins enable aimonitor` 明确信任启用。CodeBuddy 使用
@@ -204,7 +214,9 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
   最多保留一个发送中状态和一个待发送的最新状态。尚未发送的中间态被新状态覆盖
   并计入时序抑制，因此同一工具对应的配置位置不会形成网络请求长队；不同工具
   之间也不会因为某一个慢请求而彼此串行阻塞。每个目标设备每次转换只转发一次，
-  失败后不重试；状态机仍会消除不改变聚合展示状态的重复事件。
+  失败后不重试。只有 Codex、Claude Code、Cursor、OpenCode 使用 latest-wins
+  并执行上述时序抑制；其他工具的专属投递 worker 使用逐事件 FIFO 队列，不覆盖
+  任何尚未发送的事件。
 - Rust 在启动后立即执行一次在线设备发现，之后按设置页以“分钟”为单位配置的
   间隔（默认一分钟）持续刷新在线设备快照；后台循环以 1 秒粒度醒来并重新读取当前
   间隔，因此在设置页修改间隔后无需重启即可立即生效。设备发现同时执行

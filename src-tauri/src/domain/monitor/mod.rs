@@ -24,12 +24,12 @@ pub use hook_config_types::{
 };
 pub(crate) use hook_state_machine::encode_base64;
 pub use hook_state_machine::{HookEventDecision, HookStateMachine, HookTransition};
-pub(crate) use hooks::managed_hook_marker;
 pub use hooks::{
     ai_tool_name, contains_managed_hook_config, generate_hook_auxiliary_configs,
     generate_hook_config, hook_config_filename, hook_requires_review, hook_restart_required,
     merge_hook_config, tool_from_slug,
 };
+pub(crate) use hooks::{forwards_every_event, managed_hook_marker};
 pub use image_processing::process_image_upload;
 pub use payload::{MinimalHookPayload, minimize_native_hook_payload};
 pub use saved_data::{

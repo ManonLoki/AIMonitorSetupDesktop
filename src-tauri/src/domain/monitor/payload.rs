@@ -41,8 +41,22 @@ pub fn minimize_native_hook_payload(
     }
     Ok(MinimalHookPayload {
         hook_event_name: configured_event.to_owned(),
-        session_id: string_field(source, &["session_id", "conversation_id"]),
-        turn_id: string_field(source, &["turn_id", "generation_id"]),
+        // WorkBuddy Desktop 的原生 Hook 上下文使用 camelCase；CodeBuddy CLI
+        // 和其他兼容客户端仍使用 snake_case。两种形式必须在 relay 边界统一，
+        // 否则 Stop 会落入默认会话，留下永远处于运行中的真实会话。
+        session_id: string_field(
+            source,
+            &[
+                "session_id",
+                "sessionId",
+                "conversation_id",
+                "conversationId",
+            ],
+        ),
+        turn_id: string_field(
+            source,
+            &["turn_id", "turnId", "generation_id", "generationId"],
+        ),
         status: scalar_field(source, "status"),
     })
 }
@@ -92,5 +106,21 @@ mod tests {
         assert!(native_bytes.len() > 10_000);
         assert!(minimized.len() < 150);
         assert!(!String::from_utf8(minimized).unwrap().contains("prompt"));
+    }
+
+    #[test]
+    fn workbuddy_camel_case_context_is_normalized() {
+        let native = serde_json::json!({
+            "hook_event_name": "Stop",
+            "sessionId": "workbuddy-session-1",
+            "turnId": "workbuddy-turn-2",
+            "prompt": "must not leave the relay boundary"
+        });
+
+        let payload =
+            minimize_native_hook_payload(&serde_json::to_vec(&native).unwrap(), "Stop").unwrap();
+
+        assert_eq!(payload.session_id.as_deref(), Some("workbuddy-session-1"));
+        assert_eq!(payload.turn_id.as_deref(), Some("workbuddy-turn-2"));
     }
 }

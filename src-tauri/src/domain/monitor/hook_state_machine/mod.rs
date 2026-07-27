@@ -2,7 +2,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use super::device::{AiTool, HookBehavior};
-use super::hooks::{HookEventKind, event_kind};
+use super::hooks::{HookEventKind, event_kind, forwards_every_event};
 
 #[cfg(test)]
 mod tests;
@@ -107,6 +107,9 @@ impl HookStateMachine {
             return HookEventDecision::Unsupported;
         };
         let transition = event_kind.transition();
+        if forwards_every_event(tool) {
+            return HookEventDecision::Forward(transition);
+        }
         let previous = self.aggregate_phase();
         let session_key = session_id.unwrap_or("__default__").to_owned();
 

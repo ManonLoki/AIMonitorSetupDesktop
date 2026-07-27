@@ -48,7 +48,7 @@ fn latest_relay_mailbox_keeps_only_the_newest_state_per_tool() {
     assert_eq!(wake_receiver.try_recv(), Ok(()));
     assert_eq!(wake_receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
     let pending = pending_relays.lock().unwrap();
-    let latest = pending.get(&AiTool::Codex).unwrap();
+    let latest = pending.get(&AiTool::Codex).unwrap().back().unwrap();
     assert_eq!(latest.hook_type, "PermissionRequest");
     assert_eq!(
         latest.transition,
@@ -185,7 +185,9 @@ fn latest_relay_mailbox_allows_one_in_flight_and_one_newest_pending_state() {
     let in_flight = pending_relays
         .lock()
         .unwrap()
-        .remove(&AiTool::Codex)
+        .get_mut(&AiTool::Codex)
+        .unwrap()
+        .pop_front()
         .unwrap();
     assert_eq!(
         in_flight.transition,
@@ -218,7 +220,7 @@ fn latest_relay_mailbox_allows_one_in_flight_and_one_newest_pending_state() {
     assert_eq!(wake_receiver.try_recv(), Ok(()));
     assert_eq!(wake_receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
     let pending = pending_relays.lock().unwrap();
-    let latest = pending.get(&AiTool::Codex).unwrap();
+    let latest = pending.get(&AiTool::Codex).unwrap().back().unwrap();
     assert_eq!(latest.hook_type, "Stop");
     assert_eq!(
         latest.transition,
@@ -278,9 +280,54 @@ fn timeout_and_real_hook_mailbox_replacements_keep_hook_metrics_exact() {
     assert_eq!(status.suppressed_count, 0);
     assert_eq!(status.pending_count, 1);
     assert_eq!(
-        pending_relays.lock().unwrap()[&AiTool::Codex].hook_type,
+        pending_relays.lock().unwrap()[&AiTool::Codex]
+            .back()
+            .unwrap()
+            .hook_type,
         "UserPromptSubmit"
     );
+}
+
+#[test]
+fn tools_outside_suppression_allowlist_preserve_delivery_order() {
+    for tool in [
+        AiTool::WorkBuddy,
+        AiTool::Hermes,
+        AiTool::OpenClaw,
+        AiTool::CodeBuddy,
+    ] {
+        let pending_relays = Arc::new(Mutex::new(HashMap::new()));
+        let (wake_sender, wake_receiver) = mpsc::sync_channel::<()>(HOOK_RELAY_WAKE_QUEUE_CAPACITY);
+        let wake_senders = HashMap::from([(tool, wake_sender)]);
+        let status = Arc::new(RwLock::new(HookRelayStatus {
+            pending_count: 3,
+            ..HookRelayStatus::default()
+        }));
+
+        for hook_type in ["first", "second", "third"] {
+            enqueue_latest_hook_relay(
+                &pending_relays,
+                &wake_senders,
+                &status,
+                PendingHookRelay {
+                    tool,
+                    hook_type: hook_type.to_owned(),
+                    transition: HookTransition::Display(HookBehavior::Running),
+                    counts_as_hook: true,
+                },
+            );
+        }
+
+        assert_eq!(wake_receiver.try_recv(), Ok(()));
+        assert_eq!(wake_receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+        let pending = pending_relays.lock().unwrap();
+        let queued = pending[&tool]
+            .iter()
+            .map(|relay| relay.hook_type.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(queued, vec!["first", "second", "third"]);
+        assert_eq!(status.read().unwrap().suppressed_count, 0);
+    }
 }
 
 #[test]

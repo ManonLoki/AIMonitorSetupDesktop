@@ -162,7 +162,21 @@ fn managed_commands(
         windows_quote(event),
         windows_quote(&marker),
     );
-    ManagedCommands { posix, windows }
+    // Codex Desktop 在 Windows 上先用 PowerShell 解析 command，再交给 CMD。
+    // 同时转义两层 shell 的管道符，避免管理标识中的 `|` 被当成管道执行。
+    let powershell_marker = marker.replace('|', "^`|");
+    let windows_powershell_host = format!(
+        "cmd.exe /d /s /c \"{} --aimonitor-hook-relay {} {} --managed-by {}\"",
+        windows_quote(&executable),
+        windows_quote(protocol.slug()),
+        windows_quote(event),
+        powershell_marker,
+    );
+    ManagedCommands {
+        posix,
+        windows,
+        windows_powershell_host,
+    }
 }
 
 fn windows_quote(value: &str) -> String {
@@ -174,6 +188,7 @@ pub(super) fn command_has_marker(command: &str, marker: &str) -> bool {
         value.contains(&format!("{marker}'")) || value.contains(&format!("{marker}\""))
     };
     contains_marker(command)
+        || contains_marker(&command.replace("^`|", "|"))
         || decoded_hook_command(command)
             .as_deref()
             .is_some_and(contains_marker)

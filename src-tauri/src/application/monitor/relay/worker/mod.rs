@@ -3,7 +3,7 @@
 // 再用 latest-wins mailbox 把需要转发的最新状态交给每个工具专属的投递线程
 // （实际的设备 HTTP 转发逻辑见 `relay::forward`）。
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, RwLock, mpsc},
     thread,
     time::{Duration, Instant},
@@ -20,7 +20,7 @@ use crate::{
     },
     domain::monitor::{
         AiTool, DiscoveredMonitorDevice, HookEventDecision, HookStateMachine, HookTransition,
-        SavedMonitorData,
+        SavedMonitorData, forwards_every_event,
     },
 };
 
@@ -34,7 +34,7 @@ pub(super) struct PendingHookRelay {
     pub(super) counts_as_hook: bool,
 }
 
-pub(super) type PendingHookRelays = Arc<Mutex<HashMap<AiTool, PendingHookRelay>>>;
+pub(super) type PendingHookRelays = Arc<Mutex<HashMap<AiTool, VecDeque<PendingHookRelay>>>>;
 type HookRelayWakeSenders = HashMap<AiTool, mpsc::SyncSender<()>>;
 
 pub(crate) fn spawn_hook_worker(
@@ -47,7 +47,9 @@ pub(crate) fn spawn_hook_worker(
     // 网络投递使用 latest-wins mailbox：每个工具至多一个正在发送的状态和一个
     // 尚未发送的最新状态。旧的待发送中间态会被覆盖，但所有原始事件仍先按序推进
     // 状态机，因此 Stop/SessionEnd 等时序屏障不会被跳过。
-    let pending_relays = Arc::new(Mutex::new(HashMap::<AiTool, PendingHookRelay>::new()));
+    let pending_relays = Arc::new(Mutex::new(
+        HashMap::<AiTool, VecDeque<PendingHookRelay>>::new(),
+    ));
     let relay_wake_senders =
         spawn_hook_delivery_workers(client, &pending_relays, data, online_devices, &status);
 
@@ -169,14 +171,20 @@ fn spawn_hook_delivery_worker(
 ) {
     thread::spawn(move || {
         while receiver.recv().is_ok() {
-            let pending = pending_relays
-                .lock()
-                .ok()
-                .and_then(|mut pending| pending.remove(&tool));
-            let Some(pending) = pending else {
-                continue;
-            };
-            relay_hook_with_accounting(&client, &data, &online_devices, &status, &pending);
+            loop {
+                let pending = pending_relays.lock().ok().and_then(|mut pending| {
+                    let queue = pending.get_mut(&tool)?;
+                    let relay = queue.pop_front();
+                    if queue.is_empty() {
+                        pending.remove(&tool);
+                    }
+                    relay
+                });
+                let Some(pending) = pending else {
+                    break;
+                };
+                relay_hook_with_accounting(&client, &data, &online_devices, &status, &pending);
+            }
         }
     });
 }
@@ -189,8 +197,17 @@ fn enqueue_latest_hook_relay(
 ) {
     let tool = relay.tool;
     let (should_wake, displaced) = if let Ok(mut pending) = pending_relays.lock() {
-        let displaced = pending.insert(tool, relay);
-        (displaced.is_none(), displaced)
+        let queue = pending.entry(tool).or_default();
+        let should_wake = queue.is_empty();
+        let displaced = if forwards_every_event(tool) {
+            queue.push_back(relay);
+            None
+        } else {
+            let displaced = queue.pop_back();
+            queue.push_back(relay);
+            displaced
+        };
+        (should_wake, displaced)
     } else {
         record_relay_failure(status, "Hook 最新状态队列不可用".to_owned());
         return;
@@ -208,7 +225,8 @@ fn enqueue_latest_hook_relay(
         let dropped = pending_relays
             .lock()
             .ok()
-            .and_then(|mut pending| pending.remove(&tool));
+            .and_then(|mut pending| pending.remove(&tool))
+            .and_then(|mut queue| queue.pop_back());
         if let Some(dropped) = dropped {
             if dropped.counts_as_hook {
                 record_hook_results(
@@ -230,7 +248,8 @@ fn enqueue_latest_hook_relay(
         let dropped = pending_relays
             .lock()
             .ok()
-            .and_then(|mut pending| pending.remove(&tool));
+            .and_then(|mut pending| pending.remove(&tool))
+            .and_then(|mut queue| queue.pop_back());
         if let Some(dropped) = dropped {
             if dropped.counts_as_hook {
                 record_hook_results(

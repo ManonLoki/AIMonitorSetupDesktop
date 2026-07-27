@@ -41,6 +41,30 @@ fn status_driven_protocols_map_native_states() {
 }
 
 #[test]
+fn tools_outside_suppression_allowlist_forward_repeated_supported_events() {
+    for (tool, event) in [
+        (AiTool::WorkBuddy, "PreToolUse"),
+        (AiTool::Hermes, "pre_llm_call"),
+        (AiTool::OpenClaw, "before_agent_run"),
+        (AiTool::CodeBuddy, "PreToolUse"),
+    ] {
+        let mut machine = HookStateMachine::default();
+        for _ in 0..2 {
+            assert_eq!(
+                machine.apply_event(
+                    tool,
+                    event,
+                    Some("passthrough-session"),
+                    Some("arbitrary-turn"),
+                ),
+                HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running)),
+                "{tool:?} event {event} should be forwarded"
+            );
+        }
+    }
+}
+
+#[test]
 fn codex_state_machine_covers_open_interrupt_late_completion_and_exit() {
     let mut machine = HookStateMachine::default();
 
