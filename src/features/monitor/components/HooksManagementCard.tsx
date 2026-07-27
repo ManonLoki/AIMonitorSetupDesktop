@@ -61,8 +61,8 @@ function hookActivationGuidance(
       return `配置已写入 ${filename}。请在 CodeBuddy 中运行 /hooks 审核 AIMonitor 规则，然后重启 CodeBuddy 或创建新会话。`;
     case "openClaw":
       return `AIMonitor 插件已写入 ${filename} 所在目录。请依次运行 openclaw plugins enable aimonitor、openclaw config set plugins.entries.aimonitor.hooks.allowConversationAccess true 和 openclaw gateway restart。`;
-    case "harness":
-      return `配置已写入 ${filename}。请重启 Harness（或 HarnessDaemon）以重新载入 agent-state-changed Hook。`;
+    case "hermes":
+      return `AIMonitor 插件已写入 ${filename} 所在目录。请运行 hermes plugins enable aimonitor，然后重启 Hermes 或创建新会话。`;
     default:
       return null;
   }

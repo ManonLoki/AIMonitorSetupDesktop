@@ -9,7 +9,7 @@ export const AI_TOOLS: ReadonlyArray<{ value: AiTool; label: string }> = [
   { value: "cursor", label: "Cursor" },
   { value: "openCode", label: "OpenCode" },
   { value: "workBuddy", label: "WorkBuddy" },
-  { value: "harness", label: "Harness" },
+  { value: "hermes", label: "Hermes" },
   { value: "openClaw", label: "OpenClaw" },
   { value: "codeBuddy", label: "CodeBuddy" },
 ];

@@ -109,7 +109,7 @@ Rust DTO 使用 `serde` 的 `camelCase` 输出以匹配 TypeScript。Command
 AI 工具的 Hooks 不再直接访问监控屏。桌面端是状态计算与转发的唯一事实来源：
 
 ```text
-Codex / Claude Code / Cursor / OpenCode / WorkBuddy / Harness / OpenClaw / CodeBuddy Hook
+Codex / Claude Code / Cursor / OpenCode / WorkBuddy / Hermes / OpenClaw / CodeBuddy Hook
   ↓ POST 127.0.0.1:10240/api/hooks/{tool}，原始 Hook JSON + 受配置控制的事件头
 Rust 本机 Hook listener
   ↓ 根据 tool + Hook type 推进纯 Rust 生命周期状态机
@@ -168,7 +168,7 @@ AIMonitor APK（单台失败不终止后续设备）
   `PostCompact` 不会重新激活状态，直到出现新的明确工作起点。桌面端晚于 AI
   会话启动时，真实工作起点、进度、询问、异常或停止事件可以建立隐式会话并立即
   更新展示；单独到达的完成类事件没有足够信息证明仍在运行，直接忽略且不留记录。
-- Codex、Claude Code、Cursor、OpenCode、WorkBuddy、Harness、OpenClaw、CodeBuddy
+- Codex、Claude Code、Cursor、OpenCode、WorkBuddy、Hermes、OpenClaw、CodeBuddy
   的协议实现分别位于 `domain/monitor/hooks/`
   下的独立文件，并统一实现 `HookProtocol`。Trait 负责约束工具元数据、事件语义、
   原生 handler/config 结构、stdout 约定和托管条目清理；公共生成、合并和状态机
@@ -177,8 +177,9 @@ AIMonitor APK（单台失败不终止后续设备）
   OpenCode 使用官方自动发现的全局插件文件订阅公开事件流，独立文件只允许覆盖
   带 AIMonitor 标识的内容；WorkBuddy 使用其内置 CodeBuddy Agent 引擎自 v2.48
   起独立的 `~/.workbuddy/settings.json`，不与 CodeBuddy CLI 配置混用。
-  Harness 使用守护进程的 `agent-state-changed` 事件，并通过官方
-  `harness-cli list-agents --json` 聚合所有 pane 的状态；CodeBuddy 使用
+  Hermes 以 `~/.hermes/plugins/aimonitor/` 原生插件订阅官方 observer hooks，
+  使用会话、轮次、工具、审批与 API 异常事件计算状态；插件需由用户执行
+  `hermes plugins enable aimonitor` 明确信任启用。CodeBuddy 使用
   `CODEBUDDY_CONFIG_DIR`（默认 `~/.codebuddy/settings.json`）及其 Git Bash/POSIX
   command Hook 约定。OpenClaw 作为全局原生插件安装到状态目录的
   `extensions/aimonitor/`，主入口、manifest 与 package metadata 在写入前统一校验，

@@ -107,8 +107,8 @@ fn detect_hook_config_directories(config_home: &Path) -> HookConfigDirectories {
             .join(".workbuddy")
             .to_string_lossy()
             .into_owned(),
-        // Harness 支持 HARNESS_HOME；默认位置按其 macOS/Linux 公开路径选择。
-        harness: detected_config_directory("HARNESS_HOME", &default_harness_home(config_home)),
+        // Hermes 支持 HERMES_HOME；默认位置在 POSIX 为 ~/.hermes，Windows 为 %LOCALAPPDATA%\hermes。
+        hermes: detected_config_directory("HERMES_HOME", &default_hermes_home(config_home)),
         // OpenClaw 的可变状态目录可由 OPENCLAW_STATE_DIR 覆盖。
         open_claw: detected_config_directory("OPENCLAW_STATE_DIR", &config_home.join(".openclaw")),
         // CodeBuddy 官方通过 CODEBUDDY_CONFIG_DIR 覆盖 ~/.codebuddy。
@@ -119,18 +119,18 @@ fn detect_hook_config_directories(config_home: &Path) -> HookConfigDirectories {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn default_harness_home(config_home: &Path) -> PathBuf {
-    config_home.join("Library/Application Support/Harness")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn default_harness_home(config_home: &Path) -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
+#[cfg(target_os = "windows")]
+fn default_hermes_home(config_home: &Path) -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| config_home.join(".local/share"))
-        .join("harness")
+        .unwrap_or_else(|| config_home.to_owned())
+        .join("hermes")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn default_hermes_home(config_home: &Path) -> PathBuf {
+    config_home.join(".hermes")
 }
 
 // 读取指定环境变量作为配置目录，若变量不存在或不是绝对路径则使用回退路径。
@@ -2840,7 +2840,7 @@ mod tests {
     #[test]
     fn local_hook_request_routes_new_tool_slugs() {
         for (slug, tool) in [
-            ("harness", AiTool::Harness),
+            ("hermes", AiTool::Hermes),
             ("openclaw", AiTool::OpenClaw),
             ("codebuddy", AiTool::CodeBuddy),
         ] {
@@ -3646,10 +3646,7 @@ mod tests {
                     .join(".workbuddy")
                     .to_string_lossy()
                     .into_owned(),
-                harness: config_home
-                    .join("Library/Application Support/Harness")
-                    .to_string_lossy()
-                    .into_owned(),
+                hermes: config_home.join(".hermes").to_string_lossy().into_owned(),
                 open_claw: config_home.join(".openclaw").to_string_lossy().into_owned(),
                 code_buddy: config_home
                     .join(".codebuddy")
@@ -3814,6 +3811,43 @@ mod tests {
         );
         assert!(package_path.exists());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hermes_plugin_is_written_as_one_managed_set() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-hermes-plugin-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let config_home = root.join("home");
+        fs::create_dir_all(&app_data).unwrap();
+        let service = MonitorService::load(&app_data, &config_home).unwrap();
+        let hermes_home = root.join("hermes-home");
+        service
+            .save_hook_config_directory(AiTool::Hermes, &hermes_home.to_string_lossy())
+            .unwrap();
+
+        let result = service.write_hook_config(AiTool::Hermes).unwrap();
+        assert!(result.config_changed);
+        assert!(result.requires_review);
+        assert!(result.restart_required);
+        let plugin_root = hermes_home.join("plugins/aimonitor");
+        let entrypoint = fs::read_to_string(plugin_root.join("__init__.py")).unwrap();
+        let manifest = fs::read_to_string(plugin_root.join("plugin.yaml")).unwrap();
+        assert!(entrypoint.contains("AIMonitor|tool=hermes"));
+        assert!(entrypoint.contains("/api/hooks/hermes"));
+        assert!(manifest.contains("name: aimonitor"));
+
+        let unchanged = service.write_hook_config(AiTool::Hermes).unwrap();
+        assert!(!unchanged.config_changed);
+        assert!(!unchanged.requires_review);
+        assert!(!unchanged.restart_required);
         fs::remove_dir_all(root).unwrap();
     }
 

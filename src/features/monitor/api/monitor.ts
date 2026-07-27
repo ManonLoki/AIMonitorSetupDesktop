@@ -62,7 +62,7 @@ export type AiTool =
   | "cursor"
   | "openCode"
   | "workBuddy"
-  | "harness"
+  | "hermes"
   | "openClaw"
   | "codeBuddy";
 

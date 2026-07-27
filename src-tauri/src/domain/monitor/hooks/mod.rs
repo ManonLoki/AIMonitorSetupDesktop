@@ -7,7 +7,7 @@ mod claude_code;
 mod code_buddy;
 mod codex;
 mod cursor;
-mod harness;
+mod hermes;
 mod open_claw;
 mod open_code;
 mod work_buddy;
@@ -103,7 +103,7 @@ pub(super) trait HookProtocol: Sync {
     }
 
     /// 合并独立文件。默认只覆盖带当前工具 `AIMonitor` 标识的受管文件；需要与
-    /// 用户内容共存的独立格式（例如 Harness hooks.json 数组）可自行覆盖。
+    /// 用户内容共存的独立格式可自行覆盖。
     fn merge_standalone(
         &self,
         existing_content: Option<&str>,
@@ -168,7 +168,7 @@ pub(super) fn protocol(tool: AiTool) -> &'static dyn HookProtocol {
         AiTool::Cursor => &cursor::CURSOR,
         AiTool::OpenCode => &open_code::OPEN_CODE,
         AiTool::WorkBuddy => &work_buddy::WORK_BUDDY,
-        AiTool::Harness => &harness::HARNESS,
+        AiTool::Hermes => &hermes::HERMES,
         AiTool::OpenClaw => &open_claw::OPEN_CLAW,
         AiTool::CodeBuddy => &code_buddy::CODE_BUDDY,
     }

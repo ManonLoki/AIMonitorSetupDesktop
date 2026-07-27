@@ -132,7 +132,8 @@ pub enum AiTool {
     Cursor,
     OpenCode,
     WorkBuddy,
-    Harness,
+    #[serde(alias = "harness")]
+    Hermes,
     OpenClaw,
     CodeBuddy,
 }
@@ -145,7 +146,7 @@ impl AiTool {
         Self::Cursor,
         Self::OpenCode,
         Self::WorkBuddy,
-        Self::Harness,
+        Self::Hermes,
         Self::OpenClaw,
         Self::CodeBuddy,
     ];
@@ -234,7 +235,8 @@ pub struct HookConfigDirectories {
     #[serde(default)]
     pub work_buddy: String,
     #[serde(default)]
-    pub harness: String,
+    #[serde(alias = "harness")]
+    pub hermes: String,
     #[serde(default)]
     pub open_claw: String,
     #[serde(default)]
@@ -250,7 +252,7 @@ impl HookConfigDirectories {
             AiTool::Cursor => &self.cursor,
             AiTool::OpenCode => &self.open_code,
             AiTool::WorkBuddy => &self.work_buddy,
-            AiTool::Harness => &self.harness,
+            AiTool::Hermes => &self.hermes,
             AiTool::OpenClaw => &self.open_claw,
             AiTool::CodeBuddy => &self.code_buddy,
         }
@@ -264,7 +266,7 @@ impl HookConfigDirectories {
             AiTool::Cursor => self.cursor = directory,
             AiTool::OpenCode => self.open_code = directory,
             AiTool::WorkBuddy => self.work_buddy = directory,
-            AiTool::Harness => self.harness = directory,
+            AiTool::Hermes => self.hermes = directory,
             AiTool::OpenClaw => self.open_claw = directory,
             AiTool::CodeBuddy => self.code_buddy = directory,
         }
@@ -368,7 +370,7 @@ pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String
         &data.hook_config_directories.cursor,
         &data.hook_config_directories.open_code,
         &data.hook_config_directories.work_buddy,
-        &data.hook_config_directories.harness,
+        &data.hook_config_directories.hermes,
         &data.hook_config_directories.open_claw,
         &data.hook_config_directories.code_buddy,
     ] {
@@ -1139,6 +1141,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_harness_values_load_as_hermes_and_serialize_canonically() {
+        let tool: AiTool = serde_json::from_str(r#""harness""#).unwrap();
+        assert_eq!(tool, AiTool::Hermes);
+        assert_eq!(serde_json::to_string(&tool).unwrap(), r#""hermes""#);
+
+        let directories: HookConfigDirectories =
+            serde_json::from_str(r#"{"harness":"/legacy/harness"}"#).unwrap();
+        assert_eq!(directories.hermes, "/legacy/harness");
+        let serialized = serde_json::to_value(directories).unwrap();
+        assert_eq!(serialized["hermes"], "/legacy/harness");
+        assert!(serialized.get("harness").is_none());
+    }
+
     // 验证自动检查间隔的默认值为 1 分钟，且 0 和超过上限的值都会被拒绝，
     // 默认值本身则应该通过校验。
     #[test]
@@ -1353,29 +1369,29 @@ mod tests {
     }
 
     #[test]
-    fn harness_preview_merges_with_existing_daemon_hooks() {
-        let preview = generate_hook_config(AiTool::Harness).unwrap();
-        assert!(preview.content.contains("agent-state-changed"));
-        assert!(preview.content.contains("list-agents --json"));
-        assert!(preview.content.contains("AIMonitor|tool=harness"));
+    fn hermes_preview_contains_a_complete_managed_plugin() {
+        let preview = generate_hook_config(AiTool::Hermes).unwrap();
+        let auxiliary = generate_hook_auxiliary_configs(AiTool::Hermes);
 
-        let existing = r#"[{
-          "id": "11111111-1111-1111-1111-111111111111",
-          "event": "after-new-tab",
-          "command": {"displayMessage": {"format": "hello"}},
-          "conditionFormat": null
-        }]"#;
-        let merged = merge_hook_config(Some(existing), &preview, AiTool::Harness).unwrap();
-        assert!(merged.content.contains("after-new-tab"));
-        assert_eq!(merged.content.matches("AIMonitor|tool=harness").count(), 1);
-        let merged_again =
-            merge_hook_config(Some(&merged.content), &preview, AiTool::Harness).unwrap();
-        assert_eq!(
-            merged_again
-                .content
-                .matches("AIMonitor|tool=harness")
-                .count(),
-            1
+        assert_eq!(preview.filename, ".hermes/plugins/aimonitor/__init__.py");
+        assert!(preview.content.contains("AIMonitor|tool=hermes"));
+        assert!(preview.content.contains("ctx.register_hook"));
+        assert!(preview.content.contains("pre_approval_request"));
+        assert!(preview.content.contains("api_request_error"));
+        assert!(preview.content.contains("/api/hooks/hermes"));
+        assert_eq!(auxiliary.len(), 1);
+        assert_eq!(auxiliary[0].filename, "plugins/aimonitor/plugin.yaml");
+        assert!(auxiliary[0].content.contains("name: aimonitor"));
+
+        let merged = merge_hook_config(None, &preview, AiTool::Hermes).unwrap();
+        assert_eq!(merged.content, preview.content);
+        assert!(
+            merge_hook_config(
+                Some("# unrelated Hermes plugin\n"),
+                &preview,
+                AiTool::Hermes,
+            )
+            .is_err()
         );
     }
 
@@ -1535,24 +1551,22 @@ mod tests {
 
     #[test]
     fn status_driven_protocols_map_native_states() {
-        let mut harness = HookStateMachine::default();
+        let mut hermes = HookStateMachine::default();
         assert_eq!(
-            harness.apply_event_with_status(
-                AiTool::Harness,
-                "agent-state-changed",
-                None,
-                None,
-                Some("working"),
+            hermes.apply_event(
+                AiTool::Hermes,
+                "pre_llm_call",
+                Some("session-1"),
+                Some("turn-1"),
             ),
             HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
         );
         assert_eq!(
-            harness.apply_event_with_status(
-                AiTool::Harness,
-                "agent-state-changed",
-                None,
-                None,
-                Some("awaiting"),
+            hermes.apply_event(
+                AiTool::Hermes,
+                "pre_approval_request",
+                Some("session-1"),
+                Some("turn-1"),
             ),
             HookEventDecision::Forward(HookTransition::Display(HookBehavior::Asking))
         );
