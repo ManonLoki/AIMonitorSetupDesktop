@@ -23,6 +23,7 @@ use crate::{
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SlotUpdateRequest<'a> {
+    client_id: &'a str,
     username: &'a str,
     ai_name: &'static str,
     behavior: HookBehavior,
@@ -81,6 +82,7 @@ pub(super) fn forward_hook_to_target(
     };
     let data = data.read().map_err(|_| "转发配置读取锁已损坏".to_owned())?;
     let username = data.settings.username.clone();
+    let client_id = data.client_id.clone();
     let saved_device = data
         .devices
         .iter()
@@ -105,6 +107,7 @@ pub(super) fn forward_hook_to_target(
         tool,
         transition,
         &username,
+        &client_id,
         &effective_device,
         &profile,
     )
@@ -217,6 +220,7 @@ fn relay_hook_with_accounting(
         tool,
         transition,
         &snapshot.settings.username,
+        &snapshot.client_id,
         targets,
         &online_snapshot,
     );
@@ -241,6 +245,7 @@ fn forward_to_all_targets(
     tool: AiTool,
     transition: HookTransition,
     username: &str,
+    client_id: &str,
     targets: Vec<(&MonitorDeviceRoute, &AiProfile)>,
     online_snapshot: &[DiscoveredMonitorDevice],
 ) -> (u64, Vec<String>) {
@@ -265,6 +270,7 @@ fn forward_to_all_targets(
                         tool,
                         transition,
                         username,
+                        client_id,
                         &effective_device,
                         profile,
                     );
@@ -301,6 +307,7 @@ fn forward_profile(
     tool: AiTool,
     transition: HookTransition,
     username: &str,
+    client_id: &str,
     device: &MonitorDeviceRoute,
     profile: &AiProfile,
 ) -> Result<(), String> {
@@ -319,6 +326,7 @@ fn forward_profile(
             .and_then(|state| {
                 send_and_confirm(
                     client.post(&url).json(&SlotUpdateRequest {
+                        client_id,
                         username,
                         ai_name: ai_tool_name(tool),
                         behavior,

@@ -1,6 +1,6 @@
 [package]
 name = "ai-monitor-setup"
-version = "2.1.7"
+version = "2.2.0"
 description = "AI monitor desktop application"
 authors = ["ManonLoki"]
 edition = "2024"
@@ -33,6 +33,7 @@ tauri-plugin-dialog = "2.7.2"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-single-instance = "2.4.3"
 tokio = { version = "1.53.1", features = ["net"] }
+uuid = { version = "1.23.4", features = ["v4"] }
 
 [lints.rust]
 unsafe_code = "forbid"

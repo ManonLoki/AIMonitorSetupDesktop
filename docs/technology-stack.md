@@ -39,6 +39,7 @@
 | 局域网服务发现 | mdns-sd | 0.20.2 | 仅由 Rust application 层发现 `_aimonitor._tcp.local.` 设备 |
 | 网卡与广播地址 | if-addrs | 0.15.0 | 仅由 Rust application 层枚举可用 IPv4 网卡并发送 UDP 定向广播 |
 | JSON 持久化 | serde_json | 1.0.151 | 保存设备设置与 AI 实例配置 |
+| 控制端唯一身份 | uuid | 1.24.0 | 首次启动生成并持久化 `clientId`，用于槽位归属与心跳租约 |
 | 原生目录选择 | tauri-plugin-dialog | 2.7.2 | 为前端提供系统目录选择器 |
 | 系统外链 | tauri-plugin-opener | 2.5.4 | 通过 capability 白名单只开放项目 GitHub 地址 |
 | 开机自启 | tauri-plugin-autostart | 2.5.1 | 由 Rust 管理桌面端自启，自启参数固定为 `--silent` |

@@ -20,6 +20,7 @@ mod config_io;
 mod connection;
 mod device_response;
 mod discovery;
+mod heartbeat;
 mod hook_config;
 mod relay;
 mod service_discovery;
@@ -60,6 +61,8 @@ const HOOK_BIND_ADDRESS: &str = "127.0.0.1";
 // 向设备转发 Hook 状态所用客户端的连接/请求超时：设备均在局域网内，
 // 2 秒足以覆盖正常网络抖动，同时避免慢设备长时间占用投递线程。
 const HOOK_FORWARD_CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
+// 控制端每 30 秒向当前在线且已配置 Profile 的接收端续租一次。
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 // listener 只接受 relay 子进程/原生插件生成的最小 Hook 信封；4 KiB 足以容纳
 // 事件名、会话/轮次 ID 和状态，同时从接口边界拒绝 prompt、工具输出等大载荷。
 const MAX_HOOK_BODY_BYTES: usize = 4 * 1024;

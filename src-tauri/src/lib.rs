@@ -79,6 +79,8 @@ pub fn run() {
             service.start_hook_listener();
             // 启动后台设备发现任务，定期在局域网内扫描监控设备
             service.start_background_device_discovery(app.handle().clone());
+            // 每 30 秒向已配置且在线的接收端发送控制端租约心跳。
+            service.start_heartbeat_sender();
             // 将监控服务实例托管到 Tauri 状态管理中，供各命令通过 State 提取使用
             app.manage(service);
             // 判断本次启动参数中是否包含 "--silent"（即由开机自启静默拉起）

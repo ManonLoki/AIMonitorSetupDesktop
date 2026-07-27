@@ -23,6 +23,7 @@ fn two_device_data(slow: SocketAddr, fast: SocketAddr) -> SavedMonitorData {
     fast_profile.device_id = "fast-screen".to_owned();
     fast_profile.slot = 2;
     SavedMonitorData {
+        client_id: "test-client".to_owned(),
         settings: MonitorSettings {
             username: "Manon".to_owned(),
             ..MonitorSettings::default()

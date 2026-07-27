@@ -27,6 +27,11 @@ fn empty_username_defaults_to_the_local_system_username() {
     let service = MonitorService::load(&app_data, &config_home).unwrap();
 
     assert_eq!(service.settings().unwrap().username, expected);
+    let saved: SavedMonitorData =
+        serde_json::from_str(&fs::read_to_string(app_data.join(STORE_FILENAME)).unwrap()).unwrap();
+    assert!(!saved.client_id.is_empty());
+    let reloaded = MonitorService::load(&app_data, &config_home).unwrap();
+    assert_eq!(reloaded.data.read().unwrap().client_id, saved.client_id);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -72,6 +77,7 @@ fn profile_save_does_not_write_hooks_when_data_persistence_fails() {
                 .into_owned(),
         },
         data: Arc::new(RwLock::new(SavedMonitorData {
+            client_id: "test-client".to_owned(),
             settings: MonitorSettings {
                 base_url: "http://127.0.0.1:8080".to_owned(),
                 username: "tester".to_owned(),

@@ -15,6 +15,9 @@ use super::settings::{MonitorSettings, validate_discovery_interval_minutes};
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedMonitorData {
+    /// 当前控制端安装实例的稳定唯一标识。发送槽位状态和心跳时作为所有者身份。
+    #[serde(default)]
+    pub client_id: String,
     pub settings: MonitorSettings,
     /// 所有已经连接并保存过的设备路由。`settings` 只表示当前 UI 选中的设备；
     /// Hook 中继会遍历这里的路由，并按设备 ID 关联对应 Profile。
@@ -29,6 +32,7 @@ pub struct SavedMonitorData {
 /// 在应用接纳持久化数据前验证跨集合不变量，避免损坏或部分写入的数据让
 /// “当前设备”、设备路由和 Profile 指向不同事实来源。
 pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String> {
+    validate_client_id(&data.client_id)?;
     // 当前选中设备的基地址必须是合法格式。
     normalize_base_url(&data.settings.base_url)?;
     // 自动检查间隔必须在允许范围内。
@@ -107,6 +111,20 @@ pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String
         }
     }
     Ok(())
+}
+
+/// 控制端身份会进入 URL path 和接收端租约表，仅允许紧凑的 ASCII 标识。
+pub fn validate_client_id(value: &str) -> Result<&str, String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("客户端 ID 必须是 1-128 位字母、数字、连字符或下划线".to_owned());
+    }
+    Ok(value)
 }
 
 // 规范化并校验用户输入的设备基地址：去空白、去掉末尾斜杠、要求 http/https 协议且不含空白。
@@ -287,6 +305,7 @@ mod tests {
             ..MonitorSettings::default()
         };
         let valid = SavedMonitorData {
+            client_id: "test-client".to_owned(),
             settings,
             devices: vec![route],
             profiles: vec![profile(AiTool::Codex)],

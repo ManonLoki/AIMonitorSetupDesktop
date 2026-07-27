@@ -20,6 +20,7 @@ fn target_selection_intersects_profiles_with_the_online_snapshot() {
     let mut offline_profile = test_profile();
     offline_profile.device_id = "offline-screen".to_owned();
     let data = Arc::new(RwLock::new(SavedMonitorData {
+        client_id: "test-client".to_owned(),
         settings: MonitorSettings::default(),
         devices: vec![
             MonitorDeviceRoute {
@@ -55,6 +56,7 @@ fn target_selection_intersects_profiles_with_the_online_snapshot() {
 #[test]
 fn target_that_went_offline_while_queued_is_skipped_before_http() {
     let data = Arc::new(RwLock::new(SavedMonitorData {
+        client_id: "test-client".to_owned(),
         settings: MonitorSettings {
             username: "Manon".to_owned(),
             ..MonitorSettings::default()
@@ -99,6 +101,7 @@ fn relay_computes_state_and_uses_a_configured_device_route() {
     });
     // 构造保存的配置数据：当前设备指向刚才的模拟监听地址，并带上一个 Codex Profile。
     let data = Arc::new(RwLock::new(SavedMonitorData {
+        client_id: "test-client".to_owned(),
         settings: MonitorSettings {
             base_url: format!("http://{address}"),
             username: "Manon".to_owned(),
@@ -138,6 +141,7 @@ fn relay_computes_state_and_uses_a_configured_device_route() {
     let request = receiver.join().unwrap();
     // 断言请求路径、用户名、AI 名称、行为、图片内容均正确携带。
     assert!(request.starts_with("POST /api/slots/1 HTTP/1.1"));
+    assert!(request.contains(r#""clientId":"test-client""#));
     assert!(request.contains(r#""username":"Manon""#));
     assert!(request.contains(r#""aiName":"Codex""#));
     assert!(request.contains(r#""behavior":"running""#));
@@ -176,6 +180,7 @@ fn relay_filters_offline_routes_and_uses_the_online_address() {
     available_profile.device_id = "screen-2".to_owned();
     available_profile.slot = 7;
     let data = Arc::new(RwLock::new(SavedMonitorData {
+        client_id: "test-client".to_owned(),
         settings: MonitorSettings {
             base_url: format!("http://{unavailable_address}"),
             username: "Desk user".to_owned(),
@@ -244,6 +249,7 @@ fn relay_forwards_to_multiple_devices_concurrently_instead_of_one_at_a_time() {
     second_profile.device_id = "screen-2".to_owned();
     second_profile.slot = 7;
     let data = Arc::new(RwLock::new(SavedMonitorData {
+        client_id: "test-client".to_owned(),
         settings: MonitorSettings {
             base_url: format!("http://{address_one}"),
             username: "Manon".to_owned(),

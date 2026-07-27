@@ -118,9 +118,15 @@ POST 127.0.0.1:10240/api/hooks/{tool}
 Rust 本机 Hook listener
   ↓ 根据 tool + Hook type 推进纯 Rust 生命周期状态机
 Rust 中读取共享用户名，并将已配置 Profile 与当前在线设备快照求交集
-  ↓ 仅对在线设备 POST / DELETE /api/slots/{slot}
+  ↓ 携带持久化 clientId，仅对在线设备 POST / DELETE /api/slots/{slot}
 AIMonitor Android / Desktop（单台失败不终止后续设备）
 ```
+
+控制端首次启动生成并持久化稳定的 `clientId`。槽位 POST 使用该身份声明所有者；
+独立后台线程每 30 秒向当前在线且已配置 Profile 的设备调用
+`POST /api/clients/{clientId}/heartbeat`。Android/Desktop 维护 2 分钟租约，过期时
+只清理该控制端拥有的槽位，清理结果与对应槽位的 DELETE 完全一致。心跳失败不进入
+Hook 成功/失败统计，也不阻塞其他设备或状态投递。
 
 - Hooks 的完整唯一契约见 [`hooks-contract.md`](hooks-contract.md)。协议实现与该
   文档共同构成事实标准，不保留历史格式迁移入口。

@@ -67,6 +67,9 @@ listener。
   目标队列；WorkBuddy、Hermes、OpenClaw、CodeBuddy 按事件 FIFO 直通。
 - 一次状态转换的候选目标必须同时满足：设备存在已保存路由、该工具存在 Profile、
   设备 ID 位于当前在线快照。
+- 每次槽位 POST 必须携带本控制端稳定的 `clientId`。后台每 30 秒向同一在线目标调用
+  `/api/clients/{clientId}/heartbeat`；接收端 2 分钟未收到续租时按 DELETE 等价语义
+  清理该客户端拥有的全部槽位。该租约流量不计入 Hook 中继统计。
 - 入队前先与在线快照求交集；目标 worker 真正发送 HTTP 前再次确认设备仍在线。
   已记录但不在线、或排队期间离线的设备直接跳过，不使用历史地址尝试转发，也不
   计为网络失败。
