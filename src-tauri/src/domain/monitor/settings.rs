@@ -34,7 +34,7 @@ fn default_discovery_interval_minutes() -> u64 {
     DEFAULT_DISCOVERY_INTERVAL_MINUTES
 }
 
-/// 首次启动及旧版本配置升级时默认展示的三个 AI 客户端。
+/// 首次启动时默认展示的三个 AI 客户端。
 pub fn default_enabled_ai_tools() -> Vec<AiTool> {
     vec![AiTool::Codex, AiTool::ClaudeCode, AiTool::Cursor]
 }

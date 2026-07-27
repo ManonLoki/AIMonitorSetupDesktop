@@ -26,6 +26,7 @@
 | 客户端状态 | Jotai | 2.20.2 | 主题、面板开关等纯 UI 状态 |
 | 原生通信 | `@tauri-apps/api` | 2.11.1 | 类型化 `invoke` 调用 |
 | 原生目录选择 | `@tauri-apps/plugin-dialog` | 2.7.2 | 仅用于选择 Hooks 配置目录，路径保存与校验仍由 Rust 完成 |
+| 系统外链 | `@tauri-apps/plugin-opener` | 2.5.4 | 仅允许设置页项目地址通过系统默认浏览器打开 |
 
 ## Rust 后端库
 
@@ -39,6 +40,7 @@
 | 网卡与广播地址 | if-addrs | 0.15.0 | 仅由 Rust application 层枚举可用 IPv4 网卡并发送 UDP 定向广播 |
 | JSON 持久化 | serde_json | 1.0.151 | 保存设备设置与 AI 实例配置 |
 | 原生目录选择 | tauri-plugin-dialog | 2.7.2 | 为前端提供系统目录选择器 |
+| 系统外链 | tauri-plugin-opener | 2.5.4 | 通过 capability 白名单只开放项目 GitHub 地址 |
 | 开机自启 | tauri-plugin-autostart | 2.5.1 | 由 Rust 管理桌面端自启，自启参数固定为 `--silent` |
 | 单实例 | tauri-plugin-single-instance | 2.4.3 | 静默运行时再次打开应用，唤起已有主窗口 |
 | 系统托盘 | Tauri `tray-icon` feature | 2.11.5 | Windows/macOS 托盘菜单、窗口显隐与退出 |

@@ -117,11 +117,13 @@ POST 127.0.0.1:10240/api/hooks/{tool}
   ↓ { hook_event_name, session_id?, turn_id?, status? } + 受配置控制的事件头
 Rust 本机 Hook listener
   ↓ 根据 tool + Hook type 推进纯 Rust 生命周期状态机
-Rust 中读取共享用户名，并按 AI 工具遍历已配置设备的 Profile、路由和显示位置
-  ↓ 对每台已配置设备 POST / DELETE /api/slots/{slot}
+Rust 中读取共享用户名，并将已配置 Profile 与当前在线设备快照求交集
+  ↓ 仅对在线设备 POST / DELETE /api/slots/{slot}
 AIMonitor Android / Desktop（单台失败不终止后续设备）
 ```
 
+- Hooks 的完整唯一契约见 [`hooks-contract.md`](hooks-contract.md)。协议实现与该
+  文档共同构成事实标准，不保留历史格式迁移入口。
 - listener 只绑定环回地址，不向局域网暴露 Hook 接口。
 - 命令型 Hooks 不依赖 PowerShell、curl 或额外 `.sh`/`.ps1` 文件，而是调用当前
   已安装 AIMonitor 可执行文件的轻量 relay 子命令；该模式在 `main` 入口先行
@@ -133,21 +135,20 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
 - 所有新托管 Hook 命令统一携带大小写固定的 `AIMonitor` 前缀（完整标识如
   `AIMonitor:tool=codex`）。标识不包含 shell 元字符，避免 Windows Hook 宿主在
   `cmd.exe` 前额外经过 PowerShell 时把参数拆成管道。合并、覆盖和后续删除只按
-  该前缀识别；旧版 `AIMonitor|tool=...` 标识仅用于识别并自动迁移。
+  当前标识识别。
 - Windows 原生 command Hook 执行器只写入标准 `cmd.exe` 命令；不同时混入
   POSIX `command` 与 `commandWindows`。WorkBuddy、CodeBuddy 是例外：客户端自身
   固定通过随产品提供的 Git Bash/POSIX shell 执行 Hook，因此配置直接启动
   `AIMonitor.exe`，不调用外部脚本、curl 或用户另行安装的 Bash。
-- 启动时只迁移配置文件中已存在且带 `AIMonitor` 标识的受管 Hook 条目，用于把
-  旧版直接转发原始 stdin 的命令升级为当前轻量 relay；不会为未配置的工具创建
-  Hook，也不会修改非 AIMonitor Hook。除此之外不保留旧 Hook 标识、runner 文件
-  或旧 Profile 字段/行为的兼容层。
+- 应用启动不扫描或改写任何 Hooks 文件。Hooks 更新只在用户从“Hooks 管理”
+  明确执行写入时发生；生成与合并只认识当前管理标识和当前协议结构。
 - Profile 按“设备 ID + AI 工具”隔离保存显示位置及四种显示状态，不保存
   设备名称或地址。设备名称和地址作为独立设备路由保存在桌面端；显示用户名是
   所有设备共享的全局设置。左下角当前设备只决定监控管理页正在编辑哪台设备。
-  中继收到 Hook 后遍历所有已保存设备路由及对应 Profile，按“设备 ID + AI 工具”
-  投入独立队列并行转发；单台设备失败、离线或超时不阻止其余设备，也不延迟其余
-  设备的下一次状态更新。
+  中继收到 Hook 后，先把所有已保存路由及对应 Profile 与当前在线设备快照求交集，
+  仅为在线目标按“设备 ID + AI 工具”投入独立队列并行转发；worker 发送 HTTP 前
+  再次确认设备仍在线。离线历史设备不转发也不计失败；单台在线设备失败或超时不
+  阻止其余设备，也不延迟其余设备的下一次状态更新。
   未配置的新设备从空 Profile 开始，不继承或转移上一台设备的配置。Hooks
   JSON 仍只连接固定本机中继，因此切换设备时无需重写。
 - 监控管理页只保存所选 AI 客户端的 Profile；设置页持久化 AI 客户端多选范围，
@@ -225,9 +226,8 @@ AIMonitor Android / Desktop（单台失败不终止后续设备）
   就跳过另一路——避免只靠 UDP 广播现身的设备（例如 mDNS 多播在某些网络
   下不可达）从列表中消失。两路发现并行执行，mDNS 等待窗口为 8 秒；设备需
   连续两轮都未被发现才会从快照移除，过滤单轮网络抖动。Hook 转发遍历已配置
-  路由前，先按快照把在线设备
-  排到前面，并优先使用发现得到的最新地址；快照发生变化时通过 Tauri event
-  更新前端的 TanStack Query 设备缓存。前端“重新扫描”/“强制重新检查”仍
+  路由前，先按快照过滤掉不在线设备，并使用发现得到的最新地址；快照发生变化时
+  通过 Tauri event 更新前端的 TanStack Query 设备缓存。前端“重新扫描”/“强制重新检查”仍
   调用原有 command，不依赖定时器。当前选中设备从稳定在线快照中消失时，
   Rust 自动选择排序后的第一台在线设备并持久化为当前设备；没有在线设备时
   保留最后选择，等待后续发现结果。

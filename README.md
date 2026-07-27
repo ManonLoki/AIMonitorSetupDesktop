@@ -99,6 +99,7 @@ pnpm release:desktop
 
 - [技术栈与版本](docs/technology-stack.md)
 - [架构与代码边界](docs/architecture.md)
+- [Hooks 事实标准](docs/hooks-contract.md)
 - [代理协作规则](AGENTS.md)
 
 ## 许可证

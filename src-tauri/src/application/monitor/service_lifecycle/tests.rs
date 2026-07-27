@@ -173,52 +173,6 @@ fn custom_hook_directory_is_persisted_and_used_for_hook_writes() {
 }
 
 #[test]
-fn startup_migration_replaces_legacy_windows_relay_without_touching_user_only_files() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "ai-monitor-hook-migration-{}-{unique}",
-        std::process::id()
-    ));
-    let app_data = root.join("app-data");
-    let config_home = root.join("home");
-    let codex_dir = config_home.join(".codex");
-    let claude_dir = config_home.join(".claude");
-    fs::create_dir_all(&app_data).unwrap();
-    fs::create_dir_all(&codex_dir).unwrap();
-    fs::create_dir_all(&claude_dir).unwrap();
-    let legacy = r#"{
-      "hooks": {
-        "PostToolUse": [{
-          "hooks": [{
-            "type": "command",
-            "command": "other-app notify",
-            "commandWindows": ": 'AIMonitor|tool=codex'; powershell.exe Invoke-RestMethod -Body $body"
-          }]
-        }]
-      }
-    }"#;
-    let user_only = r#"{"hooks":{"Stop":[{"hooks":[{"command":"my notifier"}]}]}}"#;
-    fs::write(codex_dir.join("hooks.json"), legacy).unwrap();
-    fs::write(claude_dir.join("settings.json"), user_only).unwrap();
-    let service = MonitorService::load(&app_data, &config_home).unwrap();
-
-    assert_eq!(service.migrate_existing_managed_hook_configs().unwrap(), 1);
-    let migrated = fs::read_to_string(codex_dir.join("hooks.json")).unwrap();
-    assert!(migrated.contains("--aimonitor-hook-relay"));
-    assert!(!migrated.contains("Invoke-RestMethod"));
-    assert_eq!(
-        fs::read_to_string(claude_dir.join("settings.json")).unwrap(),
-        user_only
-    );
-    assert_eq!(service.migrate_existing_managed_hook_configs().unwrap(), 0);
-
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn open_claw_plugin_files_are_validated_as_one_managed_set() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -6,6 +6,8 @@
   command 合约。
 - [`docs/technology-stack.md`](docs/technology-stack.md)：权威的技术选型、
   版本与依赖维护策略。
+- [`docs/hooks-contract.md`](docs/hooks-contract.md)：Hooks 配置、listener、
+  状态与在线设备投递的唯一事实标准。
 
 ## 不可破坏的约束
 

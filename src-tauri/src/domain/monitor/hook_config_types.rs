@@ -38,7 +38,6 @@ pub struct HookConfigDirectories {
     #[serde(default)]
     pub work_buddy: String,
     #[serde(default)]
-    #[serde(alias = "harness")]
     pub hermes: String,
     #[serde(default)]
     pub open_claw: String,
@@ -92,16 +91,17 @@ mod tests {
     use super::{AiTool, HookConfigDirectories};
 
     #[test]
-    fn legacy_harness_values_load_as_hermes_and_serialize_canonically() {
-        let tool: AiTool = serde_json::from_str(r#""harness""#).unwrap();
+    fn hook_config_uses_only_canonical_hermes_names() {
+        assert!(serde_json::from_str::<AiTool>(r#""harness""#).is_err());
+        let tool: AiTool = serde_json::from_str(r#""hermes""#).unwrap();
         assert_eq!(tool, AiTool::Hermes);
         assert_eq!(serde_json::to_string(&tool).unwrap(), r#""hermes""#);
 
         let directories: HookConfigDirectories =
-            serde_json::from_str(r#"{"harness":"/legacy/harness"}"#).unwrap();
-        assert_eq!(directories.hermes, "/legacy/harness");
+            serde_json::from_str(r#"{"hermes":"/hooks/hermes"}"#).unwrap();
+        assert_eq!(directories.hermes, "/hooks/hermes");
         let serialized = serde_json::to_value(directories).unwrap();
-        assert_eq!(serialized["hermes"], "/legacy/harness");
+        assert_eq!(serialized["hermes"], "/hooks/hermes");
         assert!(serialized.get("harness").is_none());
     }
 }

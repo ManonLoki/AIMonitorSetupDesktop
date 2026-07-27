@@ -3,8 +3,8 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use super::{
-    AiTool, HookConfigPreview, HookProtocol, MANAGED_HOOK_PREFIX, ManagedCommands,
-    contains_managed_marker, managed_hook_marker, protocol, shell_quote,
+    AiTool, HookConfigPreview, HookProtocol, ManagedCommands, managed_hook_marker, protocol,
+    shell_quote,
 };
 
 // 为一个工具生成完整的主配置文件内容：独立配置文件路线的工具直接返回其
@@ -112,33 +112,6 @@ pub fn merge_hook_config(
     })
 }
 
-/// 判断现有配置中是否包含指定工具的 `AIMonitor` 受管条目。
-///
-/// 启动时的升级修复只允许重写已经由 `AIMonitor` 管理的配置；用户自己的 Hook
-/// 文件即使位于默认目录，也不能因为应用升级而被自动加入新条目。
-pub fn contains_managed_hook_config(existing_content: &str, tool: AiTool) -> bool {
-    let protocol = protocol(tool);
-    if protocol.standalone_config().is_some() {
-        return contains_managed_marker(existing_content, tool);
-    }
-    let Ok(existing) = serde_json::from_str::<Value>(existing_content) else {
-        return false;
-    };
-    existing
-        .get("hooks")
-        .and_then(Value::as_object)
-        .is_some_and(|hooks| {
-            hooks.values().any(|entries| {
-                let Some(entries) = entries.as_array() else {
-                    return false;
-                };
-                let mut remaining = entries.clone();
-                protocol.remove_managed_entries(&mut remaining);
-                remaining != *entries
-            })
-        })
-}
-
 // 为一个事件生成三种平台变体的托管命令字符串（POSIX shell、Windows CMD、
 // 经 PowerShell 转发到 CMD），供各工具的 `handler` 按自身协议组装配置条目。
 fn managed_commands(
@@ -192,72 +165,13 @@ fn powershell_host_quote(value: &str) -> String {
     format!("`\"{}`\"", value.replace('`', "``").replace('"', "`\""))
 }
 
-// 判断一条已写入配置的命令字符串是否携带指定的管理标识；除了直接文本匹配，
-// 还要能识别被 PowerShell `-EncodedCommand` 编码过的旧版本命令。
+// 判断一条当前格式的命令字符串是否携带指定管理标识。Windows PowerShell
+// 宿主可能保留用于保护双引号的反引号，因此比较前只归一化该现役转义形式。
 pub(super) fn command_has_marker(command: &str, marker: &str) -> bool {
     let contains_marker = |value: &str| {
         value.contains(&format!("{marker}'")) || value.contains(&format!("{marker}\""))
     };
-    contains_marker(command)
-        || contains_marker(&command.replace("`\"", "\""))
-        || contains_marker(&command.replace("^`|", "|"))
-        || decoded_hook_command(command)
-            .as_deref()
-            .is_some_and(contains_marker)
-}
-
-// 若命令已是明文则原样返回；否则尝试从 `-EncodedCommand <base64>` 参数中解码出
-// PowerShell 用的 UTF-16LE 编码原文，用于兼容旧版本生成的托管命令。
-fn decoded_hook_command(command: &str) -> Option<String> {
-    if command.contains(MANAGED_HOOK_PREFIX) {
-        return Some(command.to_owned());
-    }
-    let encoded = command
-        .split_once("-EncodedCommand ")
-        .map(|(_, encoded)| encoded.split_whitespace().next().unwrap_or(""))?;
-    let bytes = decode_base64(encoded)?;
-    if bytes.len() % 2 != 0 {
-        return None;
-    }
-    let utf16 = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect::<Vec<_>>();
-    String::from_utf16(&utf16).ok()
-}
-
-// 标准 Base64 解码（自实现，配套 `encode_base64`），非法字符或长度直接返回 None。
-fn decode_base64(value: &str) -> Option<Vec<u8>> {
-    // 把一个 Base64 字符映射回它代表的 6 位数值。
-    fn sextet(byte: u8) -> Option<u8> {
-        match byte {
-            b'A'..=b'Z' => Some(byte - b'A'),
-            b'a'..=b'z' => Some(byte - b'a' + 26),
-            b'0'..=b'9' => Some(byte - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let bytes = value.as_bytes();
-    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks_exact(4) {
-        let a = sextet(chunk[0])?;
-        let b = sextet(chunk[1])?;
-        let c = (chunk[2] != b'=').then(|| sextet(chunk[2])).flatten();
-        let d = (chunk[3] != b'=').then(|| sextet(chunk[3])).flatten();
-        decoded.push((a << 2) | (b >> 4));
-        if let Some(c) = c {
-            decoded.push((b << 4) | (c >> 2));
-            if let Some(d) = d {
-                decoded.push((c << 6) | d);
-            }
-        }
-    }
-    Some(decoded)
+    contains_marker(command) || contains_marker(&command.replace("`\"", "\""))
 }
 
 #[cfg(test)]

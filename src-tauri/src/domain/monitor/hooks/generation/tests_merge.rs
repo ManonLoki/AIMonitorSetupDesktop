@@ -1,10 +1,9 @@
 use serde_json::Value;
 
 use super::super::{hook_transition, managed_hook_marker};
-use super::{command_has_marker, contains_managed_hook_config, tests::generate_test_hook_config};
+use super::{command_has_marker, tests::generate_test_hook_config};
 use crate::domain::monitor::{
-    AiTool, DEFAULT_BASE_URL, HookBehavior, HookConfigPreview, HookTransition, encode_base64,
-    merge_hook_config,
+    AiTool, DEFAULT_BASE_URL, HookBehavior, HookConfigPreview, HookTransition, merge_hook_config,
 };
 
 // 验证 Codex 的合并逻辑是幂等的：重复合并不会让托管条目累积，
@@ -44,62 +43,28 @@ fn codex_merge_is_idempotent_and_preserves_other_commands() {
 }
 
 #[test]
-fn managed_marker_still_recognizes_legacy_powershell_commands() {
-    let marker = "AIMonitor|tool=codex";
-    let script = format!("$null = '{marker}'; Invoke-RestMethod -Uri 'http://127.0.0.1'");
-    let encoded = script
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    let command = format!(
-        "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
-        encode_base64(&encoded)
-    );
-
-    assert!(command_has_marker(&command, marker));
-}
-
-#[test]
-fn managed_config_detection_finds_legacy_command_but_not_user_hooks() {
-    let marker = "AIMonitor|tool=codex";
-    let script = format!("$null = '{marker}'; Invoke-RestMethod -Body $body");
-    let encoded = script
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    let legacy = serde_json::json!({
-        "hooks": {
-            "PostToolUse": [{
-                "hooks": [{
-                    "type": "command",
-                    "commandWindows": format!(
-                        "powershell.exe -EncodedCommand {}",
-                        encode_base64(&encoded)
-                    )
-                }]
-            }]
-        }
-    });
-    let user_only = r#"{"hooks":{"PostToolUse":[{"hooks":[{"command":"my notifier"}]}]}}"#;
-
-    assert!(contains_managed_hook_config(
-        &legacy.to_string(),
-        AiTool::Codex
+fn only_the_canonical_managed_marker_is_recognized() {
+    assert!(command_has_marker(
+        "'AIMonitor' --managed-by 'AIMonitor:tool=codex'",
+        "AIMonitor:tool=codex"
     ));
-    assert!(!contains_managed_hook_config(user_only, AiTool::Codex));
+    assert!(!command_has_marker(
+        ": 'AIMonitor|tool=codex'; curl current",
+        "AIMonitor:tool=codex"
+    ));
 }
 
 // 验证 Cursor 的合并逻辑同样幂等，且能正确保留用户命令、去重已有的托管条目。
 #[test]
 fn cursor_merge_is_idempotent_and_preserves_other_commands() {
     let generated = generate_test_hook_config(AiTool::Cursor).unwrap();
-    // 预置一份现有配置：包含用户命令和一条旧格式的托管条目。
+    // 预置一份现有配置：包含用户命令和一条当前格式的托管条目。
     let existing = r#"{
       "version": 1,
       "hooks": {
         "stop": [
           { "command": "other-app stop" },
-          { "command": ": 'AIMonitor|tool=cursor'; curl current" }
+          { "command": "'AIMonitor' --aimonitor-hook-relay cursor stop --managed-by 'AIMonitor:tool=cursor'" }
         ]
       }
     }"#;
@@ -112,7 +77,6 @@ fn cursor_merge_is_idempotent_and_preserves_other_commands() {
 
     assert_eq!(stop.matches("other-app stop").count(), 1);
     assert_eq!(stop.matches("AIMonitor:tool=cursor").count(), 1);
-    assert!(!stop.contains("AIMonitor|tool=cursor"));
 }
 
 // 验证当现有配置的根结构不合法（hooks 应为对象却是数组）时，合并应返回错误而不是崩溃。

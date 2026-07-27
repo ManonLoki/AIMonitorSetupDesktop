@@ -7,8 +7,13 @@ use std::{
 
 use super::*;
 use crate::{
-    application::monitor::test_support::{read_test_http_request, test_profile},
-    domain::monitor::{HookConfigDirectories, MonitorDeviceRoute, MonitorSettings},
+    application::monitor::{
+        DEFAULT_DEVICE_API_PATH,
+        test_support::{read_test_http_request, test_profile},
+    },
+    domain::monitor::{
+        DiscoverySource, HookConfigDirectories, MonitorDeviceRoute, MonitorSettings,
+    },
 };
 
 fn two_device_data(slow: SocketAddr, fast: SocketAddr) -> SavedMonitorData {
@@ -45,6 +50,17 @@ fn relay(hook_type: &str, behavior: HookBehavior) -> PendingHookRelay {
         hook_type: hook_type.to_owned(),
         transition: HookTransition::Display(behavior),
         counts_as_hook: true,
+    }
+}
+
+fn online_device(id: &str, name: &str, address: SocketAddr) -> DiscoveredMonitorDevice {
+    DiscoveredMonitorDevice {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        api_version: "1".to_owned(),
+        base_url: format!("http://{address}"),
+        path: DEFAULT_DEVICE_API_PATH.to_owned(),
+        discovery_source: DiscoverySource::Mdns,
     }
 }
 
@@ -86,7 +102,10 @@ fn slow_device_does_not_hide_asking_state_from_fast_device() {
     });
 
     let data = Arc::new(RwLock::new(two_device_data(slow_address, fast_address)));
-    let online_devices = Arc::new(RwLock::new(Vec::new()));
+    let online_devices = Arc::new(RwLock::new(vec![
+        online_device("slow-screen", "Slow", slow_address),
+        online_device("fast-screen", "Fast", fast_address),
+    ]));
     let status = Arc::new(RwLock::new(HookRelayStatus {
         pending_count: 2,
         ..HookRelayStatus::default()

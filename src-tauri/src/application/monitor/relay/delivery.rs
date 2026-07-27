@@ -11,7 +11,7 @@ use std::{
 };
 
 use super::{
-    forward::{configured_target_ids, forward_hook_to_target},
+    forward::{configured_online_target_ids, forward_hook_to_target},
     status::{
         record_hook_results, record_hook_results_with_accounting, record_partial_suppression,
         record_relay_failure, record_suppressed_hook,
@@ -77,11 +77,12 @@ impl DeliveryTracker {
         })
     }
 
-    fn delivered(&self, result: Result<(), String>) {
+    fn delivered(&self, result: Result<bool, String>) {
         match result {
-            Ok(()) => {
+            Ok(true) => {
                 self.forwarded.fetch_add(1, Ordering::Relaxed);
             }
+            Ok(false) => {}
             Err(error) => {
                 if let Ok(mut errors) = self.errors.lock() {
                     errors.push(error);
@@ -153,36 +154,52 @@ impl DeliveryScheduler {
     }
 
     pub(super) fn enqueue(&mut self, relay: &PendingHookRelay) {
-        let target_ids = match configured_target_ids(&self.data, relay.tool) {
-            Ok(target_ids) if !target_ids.is_empty() => target_ids,
-            Ok(_) => {
-                record_hook_results_with_accounting(
-                    &self.status,
-                    relay.tool,
-                    &relay.hook_type,
-                    None,
-                    0,
-                    &["尚未配置该 AI 的转发位置".to_owned()],
-                    relay.counts_as_hook,
-                );
-                return;
-            }
-            Err(error) => {
-                if relay.counts_as_hook {
-                    record_hook_results(
+        let target_ids =
+            match configured_online_target_ids(&self.data, &self.online_devices, relay.tool) {
+                Ok((_, target_ids)) if !target_ids.is_empty() => target_ids,
+                Ok((0, _)) => {
+                    record_hook_results_with_accounting(
                         &self.status,
                         relay.tool,
                         &relay.hook_type,
                         None,
                         0,
-                        &[error],
+                        &["尚未配置该 AI 的转发位置".to_owned()],
+                        relay.counts_as_hook,
                     );
-                } else {
-                    record_relay_failure(&self.status, error);
+                    return;
                 }
-                return;
-            }
-        };
+                Ok((_, _)) => {
+                    record_hook_results_with_accounting(
+                        &self.status,
+                        relay.tool,
+                        &relay.hook_type,
+                        match relay.transition {
+                            HookTransition::Display(behavior) => Some(behavior),
+                            HookTransition::Release => None,
+                        },
+                        0,
+                        &[],
+                        relay.counts_as_hook,
+                    );
+                    return;
+                }
+                Err(error) => {
+                    if relay.counts_as_hook {
+                        record_hook_results(
+                            &self.status,
+                            relay.tool,
+                            &relay.hook_type,
+                            None,
+                            0,
+                            &[error],
+                        );
+                    } else {
+                        record_relay_failure(&self.status, error);
+                    }
+                    return;
+                }
+            };
         let tracker = DeliveryTracker::new(Arc::clone(&self.status), relay, target_ids.len());
         for device_id in target_ids {
             let key = DeliveryKey {

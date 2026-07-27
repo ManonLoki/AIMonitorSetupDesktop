@@ -1,9 +1,9 @@
 // 把一个已通过去抖判定的 Hook 事件实际转发给设备：转换成展示/释放行为，
-// 并发 POST/DELETE 到每台配置了该 AI 工具的在线优先设备。
+// 并发 POST/DELETE 到每台当前在线且配置了该 AI 工具的设备。
 use std::sync::{Arc, RwLock};
 
 #[cfg(test)]
-use std::{collections::HashSet, thread};
+use std::thread;
 
 use serde::Serialize;
 
@@ -30,19 +30,32 @@ struct SlotUpdateRequest<'a> {
     image: &'a str,
 }
 
-// 返回当前为指定工具配置了 Profile 的设备 ID。投递调度按这些 ID 建立
-// “设备 + 工具”独立队列，避免任一慢设备阻塞其他设备的状态更新。
-pub(super) fn configured_target_ids(
+// 返回指定工具的 Profile 总数，以及其中当前在线的设备 ID。投递调度只为
+// 在线目标建立“设备 + 工具”独立队列；保存过但已离线的设备不会进入转发链路。
+pub(super) fn configured_online_target_ids(
     data: &Arc<RwLock<SavedMonitorData>>,
+    online_devices: &Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
     tool: AiTool,
-) -> Result<Vec<String>, String> {
+) -> Result<(usize, Vec<String>), String> {
+    let online_devices = online_devices
+        .read()
+        .map_err(|_| "在线设备读取锁已损坏".to_owned())?;
     let data = data.read().map_err(|_| "转发配置读取锁已损坏".to_owned())?;
-    Ok(data
+    let configured = data
         .profiles
         .iter()
         .filter(|profile| profile.tool == tool)
+        .collect::<Vec<_>>();
+    let online_target_ids = configured
+        .iter()
+        .filter(|profile| {
+            online_devices
+                .iter()
+                .any(|device| device.id == profile.device_id)
+        })
         .map(|profile| profile.device_id.clone())
-        .collect())
+        .collect();
+    Ok((configured.len(), online_target_ids))
 }
 
 // 只向一台目标设备投递状态。设备路由和 Profile 在真正发送前读取最新快照，
@@ -54,7 +67,18 @@ pub(super) fn forward_hook_to_target(
     tool: AiTool,
     transition: HookTransition,
     device_id: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    // 队列等待期间设备可能离线；真正构造 HTTP 请求前再次读取在线快照。
+    // 不在线属于正常跳过，不计转发成功，也不计网络失败。
+    let online_device = online_devices
+        .read()
+        .map_err(|_| "在线设备读取锁已损坏".to_owned())?
+        .iter()
+        .find(|device| device.id == device_id)
+        .cloned();
+    let Some(online_device) = online_device else {
+        return Ok(false);
+    };
     let data = data.read().map_err(|_| "转发配置读取锁已损坏".to_owned())?;
     let username = data.settings.username.clone();
     let saved_device = data
@@ -71,18 +95,11 @@ pub(super) fn forward_hook_to_target(
         .ok_or_else(|| format!("目标设备 {} 的 AI Profile 不存在", saved_device.device_name))?;
     drop(data);
 
-    let online_device = online_devices.read().ok().and_then(|devices| {
-        devices
-            .iter()
-            .find(|device| device.id == device_id)
-            .cloned()
-    });
-    let effective_device =
-        online_device.map_or(saved_device.clone(), |device| MonitorDeviceRoute {
-            base_url: device.base_url,
-            device_id: device.id,
-            device_name: device.name,
-        });
+    let effective_device = MonitorDeviceRoute {
+        base_url: online_device.base_url,
+        device_id: online_device.id,
+        device_name: online_device.name,
+    };
     forward_profile(
         client,
         tool,
@@ -91,6 +108,7 @@ pub(super) fn forward_hook_to_target(
         &effective_device,
         &profile,
     )
+    .map(|()| true)
     .map_err(|error| format!("{}：{error}", effective_device.device_name))
 }
 
@@ -118,8 +136,8 @@ fn relay_hook(
     relay_hook_with_accounting(client, data, online_devices, status, &pending);
 }
 
-// 处理一个已通过去抖判定的 Hook 事件：找出所有配置了该工具的设备（在线
-// 快照优先），并发转发，最终把结果（成功数/错误列表）记录进中继状态。
+// 处理一个已通过去抖判定的 Hook 事件：只找出当前在线且配置了该工具的设备，
+// 并发转发，最终把结果（成功数/错误列表）记录进中继状态。
 #[cfg(test)]
 fn relay_hook_with_accounting(
     client: &reqwest::blocking::Client,
@@ -153,15 +171,16 @@ fn relay_hook_with_accounting(
         .read()
         .map(|devices| devices.clone())
         .unwrap_or_default();
-    let online_ids = online_snapshot
-        .iter()
-        .map(|device| device.id.as_str())
-        .collect::<HashSet<_>>();
-    // 找出所有已配置该 AI 工具展示 Profile 的历史设备记录（与 Profile 配对）。
-    let mut targets = snapshot
+    // 找出当前在线且已配置该 AI 工具展示 Profile 的设备（与 Profile 配对）。
+    let targets = snapshot
         .profiles
         .iter()
         .filter(|profile| profile.tool == tool)
+        .filter(|profile| {
+            online_snapshot
+                .iter()
+                .any(|device| device.id == profile.device_id)
+        })
         .filter_map(|profile| {
             snapshot
                 .devices
@@ -170,17 +189,18 @@ fn relay_hook_with_accounting(
                 .map(|device| (device, profile))
         })
         .collect::<Vec<_>>();
-    // 让在线设备排在前面（不影响后续是否转发，只影响记录里的顺序倾向）。
-    targets.sort_by_key(|(device, _)| !online_ids.contains(device.device_id.as_str()));
-    // 没有任何目标设备配置了该工具，记录提示信息并返回。
+    // 没有任何在线目标时正常记下已接收事件，但不尝试历史路由。
     if targets.is_empty() {
         record_hook_results_with_accounting(
             status,
             tool,
             hook_type,
-            None,
+            match transition {
+                HookTransition::Display(behavior) => Some(behavior),
+                HookTransition::Release => None,
+            },
             0,
-            &["尚未配置该 AI 的转发位置".to_owned()],
+            &[],
             counts_as_hook,
         );
         return;
@@ -228,19 +248,16 @@ fn forward_to_all_targets(
         targets
             .into_iter()
             .map(|(saved_device, profile)| {
-                // 若该设备当前在线，优先使用在线快照中的最新地址（可能比保存的地址更准确、更及时）；
-                // 否则回退使用保存的历史路由信息尝试连接。
+                // targets 已经过在线过滤，这里必须能取到发现快照中的最新地址。
                 let online_device = online_snapshot
                     .iter()
-                    .find(|device| device.id == saved_device.device_id);
-                let effective_device = online_device.map_or_else(
-                    || saved_device.clone(),
-                    |device| MonitorDeviceRoute {
-                        base_url: device.base_url.clone(),
-                        device_id: device.id.clone(),
-                        device_name: device.name.clone(),
-                    },
-                );
+                    .find(|device| device.id == saved_device.device_id)
+                    .expect("online target must exist in the discovery snapshot");
+                let effective_device = MonitorDeviceRoute {
+                    base_url: online_device.base_url.clone(),
+                    device_id: online_device.id.clone(),
+                    device_name: online_device.name.clone(),
+                };
                 // 为每个目标设备单独开一个线程并发转发，互不阻塞。
                 scope.spawn(move || {
                     let result = forward_profile(

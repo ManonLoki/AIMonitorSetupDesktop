@@ -15,6 +15,73 @@ use crate::{
     },
 };
 
+#[test]
+fn target_selection_intersects_profiles_with_the_online_snapshot() {
+    let mut offline_profile = test_profile();
+    offline_profile.device_id = "offline-screen".to_owned();
+    let data = Arc::new(RwLock::new(SavedMonitorData {
+        settings: MonitorSettings::default(),
+        devices: vec![
+            MonitorDeviceRoute {
+                base_url: "http://127.0.0.1:1".to_owned(),
+                device_id: "screen-1".to_owned(),
+                device_name: "Online".to_owned(),
+            },
+            MonitorDeviceRoute {
+                base_url: "http://127.0.0.1:2".to_owned(),
+                device_id: "offline-screen".to_owned(),
+                device_name: "Offline".to_owned(),
+            },
+        ],
+        profiles: vec![test_profile(), offline_profile],
+        hook_config_directories: HookConfigDirectories::default(),
+    }));
+    let online_devices = Arc::new(RwLock::new(vec![DiscoveredMonitorDevice {
+        id: "screen-1".to_owned(),
+        name: "Online".to_owned(),
+        api_version: "1".to_owned(),
+        base_url: "http://127.0.0.1:3".to_owned(),
+        path: DEFAULT_DEVICE_API_PATH.to_owned(),
+        discovery_source: DiscoverySource::Mdns,
+    }]));
+
+    let (configured_count, target_ids) =
+        configured_online_target_ids(&data, &online_devices, AiTool::Codex).unwrap();
+
+    assert_eq!(configured_count, 2);
+    assert_eq!(target_ids, vec!["screen-1"]);
+}
+
+#[test]
+fn target_that_went_offline_while_queued_is_skipped_before_http() {
+    let data = Arc::new(RwLock::new(SavedMonitorData {
+        settings: MonitorSettings {
+            username: "Manon".to_owned(),
+            ..MonitorSettings::default()
+        },
+        devices: vec![MonitorDeviceRoute {
+            base_url: "http://127.0.0.1:1".to_owned(),
+            device_id: "screen-1".to_owned(),
+            device_name: "Desk".to_owned(),
+        }],
+        profiles: vec![test_profile()],
+        hook_config_directories: HookConfigDirectories::default(),
+    }));
+    let online_devices = Arc::new(RwLock::new(Vec::new()));
+
+    let forwarded = forward_hook_to_target(
+        &reqwest::blocking::Client::new(),
+        &data,
+        &online_devices,
+        AiTool::Codex,
+        HookTransition::Display(HookBehavior::Running),
+        "screen-1",
+    )
+    .unwrap();
+
+    assert!(!forwarded);
+}
+
 // 验证 relay_hook 能根据事件类型计算出正确的行为状态，并转发到已配置的设备路由，
 // 同时正确更新中继状态（收到数、转发数、最近行为、无错误信息）。
 #[test]
@@ -48,8 +115,14 @@ fn relay_computes_state_and_uses_a_configured_device_route() {
         hook_config_directories: HookConfigDirectories::default(),
     }));
     let status = Arc::new(RwLock::new(HookRelayStatus::default()));
-    // 在线设备列表为空，验证会回退使用保存的设备路由。
-    let online_devices = Arc::new(RwLock::new(Vec::new()));
+    let online_devices = Arc::new(RwLock::new(vec![DiscoveredMonitorDevice {
+        id: "screen-1".to_owned(),
+        name: "Desk".to_owned(),
+        api_version: "1".to_owned(),
+        base_url: format!("http://{address}"),
+        path: DEFAULT_DEVICE_API_PATH.to_owned(),
+        discovery_source: DiscoverySource::Mdns,
+    }]));
 
     // 触发一次 UserPromptSubmit 事件（应转换为 Running 行为）。
     relay_hook(
@@ -77,11 +150,10 @@ fn relay_computes_state_and_uses_a_configured_device_route() {
     assert!(status.last_error.is_empty());
 }
 
-// 验证转发时会优先使用在线快照中的最新地址：设备 screen-1 保存的地址不可达（已 drop 掉监听器），
-// 设备 screen-2 保存的地址同样不可达，但在线快照里提供了它的新地址 available_address；
-// 两台设备各触发一次转发（一次失败一次成功），断言实际收到请求的是使用了在线新地址的那台。
+// 验证转发时只使用在线快照中的设备及最新地址：screen-1 虽有历史记录和
+// Profile，但不在线；screen-2 在线并由发现快照提供可用新地址。
 #[test]
-fn relay_prioritizes_online_routes_and_uses_their_latest_address() {
+fn relay_filters_offline_routes_and_uses_the_online_address() {
     // 绑定后立即 drop，得到一个必定连接失败的地址。
     let unavailable_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let unavailable_address = unavailable_listener.local_addr().unwrap();
@@ -153,11 +225,11 @@ fn relay_prioritizes_online_routes_and_uses_their_latest_address() {
     assert!(request.starts_with("POST /api/slots/7 HTTP/1.1"));
     assert!(request.contains(r#""username":"Desk user""#));
     let status = status.read().unwrap();
-    // 收到一次事件，成功转发 1 次（screen-2），失败 1 次（screen-1 用的仍是不可达保存地址）。
+    // 收到一次事件，只成功转发给 screen-2；离线的 screen-1 不算转发失败。
     assert_eq!(status.received_count, 1);
     assert_eq!(status.forwarded_count, 1);
-    assert_eq!(status.failed_count, 1);
-    assert!(status.last_error.contains("Desk"));
+    assert_eq!(status.failed_count, 0);
+    assert!(status.last_error.is_empty());
 }
 
 // 验证转发给多台设备是真正并发执行的：两台设备各自延迟 400ms 才响应，
@@ -195,7 +267,24 @@ fn relay_forwards_to_multiple_devices_concurrently_instead_of_one_at_a_time() {
         hook_config_directories: HookConfigDirectories::default(),
     }));
     let status = Arc::new(RwLock::new(HookRelayStatus::default()));
-    let online_devices = Arc::new(RwLock::new(Vec::new()));
+    let online_devices = Arc::new(RwLock::new(vec![
+        DiscoveredMonitorDevice {
+            id: "screen-1".to_owned(),
+            name: "Desk".to_owned(),
+            api_version: "1".to_owned(),
+            base_url: format!("http://{address_one}"),
+            path: DEFAULT_DEVICE_API_PATH.to_owned(),
+            discovery_source: DiscoverySource::Mdns,
+        },
+        DiscoveredMonitorDevice {
+            id: "screen-2".to_owned(),
+            name: "Studio".to_owned(),
+            api_version: "1".to_owned(),
+            base_url: format!("http://{address_two}"),
+            path: DEFAULT_DEVICE_API_PATH.to_owned(),
+            discovery_source: DiscoverySource::Mdns,
+        },
+    ]));
     // Built and warmed up before starting the clock: constructing a
     // blocking::Client spins up its background runtime, which is a
     // one-off cost unrelated to what this test measures.

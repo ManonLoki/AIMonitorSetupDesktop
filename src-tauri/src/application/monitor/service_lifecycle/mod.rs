@@ -16,10 +16,10 @@ use super::{
 };
 use crate::domain::monitor::{
     AiProfile, AiTool, HookConfigLocation, HookConfigWriteResult, MonitorSettings,
-    SavedMonitorData, contains_managed_hook_config, generate_hook_auxiliary_configs,
-    generate_hook_config, hook_config_filename, hook_requires_review, hook_restart_required,
-    merge_hook_config, normalize_enabled_ai_tools, validate_discovery_interval_minutes,
-    validate_profile, validate_saved_monitor_data, validate_username,
+    SavedMonitorData, generate_hook_auxiliary_configs, generate_hook_config, hook_config_filename,
+    hook_requires_review, hook_restart_required, merge_hook_config, normalize_enabled_ai_tools,
+    validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
+    validate_username,
 };
 
 #[cfg(test)]
@@ -63,56 +63,6 @@ impl MonitorService {
                 ..HookRelayStatus::default()
             })),
         })
-    }
-
-    /// 升级应用后自动刷新已经存在的 `AIMonitor` Hook 条目。
-    ///
-    /// v2.0.10 及更早版本的 Windows 命令会把 AI 客户端原始 stdin 直接 POST
-    /// 到 listener；新版 listener 只接受最小信封。仅靠升级可执行文件不会修改
-    /// 已落盘的旧命令，因此这里在启动时做一次受控迁移。没有 `AIMonitor` 标识的
-    /// 用户配置保持原样，也不会为尚未配置的工具创建文件。
-    pub fn migrate_existing_managed_hook_configs(&self) -> Result<usize, String> {
-        let _write_guard = self
-            .hook_config_write_lock
-            .lock()
-            .map_err(|_| "Hooks 配置迁移锁已损坏".to_owned())?;
-        let data = self
-            .data
-            .read()
-            .map_err(|_| "Hooks 配置迁移读取锁已损坏".to_owned())?;
-        let relay_executable = std::env::current_exe()
-            .map_err(|error| format!("无法定位 AIMonitor Hook relay：{error}"))?;
-        let mut migrated_files = 0;
-
-        for tool in AiTool::ALL {
-            let location = self.hook_config_location(&data, tool);
-            let config_path = PathBuf::from(&location.config_path);
-            let generated = generate_hook_config(tool, &relay_executable)?;
-            let mut generated_files = vec![(config_path, generated)];
-            generated_files.extend(generate_hook_auxiliary_configs(tool).into_iter().map(
-                |preview| {
-                    (
-                        Path::new(&location.directory).join(&preview.filename),
-                        preview,
-                    )
-                },
-            ));
-
-            for (path, generated) in generated_files {
-                let Some(existing) = read_optional_config(&path)? else {
-                    continue;
-                };
-                if !contains_managed_hook_config(&existing, tool) {
-                    continue;
-                }
-                let merged = merge_hook_config(Some(&existing), &generated, tool)?;
-                if merged.content != existing {
-                    write_config(&path, &merged.content)?;
-                    migrated_files += 1;
-                }
-            }
-        }
-        Ok(migrated_files)
     }
 
     // 读取当前持久化的设置数据（克隆一份返回，避免长期持有锁）。

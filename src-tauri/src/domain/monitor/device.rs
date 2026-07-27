@@ -45,7 +45,6 @@ pub enum AiTool {
     Cursor,
     OpenCode,
     WorkBuddy,
-    #[serde(alias = "harness")]
     Hermes,
     OpenClaw,
     CodeBuddy,

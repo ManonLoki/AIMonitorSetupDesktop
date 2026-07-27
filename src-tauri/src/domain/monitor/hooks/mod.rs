@@ -16,7 +16,7 @@ mod work_buddy;
 use serde_json::{Map, Value, json};
 
 use generation::command_has_marker;
-pub use generation::{contains_managed_hook_config, generate_hook_config, merge_hook_config};
+pub use generation::{generate_hook_config, merge_hook_config};
 
 use super::{AiTool, HookBehavior, HookConfigPreview, HookTransition};
 
@@ -275,21 +275,12 @@ pub(crate) fn managed_hook_marker(tool: AiTool) -> String {
     format!("{MANAGED_HOOK_PREFIX}:tool={}", protocol(tool).slug())
 }
 
-// v2.1.4 及更早版本使用 `|` 分隔符。它会被部分 Windows Hook 宿主先交给
-// PowerShell 解释，从而在 AIMonitor 启动前被拆成管道。旧标识只用于识别和迁移，
-// 新写入的命令统一使用不含 shell 元字符的 `:` 分隔符。
-fn legacy_managed_hook_marker(tool: AiTool) -> String {
-    format!("{MANAGED_HOOK_PREFIX}|tool={}", protocol(tool).slug())
-}
-
 fn contains_managed_marker(content: &str, tool: AiTool) -> bool {
     content.contains(&managed_hook_marker(tool))
-        || content.contains(&legacy_managed_hook_marker(tool))
 }
 
 fn contains_command_marker(command: &str, tool: AiTool) -> bool {
     command_has_marker(command, &managed_hook_marker(tool))
-        || command_has_marker(command, &legacy_managed_hook_marker(tool))
 }
 
 // 按 POSIX shell 单引号规则转义一个参数，供拼接进生成的托管命令字符串。

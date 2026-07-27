@@ -48,6 +48,8 @@ pub fn run() {
         })
         // 注册对话框插件（用于原生文件/目录选择等对话框能力）
         .plugin(tauri_plugin_dialog::init())
+        // 注册系统打开能力，设置页的 GitHub 链接由默认浏览器打开
+        .plugin(tauri_plugin_opener::init())
         // 注册应用初始化（setup）钩子，在应用启动时执行一次性初始化逻辑
         .setup(|app| {
             // 初始化桌面运行时：设置激活策略、构建托盘菜单与图标
@@ -73,10 +75,6 @@ pub fn run() {
             // 加载监控服务：基于应用数据目录与用户主目录初始化状态，失败则转换为 io::Error
             let service =
                 MonitorService::load(&app_data_dir, &config_home).map_err(std::io::Error::other)?;
-            // 升级后自动替换已存在的 AIMonitor 旧 Hook 命令，避免 Windows 上旧版
-            // PowerShell 条目继续把 transcript_path 等原始字段直接发给严格 listener。
-            // 迁移失败不阻止桌面端启动；用户仍可在 Hooks 管理中手动重写并看到错误。
-            let _ = service.migrate_existing_managed_hook_configs();
             // 启动 hook 监听器，接收外部工具发来的 hook 事件
             service.start_hook_listener();
             // 启动后台设备发现任务，定期在局域网内扫描监控设备

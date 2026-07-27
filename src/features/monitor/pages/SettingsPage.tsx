@@ -1,6 +1,7 @@
-// 引入 Mantine UI 组件：提示、按钮、卡片、分组/堆叠布局、数字输入框、开关、文本、文本输入框、标题
+// 引入 Mantine UI 组件：提示、链接、按钮、卡片、分组/堆叠布局、数字输入框、开关、文本、文本输入框、标题
 import {
   Alert,
+  Anchor,
   Button,
   Card,
   Checkbox,
@@ -13,6 +14,7 @@ import {
   TextInput,
   Title,
 } from "@mantine/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 // 引入 TanStack Query 的 mutation/query hooks 及 queryClient
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 // 引入 React 的副作用与状态 hooks
@@ -45,6 +47,8 @@ import { LineIcon } from "../../../shared/ui/LineIcon";
 const DEFAULT_DISCOVERY_INTERVAL_MINUTES = 1;
 const MIN_DISCOVERY_INTERVAL_MINUTES = 1;
 const MAX_DISCOVERY_INTERVAL_MINUTES = 60;
+const AUTHOR = "ManonLoki";
+const GITHUB_URL = "https://github.com/ManonLoki/AIMonitorSetupDesktop";
 
 export function SettingsPage() {
   // 获取 QueryClient 实例，用于在 mutation 成功后手动写入缓存
@@ -308,6 +312,48 @@ export function SettingsPage() {
               autostart.mutate(event.currentTarget.checked)
             }
           />
+        </Stack>
+      </Card>
+
+      <Card
+        withBorder
+        radius="lg"
+        p="sm"
+        className="surface-card settings-card"
+      >
+        <Stack gap="xs">
+          <div>
+            <Title order={4}>关于</Title>
+            <Text size="xs" c="dimmed" mt={2}>
+              AIMonitor 的项目与维护信息。
+            </Text>
+          </div>
+          <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
+            <div>
+              <Text size="xs" c="dimmed">
+                作者
+              </Text>
+              <Text size="sm" fw={600}>
+                {AUTHOR}
+              </Text>
+            </div>
+            <div>
+              <Text size="xs" c="dimmed">
+                GitHub
+              </Text>
+              <Anchor
+                href={GITHUB_URL}
+                size="sm"
+                fw={600}
+                onClick={(event) => {
+                  event.preventDefault();
+                  void openUrl(GITHUB_URL);
+                }}
+              >
+                {GITHUB_URL}
+              </Anchor>
+            </div>
+          </SimpleGrid>
         </Stack>
       </Card>
     </Stack>

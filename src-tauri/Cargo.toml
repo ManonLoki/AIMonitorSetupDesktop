@@ -1,6 +1,6 @@
 [package]
 name = "ai-monitor-setup"
-version = "2.1.6"
+version = "2.1.7"
 description = "AI monitor desktop application"
 authors = ["ManonLoki"]
 edition = "2024"
@@ -30,6 +30,7 @@ serde_json = "1.0.145"
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-dialog = "2.7.2"
+tauri-plugin-opener = "2.5.4"
 tauri-plugin-single-instance = "2.4.3"
 tokio = { version = "1.53.1", features = ["net"] }
 
