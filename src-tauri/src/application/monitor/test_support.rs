@@ -9,10 +9,7 @@ use std::{
     time::Duration,
 };
 
-use crate::domain::monitor::{
-    AiProfile, AiTool, HookBehavior, HookConfigDirectories, MonitorDeviceRoute, MonitorSettings,
-    SavedMonitorData, device::HookContent,
-};
+use crate::domain::monitor::{AiProfile, AiTool, HookBehavior, device::HookContent};
 
 // 构造一个测试用的 AI Profile：Codex 工具、槽位 1，四种行为各配一张示例图片。
 pub(super) fn test_profile() -> AiProfile {
@@ -33,41 +30,6 @@ pub(super) fn test_profile() -> AiProfile {
             image: image.to_owned(),
         })
         .collect(),
-    }
-}
-
-// 构造两台设备各配一个 AI 工具（Codex/ClaudeCode）的已保存数据，
-// 供跨工具投递隔离性测试使用。
-pub(super) fn two_tool_delivery_data(
-    codex_address: SocketAddr,
-    claude_address: SocketAddr,
-) -> SavedMonitorData {
-    let mut claude_profile = test_profile();
-    claude_profile.tool = AiTool::ClaudeCode;
-    claude_profile.device_id = "screen-2".to_owned();
-    claude_profile.slot = 2;
-    SavedMonitorData {
-        settings: MonitorSettings {
-            base_url: format!("http://{codex_address}"),
-            username: "Manon".to_owned(),
-            device_id: "screen-1".to_owned(),
-            device_name: "Desk".to_owned(),
-            ..MonitorSettings::default()
-        },
-        devices: vec![
-            MonitorDeviceRoute {
-                base_url: format!("http://{codex_address}"),
-                device_id: "screen-1".to_owned(),
-                device_name: "Desk".to_owned(),
-            },
-            MonitorDeviceRoute {
-                base_url: format!("http://{claude_address}"),
-                device_id: "screen-2".to_owned(),
-                device_name: "Studio".to_owned(),
-            },
-        ],
-        profiles: vec![test_profile(), claude_profile],
-        hook_config_directories: HookConfigDirectories::default(),
     }
 }
 

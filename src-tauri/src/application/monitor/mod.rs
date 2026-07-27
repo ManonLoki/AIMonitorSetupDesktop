@@ -66,8 +66,8 @@ const MAX_HOOK_BODY_BYTES: usize = 4 * 1024;
 // listener 到状态机 worker 的队列使用固定容量；状态机推进不再等待设备网络，
 // 正常情况下会很快腾出空间，极端洪峰则通过短暂背压保护进程内存。
 const HOOK_EVENT_QUEUE_CAPACITY: usize = 256;
-// 每个工具在自己的投递 worker 前最多只需要一个唤醒令牌：若该工具已经有
-// 一个待发送的最新状态，后续事件只覆盖 mailbox，不再重复排队唤醒。
+// 每个“设备 + 工具”投递 worker 最多只需要一个唤醒令牌：若目标队列已有
+// 待发送状态，后续事件按该工具的 latest-wins/FIFO 策略更新队列即可。
 const HOOK_RELAY_WAKE_QUEUE_CAPACITY: usize = 1;
 // 会话长时间没有任何事件时视为孤儿并回收。超时只清理内部记录，不释放设备槽位；
 // 新事件仍可按当前事件语义重新建立隐式会话，因此不会让后续真实状态永久丢失。

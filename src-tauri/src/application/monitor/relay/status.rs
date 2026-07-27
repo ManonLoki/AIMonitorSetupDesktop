@@ -73,6 +73,14 @@ pub(super) fn record_suppressed_hook(
     }
 }
 
+// 同一事件已投递到部分目标、但在另一些慢目标的 latest-wins 队列中被更新状态
+// 覆盖时，只增加时序抑制计数；事件本身的 received/pending 已由聚合 tracker 记账。
+pub(super) fn record_partial_suppression(status: &Arc<RwLock<HookRelayStatus>>) {
+    if let Ok(mut current) = status.write() {
+        current.suppressed_count += 1;
+    }
+}
+
 // 记录一次中继层面的失败（如监听启动失败、请求解析失败等，与具体转发无关）。
 pub(crate) fn record_relay_failure(status: &Arc<RwLock<HookRelayStatus>>, error: String) {
     if let Ok(mut current) = status.write() {

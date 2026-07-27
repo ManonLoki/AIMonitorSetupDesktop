@@ -1,16 +1,18 @@
 // 把一个已通过去抖判定的 Hook 事件实际转发给设备：转换成展示/释放行为，
 // 并发 POST/DELETE 到每台配置了该 AI 工具的在线优先设备。
-use std::{
-    collections::HashSet,
-    sync::{Arc, RwLock},
-    thread,
-};
+use std::sync::{Arc, RwLock};
+
+#[cfg(test)]
+use std::{collections::HashSet, thread};
 
 use serde::Serialize;
 
+#[cfg(test)]
 use super::{status::record_hook_results_with_accounting, worker::PendingHookRelay};
+#[cfg(test)]
+use crate::application::monitor::HookRelayStatus;
 use crate::{
-    application::monitor::{HookRelayStatus, device_response::ensure_success_blocking},
+    application::monitor::device_response::ensure_success_blocking,
     domain::monitor::{
         AiProfile, AiTool, DiscoveredMonitorDevice, HookBehavior, HookTransition,
         MonitorDeviceRoute, SavedMonitorData, ai_tool_name,
@@ -26,6 +28,70 @@ struct SlotUpdateRequest<'a> {
     behavior: HookBehavior,
     content: &'a str,
     image: &'a str,
+}
+
+// 返回当前为指定工具配置了 Profile 的设备 ID。投递调度按这些 ID 建立
+// “设备 + 工具”独立队列，避免任一慢设备阻塞其他设备的状态更新。
+pub(super) fn configured_target_ids(
+    data: &Arc<RwLock<SavedMonitorData>>,
+    tool: AiTool,
+) -> Result<Vec<String>, String> {
+    let data = data.read().map_err(|_| "转发配置读取锁已损坏".to_owned())?;
+    Ok(data
+        .profiles
+        .iter()
+        .filter(|profile| profile.tool == tool)
+        .map(|profile| profile.device_id.clone())
+        .collect())
+}
+
+// 只向一台目标设备投递状态。设备路由和 Profile 在真正发送前读取最新快照，
+// 因而队列等待期间发生的地址发现或配置修改仍会生效。
+pub(super) fn forward_hook_to_target(
+    client: &reqwest::blocking::Client,
+    data: &Arc<RwLock<SavedMonitorData>>,
+    online_devices: &Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
+    tool: AiTool,
+    transition: HookTransition,
+    device_id: &str,
+) -> Result<(), String> {
+    let data = data.read().map_err(|_| "转发配置读取锁已损坏".to_owned())?;
+    let username = data.settings.username.clone();
+    let saved_device = data
+        .devices
+        .iter()
+        .find(|device| device.device_id == device_id)
+        .cloned()
+        .ok_or_else(|| format!("目标设备 {device_id} 不存在"))?;
+    let profile = data
+        .profiles
+        .iter()
+        .find(|profile| profile.device_id == device_id && profile.tool == tool)
+        .cloned()
+        .ok_or_else(|| format!("目标设备 {} 的 AI Profile 不存在", saved_device.device_name))?;
+    drop(data);
+
+    let online_device = online_devices.read().ok().and_then(|devices| {
+        devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .cloned()
+    });
+    let effective_device =
+        online_device.map_or(saved_device.clone(), |device| MonitorDeviceRoute {
+            base_url: device.base_url,
+            device_id: device.id,
+            device_name: device.name,
+        });
+    forward_profile(
+        client,
+        tool,
+        transition,
+        &username,
+        &effective_device,
+        &profile,
+    )
+    .map_err(|error| format!("{}：{error}", effective_device.device_name))
 }
 
 #[cfg(test)]
@@ -54,7 +120,8 @@ fn relay_hook(
 
 // 处理一个已通过去抖判定的 Hook 事件：找出所有配置了该工具的设备（在线
 // 快照优先），并发转发，最终把结果（成功数/错误列表）记录进中继状态。
-pub(super) fn relay_hook_with_accounting(
+#[cfg(test)]
+fn relay_hook_with_accounting(
     client: &reqwest::blocking::Client,
     data: &Arc<RwLock<SavedMonitorData>>,
     online_devices: &Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
@@ -148,6 +215,7 @@ pub(super) fn relay_hook_with_accounting(
 /// 并发转发给每台已配置该 AI 的设备：先一次性 spawn 所有目标的转发线程，
 /// 再统一 join，这样单台设备网络慢或不可达时不会拖慢其余设备收到状态更新的
 /// 时间；每台设备的成功/失败互不影响。
+#[cfg(test)]
 fn forward_to_all_targets(
     client: &reqwest::blocking::Client,
     tool: AiTool,
