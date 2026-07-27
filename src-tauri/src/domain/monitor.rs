@@ -5,14 +5,12 @@ use std::time::Duration;
 
 // serde：结构体/枚举的序列化与反序列化派生宏。
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 mod hooks;
 
 use hooks::{HookEventKind, event_kind};
 #[cfg(test)]
-use hooks::{
-    MANAGED_HOOK_PREFIX, command_has_marker, decoded_hook_command, hook_transition,
-    managed_hook_marker,
-};
+use hooks::{MANAGED_HOOK_PREFIX, command_has_marker, hook_transition, managed_hook_marker};
 pub use hooks::{
     ai_tool_name, generate_hook_auxiliary_configs, generate_hook_config, hook_config_filename,
     hook_requires_review, hook_restart_required, merge_hook_config, tool_from_slug,
@@ -28,6 +26,68 @@ pub const DEFAULT_DISCOVERY_INTERVAL_MINUTES: u64 = 1;
 pub const MIN_DISCOVERY_INTERVAL_MINUTES: u64 = 1;
 // 自动检查间隔允许的最大值（分钟），避免设置过大导致长时间感知不到设备上下线。
 pub const MAX_DISCOVERY_INTERVAL_MINUTES: u64 = 60;
+
+/// AI 客户端原生 Hook 输入允许的最大体积。原始输入只在短生命周期的 relay
+/// 子进程里解析，随后立即压缩为下方的最小信封，不会进入 listener 队列。
+pub const MAX_NATIVE_HOOK_INPUT_BYTES: usize = 4 * 1024 * 1024;
+
+/// 本机 Hook 接口的唯一正文契约。设备展示文案、图片、用户名等数据不属于
+/// AI Hook 传输层，由常驻 `AIMonitor` 的状态机和 Profile 在后续设备转发阶段补齐。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MinimalHookPayload {
+    pub hook_event_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// 从各命令型 AI 客户端写入 stdin 的原生 JSON 中只提取状态机必需字段。
+/// 未知字段（`prompt`、`transcript`、`tool_input/output` 等）在进入 HTTP 边界前丢弃。
+pub fn minimize_native_hook_payload(
+    native_json: &[u8],
+    configured_event: &str,
+) -> Result<MinimalHookPayload, String> {
+    if native_json.is_empty() || native_json.len() > MAX_NATIVE_HOOK_INPUT_BYTES {
+        return Err("AI Hook 原始输入为空或过大".to_owned());
+    }
+    let source = serde_json::from_slice::<Value>(native_json)
+        .map_err(|error| format!("AI Hook 原始 JSON 无效：{error}"))?;
+    let source = source
+        .as_object()
+        .ok_or_else(|| "AI Hook 原始 JSON 的根节点必须是对象".to_owned())?;
+    let body_event = string_field(source, &["hook_event_name", "type"]);
+    if body_event
+        .as_deref()
+        .is_some_and(|event| event.trim() != configured_event)
+    {
+        return Err("AI Hook 原始事件与配置事件不一致".to_owned());
+    }
+    Ok(MinimalHookPayload {
+        hook_event_name: configured_event.to_owned(),
+        session_id: string_field(source, &["session_id", "conversation_id"]),
+        turn_id: string_field(source, &["turn_id", "generation_id"]),
+        status: scalar_field(source, "status"),
+    })
+}
+
+fn string_field(source: &Map<String, Value>, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| source.get(*name).and_then(Value::as_str).map(str::to_owned))
+}
+
+fn scalar_field(source: &Map<String, Value>, name: &str) -> Option<String> {
+    match source.get(name) {
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(Value::Bool(value)) => Some(value.to_string()),
+        Some(Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
 
 // 与前端 TypeScript 对接的 DTO：序列化为 camelCase 字段名。
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1060,7 +1120,7 @@ fn replace_image_extension(filename: &str, extension: &str) -> String {
 // 仅在测试构建中编译的单元测试模块，覆盖本文件内的纯业务逻辑。
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{path::Path, time::Duration};
 
     use serde_json::Value;
 
@@ -1070,12 +1130,16 @@ mod tests {
         HookConfigDirectories, HookConfigPreview, HookContent, HookEventDecision, HookPhase,
         HookStateMachine, HookTransition, MANAGED_HOOK_PREFIX, MAX_DISCOVERY_INTERVAL_MINUTES,
         MAX_TRACKED_HOOK_SESSIONS, MAX_UPLOAD_IMAGE_EDGE, MonitorDeviceRoute, MonitorSettings,
-        SavedMonitorData, command_has_marker, decoded_hook_command, default_enabled_ai_tools,
+        SavedMonitorData, command_has_marker, default_enabled_ai_tools, encode_base64,
         generate_hook_auxiliary_configs, generate_hook_config, hook_transition,
-        managed_hook_marker, merge_hook_config, normalize_base_url, normalize_enabled_ai_tools,
-        process_image_upload, validate_discovery_interval_minutes, validate_profile,
-        validate_saved_monitor_data, validate_username,
+        managed_hook_marker, merge_hook_config, minimize_native_hook_payload, normalize_base_url,
+        normalize_enabled_ai_tools, process_image_upload, validate_discovery_interval_minutes,
+        validate_profile, validate_saved_monitor_data, validate_username,
     };
+
+    fn generate_test_hook_config(tool: AiTool) -> Result<HookConfigPreview, String> {
+        generate_hook_config(tool, Path::new("/opt/AIMonitor/AIMonitor"))
+    }
 
     // 测试用的工厂函数：构造一个四种行为齐全、校验可通过的合法 Profile。
     fn profile(tool: AiTool) -> AiProfile {
@@ -1225,10 +1289,10 @@ mod tests {
     }
 
     // 验证 Cursor 生成的 Hooks 配置：事件名使用 camelCase，包含预期事件，
-    // 不含 Claude/Codex 专属事件，且中继调用格式正确（带 printf 空对象输出）。
+    // 不含 Claude/Codex 专属事件，且调用 AIMonitor 自身的轻量 relay 子命令。
     #[test]
     fn cursor_preview_uses_cursor_event_names_and_shape() {
-        let preview = generate_hook_config(AiTool::Cursor).unwrap();
+        let preview = generate_test_hook_config(AiTool::Cursor).unwrap();
 
         assert_eq!(preview.filename, ".cursor/hooks.json");
         assert!(preview.content.contains("\"beforeSubmitPrompt\""));
@@ -1242,10 +1306,9 @@ mod tests {
         assert!(preview.content.contains("\"preCompact\""));
         assert!(preview.content.contains("\"afterAgentResponse\""));
         assert!(preview.content.contains("\"sessionEnd\""));
-        assert!(preview.content.contains("127.0.0.1:10240/api/hooks/cursor"));
+        assert!(preview.content.contains("--aimonitor-hook-relay"));
+        assert!(preview.content.contains("cursor"));
         assert!(preview.content.contains("AIMonitor|tool=cursor"));
-        // Cursor 需要 stdout 输出空 JSON 对象。
-        assert!(preview.content.contains("printf '{}'"));
         // 不应出现 Claude Code 专属的 Notification 事件（小写形式）。
         assert!(!preview.content.contains("\"notification\""));
         // Cursor 的条目结构没有 "type": "command" 字段（这是 Claude/Codex 的结构）。
@@ -1256,7 +1319,7 @@ mod tests {
     // 且 Notification 事件带有 idle_prompt matcher，而普通事件（如 SessionStart）没有 matcher。
     #[test]
     fn claude_preview_covers_permission_and_lifecycle_events() {
-        let preview = generate_hook_config(AiTool::ClaudeCode).unwrap();
+        let preview = generate_test_hook_config(AiTool::ClaudeCode).unwrap();
 
         assert_eq!(preview.filename, ".claude/settings.json");
         assert!(preview.content.contains("\"SessionStart\""));
@@ -1268,8 +1331,7 @@ mod tests {
         assert!(preview.content.contains("\"SessionEnd\""));
         assert!(preview.content.contains("\"Notification\""));
         assert!(preview.content.contains("AIMonitor|tool=claude-code"));
-        // Claude Code 会把 stdout 当协议数据解析，命令输出必须被丢弃。
-        assert!(preview.content.contains(">/dev/null"));
+        assert!(preview.content.contains("--aimonitor-hook-relay"));
         let value: Value = serde_json::from_str(&preview.content).unwrap();
         // Notification 事件应带有 idle_prompt matcher，用于区分具体子类型。
         assert_eq!(value["hooks"]["Notification"][0]["matcher"], "idle_prompt");
@@ -1278,11 +1340,11 @@ mod tests {
     }
 
     // 验证 Codex 生成的 Hooks 配置：事件名使用 PascalCase 且没有独立 Error 事件；
-    // 每个 handler 同时包含 POSIX 命令（command）和 Windows 命令（commandWindows，
-    // 以 -EncodedCommand 方式编码），且都能被正确解码、包含中继地址与托管标记。
+    // 每个 handler 同时包含 POSIX 命令和 Windows 命令，二者都直接调用当前
+    // AIMonitor 可执行文件的轻量 relay 子命令，不依赖 PowerShell/curl。
     #[test]
     fn codex_preview_uses_pascal_case_and_nested_handlers() {
-        let preview = generate_hook_config(AiTool::Codex).unwrap();
+        let preview = generate_test_hook_config(AiTool::Codex).unwrap();
 
         assert_eq!(preview.filename, ".codex/hooks.json");
         assert!(preview.content.contains("\"SessionStart\""));
@@ -1292,29 +1354,27 @@ mod tests {
         assert!(!preview.content.contains("\"Error\""));
         assert!(preview.content.contains("\"PostToolUse\""));
         assert!(preview.content.contains("\"SessionEnd\""));
-        assert!(preview.content.contains(">/dev/null"));
         assert!(preview.content.contains("AIMonitor|tool=codex"));
         assert!(preview.content.contains("\"type\": \"command\""));
         assert!(preview.content.contains("\"commandWindows\""));
-        assert!(preview.content.contains("powershell.exe"));
-        assert!(preview.content.contains("-EncodedCommand"));
+        assert!(!preview.content.contains("powershell.exe"));
+        assert!(!preview.content.contains("Invoke-RestMethod"));
+        assert!(preview.content.contains("/opt/AIMonitor/AIMonitor"));
         let value: Value = serde_json::from_str(&preview.content).unwrap();
-        // 取出 SessionEnd 的 POSIX 命令，确认其中携带中继地址和事件名。
+        // 取出 SessionEnd 的 POSIX 命令，确认其中携带 relay 子命令和事件名。
         let session_end = value["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        assert!(session_end.contains("127.0.0.1:10240/api/hooks/codex"));
+        assert!(session_end.contains("--aimonitor-hook-relay"));
+        assert!(session_end.contains("codex"));
         assert!(session_end.contains("SessionEnd"));
         assert_eq!(value["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
-        // 取出 Stop 的 Windows 命令（编码后的 PowerShell），解码后验证内容正确。
+        // Windows 命令保持明文、携带托管标记，旧版 EncodedCommand 仍可由清理逻辑识别。
         let windows = value["hooks"]["Stop"][0]["hooks"][0]["commandWindows"]
             .as_str()
             .unwrap();
-        let decoded = decoded_hook_command(windows).unwrap();
-        assert!(decoded.contains("127.0.0.1:10240/api/hooks/codex"));
-        assert!(decoded.contains(MANAGED_HOOK_PREFIX));
-        assert!(decoded.contains("while ($true)"));
-        assert!(decoded.contains("Start-Sleep -Seconds 1"));
+        assert!(windows.contains("--aimonitor-hook-relay"));
+        assert!(windows.contains(MANAGED_HOOK_PREFIX));
         // command_has_marker 应能在未解码的编码命令上直接识别出托管标记。
         assert!(command_has_marker(
             windows,
@@ -1323,8 +1383,26 @@ mod tests {
     }
 
     #[test]
+    fn windows_hook_command_quotes_the_installed_executable_without_powershell() {
+        let preview = generate_hook_config(
+            AiTool::Codex,
+            Path::new(r"C:\Program Files\AIMonitor\AIMonitor.exe"),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&preview.content).unwrap();
+        let command = value["hooks"]["PostToolUse"][0]["hooks"][0]["commandWindows"]
+            .as_str()
+            .unwrap();
+
+        assert!(command.starts_with("cmd.exe /d /s /c \"\"C:\\Program Files"));
+        assert!(command.contains("AIMonitor.exe\" --aimonitor-hook-relay"));
+        assert!(command.ends_with("--managed-by \"AIMonitor|tool=codex\"\""));
+        assert!(!command.contains("powershell"));
+    }
+
+    #[test]
     fn work_buddy_preview_targets_its_independent_settings_file() {
-        let preview = generate_hook_config(AiTool::WorkBuddy).unwrap();
+        let preview = generate_test_hook_config(AiTool::WorkBuddy).unwrap();
 
         assert_eq!(preview.filename, ".workbuddy/settings.json");
         assert!(preview.content.contains("\"SessionStart\""));
@@ -1334,7 +1412,7 @@ mod tests {
 
     #[test]
     fn open_code_preview_is_a_managed_global_plugin() {
-        let preview = generate_hook_config(AiTool::OpenCode).unwrap();
+        let preview = generate_test_hook_config(AiTool::OpenCode).unwrap();
 
         assert_eq!(preview.filename, ".config/opencode/plugins/aimonitor.js");
         assert!(preview.content.contains("AIMonitor|tool=opencode"));
@@ -1359,18 +1437,18 @@ mod tests {
 
     #[test]
     fn code_buddy_preview_uses_its_native_config_and_posix_hook_command() {
-        let preview = generate_hook_config(AiTool::CodeBuddy).unwrap();
+        let preview = generate_test_hook_config(AiTool::CodeBuddy).unwrap();
 
         assert_eq!(preview.filename, ".codebuddy/settings.json");
         assert!(preview.content.contains("\"PermissionRequest\""));
         assert!(preview.content.contains("AIMonitor|tool=codebuddy"));
-        assert!(preview.content.contains("/api/hooks/codebuddy"));
+        assert!(preview.content.contains("--aimonitor-hook-relay"));
         assert!(!preview.content.contains("powershell.exe"));
     }
 
     #[test]
     fn hermes_preview_contains_a_complete_managed_plugin() {
-        let preview = generate_hook_config(AiTool::Hermes).unwrap();
+        let preview = generate_test_hook_config(AiTool::Hermes).unwrap();
         let auxiliary = generate_hook_auxiliary_configs(AiTool::Hermes);
 
         assert_eq!(preview.filename, ".hermes/plugins/aimonitor/__init__.py");
@@ -1397,7 +1475,7 @@ mod tests {
 
     #[test]
     fn open_claw_preview_contains_a_complete_managed_plugin() {
-        let preview = generate_hook_config(AiTool::OpenClaw).unwrap();
+        let preview = generate_test_hook_config(AiTool::OpenClaw).unwrap();
         let auxiliary = generate_hook_auxiliary_configs(AiTool::OpenClaw);
 
         assert!(preview.content.contains("AIMonitor|tool=openclaw"));
@@ -1421,7 +1499,7 @@ mod tests {
     // 且用户手工添加的其他命令、其他顶层字段（如 permissions）会被保留。
     #[test]
     fn codex_merge_is_idempotent_and_preserves_other_commands() {
-        let generated = generate_hook_config(AiTool::Codex).unwrap();
+        let generated = generate_test_hook_config(AiTool::Codex).unwrap();
         // 第一次合并：从空配置开始生成初始文件。
         let first = merge_hook_config(None, &generated, AiTool::Codex).unwrap();
         let mut value: Value = serde_json::from_str(&first.content).unwrap();
@@ -1442,21 +1520,38 @@ mod tests {
 
         // 用户的 "other-app notify" 命令应恰好保留一份，没有被重复或删除。
         assert_eq!(serialized.matches("other-app notify").count(), 1);
-        // 托管标记应恰好出现一次，说明没有累积重复的托管条目。
+        // 同一托管 handler 的 POSIX/Windows 命令各带一个标记；总计两个说明
+        // 只有一组托管 handler，没有因重复合并继续累积。
         assert_eq!(
             serialized
                 .matches(&managed_hook_marker(AiTool::Codex))
                 .count(),
-            1
+            2
         );
         // 用户手工添加的 permissions 字段应被完整保留。
         assert_eq!(value["permissions"]["allow"][0], "Bash");
     }
 
+    #[test]
+    fn managed_marker_still_recognizes_legacy_powershell_commands() {
+        let marker = managed_hook_marker(AiTool::Codex);
+        let script = format!("$null = '{marker}'; Invoke-RestMethod -Uri 'http://127.0.0.1'");
+        let encoded = script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let command = format!(
+            "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
+            encode_base64(&encoded)
+        );
+
+        assert!(command_has_marker(&command, &marker));
+    }
+
     // 验证 Cursor 的合并逻辑同样幂等，且能正确保留用户命令、去重已有的托管条目。
     #[test]
     fn cursor_merge_is_idempotent_and_preserves_other_commands() {
-        let generated = generate_hook_config(AiTool::Cursor).unwrap();
+        let generated = generate_test_hook_config(AiTool::Cursor).unwrap();
         // 预置一份现有配置：包含用户命令和一条旧格式的托管条目。
         let existing = r#"{
           "version": 1,
@@ -1489,34 +1584,55 @@ mod tests {
         assert!(merge_hook_config(Some(r#"{"hooks":[]}"#), &generated, AiTool::Cursor).is_err());
     }
 
-    // 验证生成的命令直接请求稳定的本机中继地址，带有覆盖冷启动竞态的有界重试，
-    // 且不包含历史上淘汰的独立脚本、默认设备地址或 behavior 业务字段。
+    // 验证命令只启动 AIMonitor 自身的轻量 relay，不依赖 PowerShell/curl，也不包含
+    // 设备地址或 behavior 等后续设备投递数据。
     #[test]
-    fn hook_commands_post_directly_to_the_stable_local_relay() {
-        let preview = generate_hook_config(AiTool::Codex).unwrap();
+    fn hook_commands_use_the_embedded_minimizing_relay() {
+        let preview = generate_test_hook_config(AiTool::Codex).unwrap();
 
-        assert!(preview.content.contains("127.0.0.1:10240/api/hooks/codex"));
-        assert!(
-            preview
-                .content
-                .contains("X-AIMonitor-Hook-Type: SessionStart")
-        );
-        assert!(preview.content.contains("--data-binary @-"));
-        assert!(preview.content.contains("--retry 5"));
-        assert!(preview.content.contains("--retry-connrefused"));
-        assert!(preview.content.contains("--retry-all-errors"));
+        assert!(preview.content.contains("--aimonitor-hook-relay"));
+        assert!(preview.content.contains("SessionStart"));
+        assert!(!preview.content.contains("Invoke-RestMethod"));
+        assert!(!preview.content.contains("curl"));
         assert!(!preview.content.contains("aimonitor-hook.sh"));
         assert!(!preview.content.contains("aimonitor-hook.ps1"));
         assert!(!preview.content.contains(DEFAULT_BASE_URL));
         assert!(!preview.content.contains("\"behavior\":\"running\""));
     }
 
+    #[test]
+    fn native_hook_payload_is_reduced_to_the_state_machine_envelope() {
+        let prompt = "包含中文、\\Windows\\路径和 \"引号\" 的长提示".repeat(100);
+        let native = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "conversation_id": "session-1",
+            "generation_id": "turn-9",
+            "status": 500,
+            "prompt": prompt,
+            "tool_input": { "command": "echo large" },
+            "tool_output": "x".repeat(8_000),
+            "transcript_path": "C:\\Users\\tester\\session.jsonl"
+        });
+        let native_bytes = serde_json::to_vec(&native).unwrap();
+
+        let payload = minimize_native_hook_payload(&native_bytes, "PostToolUse").unwrap();
+        let minimized = serde_json::to_vec(&payload).unwrap();
+
+        assert_eq!(payload.hook_event_name, "PostToolUse");
+        assert_eq!(payload.session_id.as_deref(), Some("session-1"));
+        assert_eq!(payload.turn_id.as_deref(), Some("turn-9"));
+        assert_eq!(payload.status.as_deref(), Some("500"));
+        assert!(native_bytes.len() > 10_000);
+        assert!(minimized.len() < 150);
+        assert!(!String::from_utf8(minimized).unwrap().contains("prompt"));
+    }
+
     // 验证生成的 Hooks 配置只依赖工具类型，不需要预先保存设备展示 Profile。
     #[test]
     fn hook_config_is_identical_when_display_content_changes() {
         assert_eq!(
-            generate_hook_config(AiTool::Codex).unwrap().content,
-            generate_hook_config(AiTool::Codex).unwrap().content
+            generate_test_hook_config(AiTool::Codex).unwrap().content,
+            generate_test_hook_config(AiTool::Codex).unwrap().content
         );
     }
 

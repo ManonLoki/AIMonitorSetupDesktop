@@ -109,20 +109,26 @@ Rust DTO 使用 `serde` 的 `camelCase` 输出以匹配 TypeScript。Command
 AI 工具的 Hooks 不再直接访问监控屏。桌面端是状态计算与转发的唯一事实来源：
 
 ```text
-Codex / Claude Code / Cursor / OpenCode / WorkBuddy / Hermes / OpenClaw / CodeBuddy Hook
-  ↓ POST 127.0.0.1:10240/api/hooks/{tool}，原始 Hook JSON + 受配置控制的事件头
+Codex / Claude Code / Cursor / WorkBuddy / CodeBuddy command Hook
+  ↓ AIMonitor --aimonitor-hook-relay：读取原生 stdin，仅提取必要上下文
+OpenCode / Hermes / OpenClaw native plugin
+  ↓ 直接构造相同的最小信封
+POST 127.0.0.1:10240/api/hooks/{tool}
+  ↓ { hook_event_name, session_id?, turn_id?, status? } + 受配置控制的事件头
 Rust 本机 Hook listener
   ↓ 根据 tool + Hook type 推进纯 Rust 生命周期状态机
 Rust 中读取共享用户名，并按 AI 工具遍历已配置设备的 Profile、路由和显示位置
   ↓ 对每台已配置设备 POST / DELETE /api/slots/{slot}
-AIMonitor APK（单台失败不终止后续设备）
+AIMonitor Android / Desktop（单台失败不终止后续设备）
 ```
 
 - listener 只绑定环回地址，不向局域网暴露 Hook 接口。
-- Hooks 配置直接请求固定的本机地址，不生成 `.sh` 或 `.ps1` runner，也不保存
-  监控屏 IP、用户名、图片或状态规则。
-- AI 客户端与桌面端同时冷启动时，Hook 可能早于本机 listener 完成绑定；生成的
-  Hook 命令会对本机中继连接额外重试 5 次、每次间隔 1 秒。该重试只覆盖
+- 命令型 Hooks 不依赖 PowerShell、curl 或额外 `.sh`/`.ps1` 文件，而是调用当前
+  已安装 AIMonitor 可执行文件的轻量 relay 子命令；该模式在 `main` 入口先行
+  截获，不初始化 Tauri、单实例插件或 UI。配置不保存监控屏 IP、用户名、图片或
+  状态规则；应用安装路径移动后需重新执行一次 Hooks 写入。
+- AI 客户端与桌面端同时冷启动时，Hook 可能早于本机 listener 完成绑定；轻量
+  relay 会对本机中继的连接拒绝额外重试 5 次、每次间隔 1 秒。该重试只覆盖
   工具到本机中继的启动竞态，不改变中继到设备“一次转换只投递一次”的规则。
 - 所有新托管 Hook 命令统一携带大小写固定的 `AIMonitor` 前缀（完整标识如
   `AIMonitor|tool=codex`）。合并、覆盖和后续删除只按该前缀识别。
@@ -152,9 +158,12 @@ AIMonitor APK（单台失败不终止后续设备）
   配置目录仍由 Rust 校验并持久化。用户名缺省时由 Rust 使用本机系统用户名。
   完全没有在线设备时，监控管理和图片管理
   入口禁用，页面也不发起设备业务请求；侧栏明确显示“无可用设备”。
-- Hook 命令把工具写入 stdin 的原始 JSON 原样转发，因此 session、turn、退出
-  原因等上下文不会在传输层丢失；`X-AIMonitor-Hook-Type` 仅作为不含
-  `hook_event_name` 的工具协议兜底，若正文与事件头同时存在但不一致则拒绝。
+- 命令型 Hook 的轻量 relay 在 HTTP 之前解析工具写入 stdin 的原生 JSON，只保留
+  `hook_event_name`、`session_id`、`turn_id`、`status`；同时兼容从原生输入读取
+  Cursor 的 `conversation_id`/`generation_id`，但在线路上统一使用规范字段。
+  prompt、transcript、tool input/output 等无关或敏感大字段不会进入 listener。
+  listener 正文上限为 4 KiB，并以 `deny_unknown_fields` 严格拒绝契约外字段；
+  `X-AIMonitor-Hook-Type` 必须存在且必须与正文事件一致。
   事件到状态的归一化、重复事件消除、迟到完成事件抑制和会话释放全部由
   `domain/monitor.rs` 的状态机决定。事件先后与迟到判断不依赖时间窗口：状态机按
   `session_id` 隔离任务、按 `turn_id` 拒绝旧轮次事件，再聚合为工具的唯一展示
@@ -173,7 +182,7 @@ AIMonitor APK（单台失败不终止后续设备）
   下的独立文件，并统一实现 `HookProtocol`。Trait 负责约束工具元数据、事件语义、
   原生 handler/config 结构、stdout 约定和托管条目清理；公共生成、合并和状态机
   不得按工具硬编码事件字符串。Cursor 的 `conversation_id`/`generation_id` 在
-  listener 边界归一化为 session/turn，`stop.status=error` 归一化为异常展示。
+  轻量 relay 边界归一化为 session/turn，`stop.status=error` 归一化为异常展示。
   OpenCode 使用官方自动发现的全局插件文件订阅公开事件流，独立文件只允许覆盖
   带 AIMonitor 标识的内容；WorkBuddy 使用其内置 CodeBuddy Agent 引擎自 v2.48
   起独立的 `~/.workbuddy/settings.json`，不与 CodeBuddy CLI 配置混用。
@@ -185,7 +194,7 @@ AIMonitor APK（单台失败不终止后续设备）
   `extensions/aimonitor/`，主入口、manifest 与 package metadata 在写入前统一校验，
   任一既有文件不是 AIMonitor 管理时整组拒绝覆盖；安装后由用户显式启用插件、
   授予 conversation lifecycle Hook 权限并重启 Gateway。
-- listener、状态机 worker 与设备投递 workers 分为两个阶段：原始 Hook 先进入
+- listener、状态机 worker 与设备投递 workers 分为两个阶段：最小 Hook 事件先进入
   容量 256 的有界队列并按接收顺序推进状态机，不会因设备网络慢而停止计算当前
   状态；投递层按 AI 工具拆成独立 worker 和 latest-wins mailbox，每个工具
   最多保留一个发送中状态和一个待发送的最新状态。尚未发送的中间态被新状态覆盖

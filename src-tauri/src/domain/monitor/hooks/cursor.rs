@@ -104,14 +104,6 @@ impl HookProtocol for CursorProtocol {
         json!({ "version": 1, "hooks": Value::Object(hooks) })
     }
 
-    fn posix_command(&self, command: String) -> String {
-        format!("{command} >/dev/null && printf '{{}}'")
-    }
-
-    fn windows_script_suffix(&self) -> &'static str {
-        "; Write-Output '{}'"
-    }
-
     fn remove_managed_entries(&self, entries: &mut Vec<Value>) {
         entries.retain(|entry| !entry_is_managed(entry, self));
     }

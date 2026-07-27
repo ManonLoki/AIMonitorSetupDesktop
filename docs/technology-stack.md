@@ -1,6 +1,6 @@
 # 技术栈与版本
 
-最后核对：2026-07-26。JavaScript 版本来自 npm registry，Rust crate
+最后核对：2026-07-27。JavaScript 版本来自 npm registry，Rust crate
 版本来自 crates.io；`pnpm-lock.yaml` 和 `src-tauri/Cargo.lock` 是可复现构建的
 最终依据。
 
@@ -47,9 +47,11 @@ macOS 都显示 `AIMonitor`，不会退回 Cargo 包名 `ai-monitor-setup`。
 
 本机 Hook 接口使用 Rust 标准库 `TcpListener`，仅绑定
 `127.0.0.1:10240`，协议面只覆盖短连接 POST JSON，不引入通用 Web
-框架或额外 runner 脚本。APK 转发继续使用 `reqwest`；为后台 listener
-增加 `blocking` feature，使其可以在独立顺序 worker 中单次转发并避免
-占用 Tauri UI 线程。
+框架或额外 runner 脚本。命令型 Hook 复用同一个 `AIMonitor` 二进制的
+`--aimonitor-hook-relay` 轻量模式，把 AI 原生 stdin 归约为四字段小信封；Windows
+不依赖 PowerShell/curl，因此不受 PowerShell 5.1 代码页和 CLIXML 错误流影响。
+APK/Desktop 转发继续使用 `reqwest`；`blocking` feature 同时供轻量 relay 和
+后台设备投递线程使用，均不占用 Tauri UI 线程。
 
 ## 为什么不使用 Axios
 

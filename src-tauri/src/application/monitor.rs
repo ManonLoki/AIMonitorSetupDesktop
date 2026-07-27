@@ -25,12 +25,13 @@ use tauri::{AppHandle, Emitter};
 use crate::domain::monitor::{
     AiProfile, AiTool, DEFAULT_HOOK_RELAY_PORT, DiscoveredMonitorDevice, DiscoverySource,
     HookBehavior, HookConfigDirectories, HookConfigLocation, HookConfigWriteResult,
-    HookEventDecision, HookStateMachine, HookTransition, MonitorDeviceRoute, MonitorSettings,
-    SavedMonitorData, ai_tool_name, encode_base64, generate_hook_auxiliary_configs,
-    generate_hook_config, hook_config_filename, hook_requires_review, hook_restart_required,
-    merge_hook_config, normalize_base_url, normalize_enabled_ai_tools, process_image_upload,
-    tool_from_slug, validate_device_route, validate_discovery_interval_minutes, validate_profile,
-    validate_saved_monitor_data, validate_username,
+    HookEventDecision, HookStateMachine, HookTransition, MinimalHookPayload, MonitorDeviceRoute,
+    MonitorSettings, SavedMonitorData, ai_tool_name, encode_base64,
+    generate_hook_auxiliary_configs, generate_hook_config, hook_config_filename,
+    hook_requires_review, hook_restart_required, merge_hook_config, normalize_base_url,
+    normalize_enabled_ai_tools, process_image_upload, tool_from_slug, validate_device_route,
+    validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
+    validate_username,
 };
 
 // 本地持久化存储文件名（保存监控配置数据的 JSON 文件）。
@@ -57,9 +58,9 @@ const MAX_REMOTE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const HOOK_LISTENER_PORT: u16 = DEFAULT_HOOK_RELAY_PORT;
 // Hook 中继 TCP 监听器只绑定在本机回环地址，不对外暴露。
 const HOOK_BIND_ADDRESS: &str = "127.0.0.1";
-// 原始 Hook JSON 可能包含用户 prompt、工具输入/输出等上下文；限制为 4 MiB，
-// 既允许完整转发常规事件，又避免异常本机连接无界占用内存。
-const MAX_HOOK_BODY_BYTES: usize = 4 * 1024 * 1024;
+// listener 只接受 relay 子进程/原生插件生成的最小 Hook 信封；4 KiB 足以容纳
+// 事件名、会话/轮次 ID 和状态，同时从接口边界拒绝 prompt、工具输出等大载荷。
+const MAX_HOOK_BODY_BYTES: usize = 4 * 1024;
 // 完整 HTTP 请求额外为请求头预留 8 KiB。
 const MAX_HOOK_REQUEST_BYTES: usize = MAX_HOOK_BODY_BYTES + 8 * 1024;
 // listener 到状态机 worker 的队列使用固定容量；状态机推进不再等待设备网络，
@@ -73,8 +74,7 @@ const HOOK_RELAY_WAKE_QUEUE_CAPACITY: usize = 1;
 const HOOK_SESSION_INACTIVITY_TIMEOUT: Duration = Duration::from_mins(30);
 // 即使没有新 Hook，也按此粒度清扫一次超时会话。
 const HOOK_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
-// 会进入队列或状态机长期保存的上下文字段使用独立上限，避免单个合法 4 MiB
-// JSON 里的超长标识在洪峰时放大内存占用。
+// 会进入队列或状态机长期保存的上下文字段使用独立上限。
 const MAX_HOOK_SESSION_ID_BYTES: usize = 512;
 const MAX_HOOK_TURN_ID_BYTES: usize = 512;
 const MAX_HOOK_STATUS_BYTES: usize = 64;
@@ -554,22 +554,6 @@ pub struct HookRelayStatus {
     pub last_behavior: Option<HookBehavior>,
     // 最近一次的错误信息（无错误时为空字符串）。
     pub last_error: String,
-}
-
-// Hook 请求体保留工具原生的生命周期上下文。中继当前只读取事件名，但允许
-// session_id、turn_id、reason 等原始字段随请求进入，状态算法可按需继续扩展。
-#[derive(Deserialize)]
-struct HookRequest {
-    #[serde(default, rename = "type")]
-    legacy_type: Option<String>,
-    #[serde(default)]
-    hook_event_name: Option<String>,
-    #[serde(default, alias = "conversation_id")]
-    session_id: Option<String>,
-    #[serde(default, alias = "generation_id")]
-    turn_id: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1441,7 +1425,11 @@ impl MonitorService {
             .read()
             .map_err(|_| "Hooks 配置读取锁已损坏".to_owned())?;
         // Hook 只连接固定的本机中继，不依赖设备 Profile，可在展示配置之前写入。
-        let generated = generate_hook_config(tool)?;
+        // 命令型 Hook 复用当前 AIMonitor 可执行文件的轻量 relay 子命令，因此把
+        // 已安装程序的绝对路径固化进配置；移动安装位置后重新执行一次写入即可。
+        let relay_executable = std::env::current_exe()
+            .map_err(|error| format!("无法定位 AIMonitor Hook relay：{error}"))?;
+        let generated = generate_hook_config(tool, &relay_executable)?;
         let location = self.hook_config_location(&data, tool);
         let config_path = PathBuf::from(&location.config_path);
         let mut generated_files = vec![(config_path.clone(), generated)];
@@ -1805,8 +1793,8 @@ fn read_hook_request(stream: &mut TcpStream) -> Result<IncomingHookEvent, String
         .strip_prefix("/api/hooks/")
         .and_then(tool_from_slug)
         .ok_or_else(|| "Hook 请求中的 AI 工具无效".to_owned())?;
-    // 同时读取正文长度与配置生成时写入的可信事件头。原始 Hook JSON 中通常
-    // 自带 hook_event_name；事件头用于 Cursor 等协议字段不一致时兜底。
+    // 同时读取正文长度与配置生成时写入的可信事件头。最小信封和事件头必须
+    // 同时携带相同事件名，避免配置事件与动态正文发生混淆。
     let mut content_length = None;
     let mut header_hook_type = None;
     for line in lines {
@@ -1839,21 +1827,18 @@ fn read_hook_request(stream: &mut TcpStream) -> Result<IncomingHookEvent, String
             return Err("Hook 请求过大".to_owned());
         }
     }
-    // 截取请求体部分并反序列化。未知字段是工具提供的原始上下文，不属于监控
-    // 业务载荷，因此予以保留兼容而不是拒绝整个事件。
-    let body =
-        serde_json::from_slice::<HookRequest>(&request[header_end..header_end + content_length])
-            .map_err(|error| format!("Hook 请求 JSON 无效：{error}"))?;
-    let body_hook_type = body.hook_event_name.clone().or(body.legacy_type.clone());
-    if let (Some(body_type), Some(header_type)) = (&body_hook_type, &header_hook_type)
-        && body_type.trim() != header_type.trim()
-    {
+    // 截取请求体部分并按唯一的最小信封契约反序列化。命令型工具已由轻量 relay
+    // 子进程丢弃原生大字段；插件型工具也直接构造相同的四字段信封。
+    let body = serde_json::from_slice::<MinimalHookPayload>(
+        &request[header_end..header_end + content_length],
+    )
+    .map_err(|error| format!("Hook 请求 JSON 无效：{error}"))?;
+    let header_hook_type =
+        header_hook_type.ok_or_else(|| "Hook 请求缺少 X-AIMonitor-Hook-Type".to_owned())?;
+    if body.hook_event_name.trim() != header_hook_type.trim() {
         return Err("Hook 请求体与事件头不一致".to_owned());
     }
-    let hook_type = body_hook_type
-        .or(header_hook_type)
-        .ok_or_else(|| "Hook 请求缺少事件类型".to_owned())?;
-    let hook_type = hook_type.trim();
+    let hook_type = body.hook_event_name.trim();
     // 事件类型字符串不能为空，也不能过长。
     if hook_type.is_empty() || hook_type.len() > 128 {
         return Err("Hook 类型不能为空且不能超过 128 个字符".to_owned());
@@ -2446,15 +2431,16 @@ mod tests {
     }
 
     // 验证 read_hook_request 能正确解析一个合法的最小 Hook 请求：
-    // 只有工具路径和 type 字段的请求体应被成功解析出 (工具, 事件类型)。
+    // 最小信封和可信事件头应被成功解析出 (工具, 事件类型)。
     #[test]
-    fn local_hook_request_accepts_only_tool_path_and_type_body() {
+    fn local_hook_request_accepts_the_minimal_envelope_and_event_header() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let body = r#"{"type":"SessionStart"}"#;
+        let body = r#"{"hook_event_name":"SessionStart"}"#;
         let request = format!(
             "POST /api/hooks/codex HTTP/1.1\r\nHost: 127.0.0.1\r\n\
-             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+             Content-Type: application/json\r\nX-AIMonitor-Hook-Type: SessionStart\r\n\
+             Content-Length: {}\r\n\r\n{body}",
             body.len()
         );
         // 用另一个线程模拟客户端连接并发送请求。
@@ -2480,13 +2466,13 @@ mod tests {
         );
     }
 
-    // 验证工具原生 Hook JSON 可以完整透传：状态算法只读取 hook_event_name，
-    // session_id/turn_id/tool_input 等上下文不会导致请求被拒绝。
+    // 验证规范化后的最小 Hook 信封可以携带状态机所需上下文。
     #[test]
     fn local_hook_request_accepts_native_context_and_event_header() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let body = r#"{"hook_event_name":"stop","conversation_id":"s-1","generation_id":"t-1","status":"cancelled"}"#;
+        let body =
+            r#"{"hook_event_name":"stop","session_id":"s-1","turn_id":"t-1","status":"cancelled"}"#;
         let request = format!(
             "POST /api/hooks/cursor HTTP/1.1\r\nHost: 127.0.0.1\r\n\
              Content-Type: application/json\r\nX-AIMonitor-Hook-Type: stop\r\n\
@@ -2515,6 +2501,30 @@ mod tests {
     }
 
     #[test]
+    fn local_hook_request_rejects_fields_outside_the_minimal_envelope() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"hook_event_name":"PostToolUse","session_id":"s-1","tool_output":"large and private"}"#;
+        let request = format!(
+            "POST /api/hooks/codex HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+             Content-Type: application/json\r\nX-AIMonitor-Hook-Type: PostToolUse\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let sender = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+
+        let error = read_hook_request(&mut stream).unwrap_err();
+
+        sender.join().unwrap();
+        assert!(error.contains("unknown field"));
+        assert!(error.contains("tool_output"));
+    }
+
+    #[test]
     fn local_hook_request_rejects_context_identifiers_that_could_bloat_the_queue() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
@@ -2524,7 +2534,8 @@ mod tests {
         );
         let request = format!(
             "POST /api/hooks/codex HTTP/1.1\r\nHost: 127.0.0.1\r\n\
-             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+             Content-Type: application/json\r\nX-AIMonitor-Hook-Type: UserPromptSubmit\r\n\
+             Content-Length: {}\r\n\r\n{body}",
             body.len()
         );
         let sender = thread::spawn(move || {
@@ -2849,7 +2860,8 @@ mod tests {
             let body = r#"{"hook_event_name":"probe"}"#;
             let request = format!(
                 "POST /api/hooks/{slug} HTTP/1.1\r\nHost: 127.0.0.1\r\n\
-                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                 Content-Type: application/json\r\nX-AIMonitor-Hook-Type: probe\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
                 body.len()
             );
             let sender = thread::spawn(move || {

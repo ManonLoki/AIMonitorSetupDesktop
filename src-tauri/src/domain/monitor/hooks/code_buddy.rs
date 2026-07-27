@@ -81,8 +81,8 @@ impl HookProtocol for CodeBuddyProtocol {
     }
 
     fn handler(&self, event: &HookEvent, commands: &ManagedCommands) -> Value {
-        // CodeBuddy 在 Windows 上也强制通过 Git Bash 执行 command Hook，明确不支持
-        // PowerShell，因此始终写入公共生成器的 POSIX/curl 命令。
+        // CodeBuddy 在 Windows 上也强制通过 Git Bash 执行 command Hook，因此始终
+        // 使用 POSIX 形式调用 AIMonitor 自身的轻量 relay 子命令。
         command_group(&commands.posix, event.matcher)
     }
 

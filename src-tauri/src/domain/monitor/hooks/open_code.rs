@@ -112,7 +112,6 @@ const send = async (event) => {{
         hook_event_name: hookEvent,
         session_id: sessionID,
         status,
-        event,
       }}),
       signal: AbortSignal.timeout(3000),
     }})

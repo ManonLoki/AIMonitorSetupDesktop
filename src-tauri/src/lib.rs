@@ -12,6 +12,13 @@ use application::runtime::{handle_window_event, setup_desktop_runtime, show_main
 // 引入 Tauri 的 Manager trait，提供 app.manage()/app.path() 等能力
 use tauri::Manager;
 
+/// 命令型 AI Hook 复用主程序的轻量 relay 模式。返回 `Some(exit_code)` 时调用方
+/// 必须立即退出，不能继续初始化 Tauri 或触发单实例窗口逻辑。
+#[must_use]
+pub fn run_hook_relay_if_requested() -> Option<i32> {
+    application::hook_relay::run_from_process_args()
+}
+
 /// Starts the native Tauri application.
 ///
 /// # Panics

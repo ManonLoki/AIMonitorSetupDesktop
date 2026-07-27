@@ -12,16 +12,13 @@ mod open_claw;
 mod open_code;
 mod work_buddy;
 
+use std::path::Path;
+
 use serde_json::{Map, Value, json};
 
-use super::{AiTool, DEFAULT_HOOK_RELAY_PORT, HookBehavior, HookConfigPreview, HookTransition};
+use super::{AiTool, HookBehavior, HookConfigPreview, HookTransition};
 
 pub(super) const MANAGED_HOOK_PREFIX: &str = "AIMonitor";
-// AI 客户端与 AIMonitor 可能同时由登录项冷启动。Hook 进程通常会先于
-// Tauri setup 完成，此时本机端口会短暂拒绝连接；允许额外重试 5 次，既覆盖
-// 启动竞态，又保持失败有界，不把远端设备投递的“一次转换只发送一次”改成重试。
-const LOCAL_RELAY_RETRY_COUNT: u8 = 5;
-const LOCAL_RELAY_RETRY_DELAY_SECONDS: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HookEventKind {
@@ -132,14 +129,6 @@ pub(super) trait HookProtocol: Sync {
         json!({ "hooks": Value::Object(hooks) })
     }
 
-    fn posix_command(&self, command: String) -> String {
-        format!("{command} >/dev/null")
-    }
-
-    fn windows_script_suffix(&self) -> &'static str {
-        ""
-    }
-
     fn remove_managed_entries(&self, entries: &mut Vec<Value>) {
         entries.retain_mut(|group| {
             let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
@@ -221,7 +210,10 @@ pub(super) fn hook_transition(tool: AiTool, event: &str) -> Option<HookTransitio
     event_definition(tool, event).map(|definition| definition.kind.transition())
 }
 
-pub fn generate_hook_config(tool: AiTool) -> Result<HookConfigPreview, String> {
+pub fn generate_hook_config(
+    tool: AiTool,
+    relay_executable: &Path,
+) -> Result<HookConfigPreview, String> {
     let protocol = protocol(tool);
     if let Some(content) = protocol.standalone_config() {
         return Ok(HookConfigPreview {
@@ -232,7 +224,7 @@ pub fn generate_hook_config(tool: AiTool) -> Result<HookConfigPreview, String> {
     let mut hooks = Map::new();
 
     for event in protocol.events() {
-        let commands = managed_commands(protocol, event.name);
+        let commands = managed_commands(protocol, event.name, relay_executable);
         hooks.insert(event.name.to_owned(), protocol.handler(event, &commands));
     }
 
@@ -319,40 +311,31 @@ pub fn merge_hook_config(
     })
 }
 
-fn managed_commands(protocol: &dyn HookProtocol, event: &str) -> ManagedCommands {
+fn managed_commands(
+    protocol: &dyn HookProtocol,
+    event: &str,
+    relay_executable: &Path,
+) -> ManagedCommands {
     let marker = managed_hook_marker(protocol.tool());
-    let url = format!(
-        "http://127.0.0.1:{DEFAULT_HOOK_RELAY_PORT}/api/hooks/{}",
-        protocol.slug()
-    );
-    let posix_marked = format!(
-        ": {}; curl --silent --show-error --fail --connect-timeout 1 --max-time 3 \
-         --retry {LOCAL_RELAY_RETRY_COUNT} --retry-delay {LOCAL_RELAY_RETRY_DELAY_SECONDS} \
-         --retry-connrefused --retry-all-errors \
-         --request POST --header 'Content-Type: application/json' --header {} \
-         --data-binary @- {}",
+    let executable = relay_executable.to_string_lossy().into_owned();
+    let posix_executable = if cfg!(windows) {
+        executable.replace('\\', "/")
+    } else {
+        executable.clone()
+    };
+    let posix = format!(
+        "{} --aimonitor-hook-relay {} {} --managed-by {}",
+        shell_quote(&posix_executable),
+        shell_quote(protocol.slug()),
+        shell_quote(event),
         shell_quote(&marker),
-        shell_quote(&format!("X-AIMonitor-Hook-Type: {event}")),
-        shell_quote(&url),
-    );
-    let posix = protocol.posix_command(posix_marked);
-
-    let windows_script = format!(
-        "$null = '{}'; $ProgressPreference = 'SilentlyContinue'; \
-         $body = [Console]::In.ReadToEnd(); \
-         $attempt = 0; while ($true) {{ try {{ \
-         Invoke-RestMethod -Uri '{}' -Method Post -ContentType 'application/json' \
-         -Headers @{{'X-AIMonitor-Hook-Type'='{}'}} -Body $body -TimeoutSec 3 | Out-Null; break \
-         }} catch {{ if ($attempt -ge {LOCAL_RELAY_RETRY_COUNT}) {{ throw }}; \
-         $attempt++; Start-Sleep -Seconds {LOCAL_RELAY_RETRY_DELAY_SECONDS} }} }}{}",
-        powershell_quote(&marker),
-        powershell_quote(&url),
-        powershell_quote(event),
-        protocol.windows_script_suffix(),
     );
     let windows = format!(
-        "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
-        encode_powershell_command(&windows_script)
+        "cmd.exe /d /s /c \"{} --aimonitor-hook-relay {} {} --managed-by {}\"",
+        windows_quote(&executable),
+        windows_quote(protocol.slug()),
+        windows_quote(event),
+        windows_quote(&marker),
     );
     ManagedCommands { posix, windows }
 }
@@ -397,8 +380,8 @@ pub(super) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn powershell_quote(value: &str) -> String {
-    value.replace('\'', "''")
+fn windows_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 pub(super) fn command_has_marker(command: &str, marker: &str) -> bool {
@@ -427,39 +410,6 @@ pub(super) fn decoded_hook_command(command: &str) -> Option<String> {
         .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
         .collect::<Vec<_>>();
     String::from_utf16(&utf16).ok()
-}
-
-fn encode_powershell_command(script: &str) -> String {
-    let bytes = script
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    encode_base64(&bytes)
-}
-
-fn encode_base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied().unwrap_or(0);
-        let third = chunk.get(2).copied().unwrap_or(0);
-        encoded.push(char::from(ALPHABET[usize::from(first >> 2)]));
-        encoded.push(char::from(
-            ALPHABET[usize::from(((first & 0b11) << 4) | (second >> 4))],
-        ));
-        encoded.push(if chunk.len() > 1 {
-            char::from(ALPHABET[usize::from(((second & 0b1111) << 2) | (third >> 6))])
-        } else {
-            '='
-        });
-        encoded.push(if chunk.len() > 2 {
-            char::from(ALPHABET[usize::from(third & 0b11_1111)])
-        } else {
-            '='
-        });
-    }
-    encoded
 }
 
 fn decode_base64(value: &str) -> Option<Vec<u8>> {
