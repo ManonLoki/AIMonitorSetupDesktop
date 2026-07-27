@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, thread};
 
-use super::{HEARTBEAT_INTERVAL, HOOK_FORWARD_CLIENT_TIMEOUT, MonitorService};
+use super::{HEARTBEAT_INTERVAL, MonitorService, build_hook_forward_client};
 use crate::domain::monitor::{DiscoveredMonitorDevice, SavedMonitorData};
 
 impl MonitorService {
@@ -12,11 +12,7 @@ impl MonitorService {
         thread::Builder::new()
             .name("aimonitor-heartbeat".to_owned())
             .spawn(move || {
-                let client = match reqwest::blocking::Client::builder()
-                    .connect_timeout(HOOK_FORWARD_CLIENT_TIMEOUT)
-                    .timeout(HOOK_FORWARD_CLIENT_TIMEOUT)
-                    .build()
-                {
+                let client = match build_hook_forward_client() {
                     Ok(client) => client,
                     Err(error) => {
                         eprintln!("无法创建心跳客户端：{error}");
@@ -32,15 +28,16 @@ impl MonitorService {
     }
 
     fn send_heartbeats_once(&self, client: &reqwest::blocking::Client) {
-        let Ok(data) = self.data.read() else {
-            return;
+        // 计算完目标后立即让读锁在此块结束时释放，发 HTTP 请求前不占着任何锁。
+        let (client_id, targets) = {
+            let Ok(data) = self.data.read() else {
+                return;
+            };
+            let Ok(online_devices) = self.online_devices.read() else {
+                return;
+            };
+            heartbeat_targets(&data, &online_devices)
         };
-        let Ok(online_devices) = self.online_devices.read() else {
-            return;
-        };
-        let (client_id, targets) = heartbeat_targets(&data, &online_devices);
-        drop(online_devices);
-        drop(data);
 
         thread::scope(|scope| {
             for base_url in targets {

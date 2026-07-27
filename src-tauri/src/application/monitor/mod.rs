@@ -89,6 +89,15 @@ const DISCOVERY_POLL_GRANULARITY: Duration = Duration::from_secs(1);
 // 设备列表发生变化时向前端发送的 Tauri 事件名称。
 pub const MONITOR_DEVICES_CHANGED_EVENT: &str = "monitor-devices-changed";
 
+// 构造用于向设备转发 Hook 状态/心跳的阻塞式 HTTP 客户端。中继监听与心跳
+// 发送两条独立后台线程共用同一套连接/请求超时配置，因此只在此处实现一次。
+fn build_hook_forward_client() -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(HOOK_FORWARD_CLIENT_TIMEOUT)
+        .timeout(HOOK_FORWARD_CLIENT_TIMEOUT)
+        .build()
+}
+
 // 应用核心服务：持有 HTTP 客户端、数据存储路径与内存态、在线设备快照、
 // 发现去抖计数、Hook 配置写入互斥锁、Hook 中继状态等所有共享状态。
 // Clone 只克隆 Arc/Client 句柄，底层状态仍然共享。

@@ -31,6 +31,15 @@ struct SlotUpdateRequest<'a> {
     image: &'a str,
 }
 
+// 转发时需要携带的控制端身份：调用方来源不同（当前设备快照 vs. 完整快照），
+// 但两者都只是"哪个用户、哪个控制端"，因此打包成一个引用，避免随着后续再加
+// 一个身份字段就在这条调用链上再加一个 `&str` 参数。
+#[derive(Clone, Copy)]
+struct RequestIdentity<'a> {
+    username: &'a str,
+    client_id: &'a str,
+}
+
 // 返回指定工具的 Profile 总数，以及其中当前在线的设备 ID。投递调度只为
 // 在线目标建立“设备 + 工具”独立队列；保存过但已离线的设备不会进入转发链路。
 pub(super) fn configured_online_target_ids(
@@ -83,6 +92,10 @@ pub(super) fn forward_hook_to_target(
     let data = data.read().map_err(|_| "转发配置读取锁已损坏".to_owned())?;
     let username = data.settings.username.clone();
     let client_id = data.client_id.clone();
+    let identity = RequestIdentity {
+        username: &username,
+        client_id: &client_id,
+    };
     let saved_device = data
         .devices
         .iter()
@@ -106,8 +119,7 @@ pub(super) fn forward_hook_to_target(
         client,
         tool,
         transition,
-        &username,
-        &client_id,
+        identity,
         &effective_device,
         &profile,
     )
@@ -215,12 +227,15 @@ fn relay_hook_with_accounting(
         HookTransition::Release => None,
     };
     // 并发转发给所有目标设备，汇总成功次数与错误信息列表。
+    let identity = RequestIdentity {
+        username: &snapshot.settings.username,
+        client_id: &snapshot.client_id,
+    };
     let (forwarded, errors) = forward_to_all_targets(
         client,
         tool,
         transition,
-        &snapshot.settings.username,
-        &snapshot.client_id,
+        identity,
         targets,
         &online_snapshot,
     );
@@ -244,8 +259,7 @@ fn forward_to_all_targets(
     client: &reqwest::blocking::Client,
     tool: AiTool,
     transition: HookTransition,
-    username: &str,
-    client_id: &str,
+    identity: RequestIdentity<'_>,
     targets: Vec<(&MonitorDeviceRoute, &AiProfile)>,
     online_snapshot: &[DiscoveredMonitorDevice],
 ) -> (u64, Vec<String>) {
@@ -269,8 +283,7 @@ fn forward_to_all_targets(
                         client,
                         tool,
                         transition,
-                        username,
-                        client_id,
+                        identity,
                         &effective_device,
                         profile,
                     );
@@ -306,13 +319,12 @@ fn forward_profile(
     client: &reqwest::blocking::Client,
     tool: AiTool,
     transition: HookTransition,
-    username: &str,
-    client_id: &str,
+    identity: RequestIdentity<'_>,
     device: &MonitorDeviceRoute,
     profile: &AiProfile,
 ) -> Result<(), String> {
     // 设备地址或用户名为空则无法发送，直接返回错误。
-    if device.base_url.is_empty() || username.is_empty() {
+    if device.base_url.is_empty() || identity.username.is_empty() {
         return Err("设备地址或显示用户名为空".to_owned());
     }
     let url = format!("{}/api/slots/{}", device.base_url, profile.slot);
@@ -326,8 +338,8 @@ fn forward_profile(
             .and_then(|state| {
                 send_and_confirm(
                     client.post(&url).json(&SlotUpdateRequest {
-                        client_id,
-                        username,
+                        client_id: identity.client_id,
+                        username: identity.username,
                         ai_name: ai_tool_name(tool),
                         behavior,
                         content: &state.content,

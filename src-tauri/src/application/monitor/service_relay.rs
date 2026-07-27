@@ -5,8 +5,9 @@ use std::sync::{Arc, mpsc};
 use axum::{Router, extract::DefaultBodyLimit, routing::post};
 
 use super::{
-    HOOK_BIND_ADDRESS, HOOK_EVENT_QUEUE_CAPACITY, HOOK_FORWARD_CLIENT_TIMEOUT, HOOK_LISTENER_PORT,
-    HookListenerState, HookRelayStatus, IncomingHookEvent, MAX_HOOK_BODY_BYTES, MonitorService,
+    HOOK_BIND_ADDRESS, HOOK_EVENT_QUEUE_CAPACITY, HOOK_LISTENER_PORT, HookListenerState,
+    HookRelayStatus, IncomingHookEvent, MAX_HOOK_BODY_BYTES, MonitorService,
+    build_hook_forward_client,
     relay::{handle_hook_request, record_relay_failure, spawn_hook_worker},
 };
 
@@ -19,11 +20,7 @@ impl MonitorService {
         let status = Arc::clone(&self.relay_status);
 
         // 构造用于向设备转发请求的阻塞式 HTTP 客户端。
-        let client = reqwest::blocking::Client::builder()
-            .connect_timeout(HOOK_FORWARD_CLIENT_TIMEOUT)
-            .timeout(HOOK_FORWARD_CLIENT_TIMEOUT)
-            .build();
-        let client = match client {
+        let client = match build_hook_forward_client() {
             Ok(client) => client,
             Err(error) => {
                 record_relay_failure(&status, format!("无法创建转发客户端：{error}"));

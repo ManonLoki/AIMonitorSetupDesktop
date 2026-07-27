@@ -42,10 +42,7 @@ impl MonitorService {
             // 首次启动：使用默认空数据。
             SavedMonitorData::default()
         };
-        let generated_client_id = data.client_id.trim().is_empty();
-        if generated_client_id {
-            data.client_id = Uuid::new_v4().to_string();
-        }
+        let client_id_generated = ensure_client_id(&mut data);
         if data.settings.username.trim().is_empty()
             && let Some(username) = detect_system_username(config_home)
         {
@@ -53,10 +50,9 @@ impl MonitorService {
         }
         // 无论是读取到的还是默认数据，都要过一遍领域层校验，防止带着非法数据启动。
         validate_saved_monitor_data(&data).map_err(|error| format!("配置数据校验失败：{error}"))?;
-        if generated_client_id {
-            let serialized = serde_json::to_string_pretty(&data)
-                .map_err(|error| format!("无法序列化配置：{error}"))?;
-            write_atomic_file(&data_path, &serialized, "应用配置")?;
+        if client_id_generated {
+            // 只在首次生成时写回，避免每次启动都重新生成/持久化同一个稳定身份。
+            persist_to(&data_path, &data)?;
         }
         Ok(Self {
             client: Client::new(),
@@ -291,8 +287,25 @@ impl MonitorService {
 
     // 将内存中的数据序列化为格式化 JSON 并原子写入磁盘存储文件。
     pub(super) fn persist(&self, data: &SavedMonitorData) -> Result<(), String> {
-        let serialized = serde_json::to_string_pretty(data)
-            .map_err(|error| format!("无法序列化配置：{error}"))?;
-        write_atomic_file(&self.data_path, &serialized, "应用配置")
+        persist_to(&self.data_path, data)
     }
+}
+
+// 若尚未持久化过控制端身份，则生成一个新的稳定 `clientId`。
+// 返回是否生成了新值，供调用方决定是否需要把这次生成结果写回磁盘。
+fn ensure_client_id(data: &mut SavedMonitorData) -> bool {
+    if data.client_id.trim().is_empty() {
+        data.client_id = Uuid::new_v4().to_string();
+        true
+    } else {
+        false
+    }
+}
+
+// 将数据序列化为格式化 JSON 并原子写入指定路径；`load()` 在 `Self` 构造前
+// 需要这份逻辑，`persist` 方法在构造后复用同一实现。
+fn persist_to(path: &Path, data: &SavedMonitorData) -> Result<(), String> {
+    let serialized =
+        serde_json::to_string_pretty(data).map_err(|error| format!("无法序列化配置：{error}"))?;
+    write_atomic_file(path, &serialized, "应用配置")
 }
