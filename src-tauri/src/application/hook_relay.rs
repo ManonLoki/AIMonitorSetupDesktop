@@ -20,6 +20,10 @@ use crate::domain::monitor::{
 pub const HOOK_RELAY_ARGUMENT: &str = "--aimonitor-hook-relay";
 const LOCAL_RELAY_RETRY_COUNT: u8 = 5;
 const LOCAL_RELAY_RETRY_DELAY: Duration = Duration::from_secs(1);
+// 连接本机 listener 应该几乎瞬时完成；超时说明监听进程还没起来或已经卡死。
+const LOCAL_RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+// 整个请求（含 listener 入队处理）的超时，略宽松于连接超时。
+const LOCAL_RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 若当前进程参数是 Hook relay 模式则执行并返回退出码；否则让调用方继续启动 GUI。
 pub fn run_from_process_args() -> Option<i32> {
@@ -64,8 +68,8 @@ fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> Result<(), String>
     let payload = minimize_native_hook_payload(&native_json, event)?;
     let endpoint = format!("http://127.0.0.1:{DEFAULT_HOOK_RELAY_PORT}/api/hooks/{tool_slug}");
     let client = Client::builder()
-        .connect_timeout(Duration::from_secs(1))
-        .timeout(Duration::from_secs(3))
+        .connect_timeout(LOCAL_RELAY_CONNECT_TIMEOUT)
+        .timeout(LOCAL_RELAY_REQUEST_TIMEOUT)
         .build()
         .map_err(|error| format!("无法创建 Hook relay 客户端：{error}"))?;
     post_minimal_payload(&client, &endpoint, event, &payload)?;

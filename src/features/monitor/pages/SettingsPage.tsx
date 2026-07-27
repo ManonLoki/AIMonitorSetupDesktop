@@ -40,6 +40,12 @@ import {
 } from "../../../shared/state/ui";
 import { LineIcon } from "../../../shared/ui/LineIcon";
 
+// 在线设备自动检查间隔（分钟）的默认值与允许范围，与 Rust 侧
+// domain::monitor 的 DEFAULT/MIN/MAX_DISCOVERY_INTERVAL_MINUTES 保持一致。
+const DEFAULT_DISCOVERY_INTERVAL_MINUTES = 1;
+const MIN_DISCOVERY_INTERVAL_MINUTES = 1;
+const MAX_DISCOVERY_INTERVAL_MINUTES = 60;
+
 export function SettingsPage() {
   // 获取 QueryClient 实例，用于在 mutation 成功后手动写入缓存
   const queryClient = useQueryClient();
@@ -52,7 +58,9 @@ export function SettingsPage() {
   // 显示用户名的本地编辑草稿
   const [username, setUsername] = useState("");
   // 在线设备自动检查间隔（分钟）的本地编辑草稿，默认 1 分钟
-  const [discoveryIntervalMinutes, setDiscoveryIntervalMinutes] = useState(1);
+  const [discoveryIntervalMinutes, setDiscoveryIntervalMinutes] = useState(
+    DEFAULT_DISCOVERY_INTERVAL_MINUTES,
+  );
   // 设置页 AI 客户端多选草稿；保存后同时影响监控管理与 Hooks 管理的选项卡。
   const [selectedTools, setSelectedTools] = useState<AiTool[]>([]);
 
@@ -243,15 +251,17 @@ export function SettingsPage() {
                 label="在线设备自动检查间隔"
                 description="后台重新发现在线设备，默认 1 分钟"
                 suffix=" 分钟"
-                min={1}
-                max={60}
+                min={MIN_DISCOVERY_INTERVAL_MINUTES}
+                max={MAX_DISCOVERY_INTERVAL_MINUTES}
                 step={1}
                 value={discoveryIntervalMinutes}
                 onChange={(value) => {
-                  // 编辑间隔时清空上一次保存结果状态；非数字输入时兜底为 1 分钟
+                  // 编辑间隔时清空上一次保存结果状态；非数字输入时兜底为默认值
                   saveInterval.reset();
                   setDiscoveryIntervalMinutes(
-                    typeof value === "number" ? value : 1,
+                    typeof value === "number"
+                      ? value
+                      : DEFAULT_DISCOVERY_INTERVAL_MINUTES,
                   );
                 }}
                 disabled={settings.isPending}

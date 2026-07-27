@@ -19,6 +19,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 if-addrs = "0.15.0"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 mdns-sd = "0.20.2"
@@ -29,6 +30,7 @@ tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-single-instance = "2.4.3"
+tokio = { version = "1.53.1", features = ["net"] }
 
 [lints.rust]
 unsafe_code = "forbid"

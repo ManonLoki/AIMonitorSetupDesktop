@@ -13,6 +13,8 @@ import {
 } from "../features/monitor/queries/monitor";
 // 引入应用外壳布局组件（导航栏 + 内容区），作为根路由的组件
 import { AppShellLayout } from "../shared/ui/AppShellLayout";
+// 引入路由路径常量的唯一来源
+import { ROUTES } from "../shared/routes";
 // 引入应用启动/加载中的占位屏幕组件
 import { AppBootScreen } from "../shared/ui/AppBootScreen";
 // 引入各业务页面组件
@@ -36,31 +38,31 @@ const rootRoute = createRootRoute({
   },
 });
 
-// 首页路由："/"，渲染工作台页面
+// 首页路由：渲染工作台页面
 const homeRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/",
+  path: ROUTES.home,
   component: WorkbenchPage,
 });
 
-// AI 管理页路由："/ai-management"
+// AI 管理页路由
 const aiManagementRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/ai-management",
+  path: ROUTES.aiManagement,
   component: AiManagementPage,
 });
 
-// 图片管理页路由："/images"
+// 图片管理页路由
 const imagesRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/images",
+  path: ROUTES.images,
   component: ImagesPage,
 });
 
-// 设置页路由："/settings"
+// 设置页路由
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/settings",
+  path: ROUTES.settings,
   component: SettingsPage,
 });
 

@@ -19,11 +19,13 @@ import {
   onboardingOpenAtom,
 } from "../state/ui";
 import { LineIcon } from "./LineIcon";
+// 引入路由路径常量的唯一来源
+import { ROUTES } from "../routes";
 
 const steps = [
   {
     title: "设置 AI 客户端与 Hooks",
-    route: "/settings" as const,
+    route: ROUTES.settings,
     routeLabel: "前往设置",
     items: [
       "在“AI 客户端”中勾选要使用的客户端并保存。",
@@ -33,7 +35,7 @@ const steps = [
   },
   {
     title: "上传展示图片",
-    route: "/images" as const,
+    route: ROUTES.images,
     routeLabel: "前往图片管理",
     items: [
       "上传至少一张 JPEG、PNG 或 GIF 图片。",
@@ -42,7 +44,7 @@ const steps = [
   },
   {
     title: "配置监控展示",
-    route: "/ai-management" as const,
+    route: ROUTES.aiManagement,
     routeLabel: "前往监控管理",
     items: [
       "为当前 AI 客户端选择显示位置。",

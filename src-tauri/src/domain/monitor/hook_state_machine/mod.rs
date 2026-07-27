@@ -1,0 +1,400 @@
+// 标准库：HashMap 用于按会话聚合状态，Duration 用于进程内单调时钟。
+use std::{collections::HashMap, time::Duration};
+
+use super::device::{AiTool, HookBehavior};
+use super::hooks::{HookEventKind, event_kind};
+
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod tests_lifecycle;
+
+// 一个 Hook 事件触发后，展示屏应执行的动作：切换到某个行为展示，或者释放（退出）该展示位。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookTransition {
+    Display(HookBehavior),
+    Release,
+}
+
+/// Hook 事件经过生命周期算法后的处理决定。应用层只负责执行 `Forward`，
+/// `Ignore` 表示这是重复或已经失去时序意义的事件，`Unsupported` 表示配置/请求
+/// 中出现了该工具不认识的事件。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookEventDecision {
+    Forward(HookTransition),
+    Ignore,
+    Unsupported,
+}
+
+/// 单个工具最多保留的 Hook 会话数。结束墓碑也计入上限，避免缺失
+/// `SessionEnd` 或监控进程中途启动时，无界积累会话状态。
+pub(crate) const MAX_TRACKED_HOOK_SESSIONS: usize = 256;
+
+/// 单个 AI 工具的生命周期状态。它不依赖墙上时钟，因此迟到多久的完成事件都
+/// 不会越过已经收到的 Stop/SessionEnd，把监控屏错误地切回运行中。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HookStateMachine {
+    sessions: HashMap<String, HookSessionState>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct HookSessionState {
+    phase: HookPhase,
+    turn_active: bool,
+    turn_id: Option<String>,
+    /// 已收到 `SessionEnd` 的会话保留为空墓碑，用于拒绝随后迟到的事件。
+    ended: bool,
+    /// 由应用层注入的进程内单调经过时间，领域层不直接读取系统时钟。
+    last_seen_at: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HookPhase {
+    #[default]
+    Released,
+    Idle,
+    Running,
+    Asking,
+    Error,
+}
+
+impl HookStateMachine {
+    /// 把原生 Hook 事件归一化后推进状态机，并返回唯一需要由应用层执行的动作。
+    #[cfg(test)]
+    pub fn apply(&mut self, tool: AiTool, event: &str) -> HookEventDecision {
+        self.apply_event(tool, event, None, None)
+    }
+
+    /// 带会话/轮次标识推进状态。多会话共享同一个工具展示位时，以所有会话的
+    /// 聚合状态为准；旧 turn 的迟到事件只会影响它自己的会话，且会被忽略。
+    #[cfg(test)]
+    pub fn apply_event(
+        &mut self,
+        tool: AiTool,
+        event: &str,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+    ) -> HookEventDecision {
+        self.apply_event_with_status(tool, event, session_id, turn_id, None)
+    }
+
+    /// Cursor 的 `stop` 通过 `status` 区分正常完成和异常结束；其他工具当前由
+    /// 独立事件表达错误。协议差异由工具适配器解析，状态机只消费归一化类别。
+    #[cfg(test)]
+    pub fn apply_event_with_status(
+        &mut self,
+        tool: AiTool,
+        event: &str,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+        status: Option<&str>,
+    ) -> HookEventDecision {
+        self.apply_event_with_status_at(tool, event, session_id, turn_id, status, Duration::ZERO)
+    }
+
+    /// 使用调用方提供的单调经过时间推进状态机。只有被接纳的事件会刷新
+    /// `last_seen_at`；被墓碑或轮次时序拒绝的迟到事件不能延长记录寿命。
+    pub(crate) fn apply_event_with_status_at(
+        &mut self,
+        tool: AiTool,
+        event: &str,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+        status: Option<&str>,
+        observed_at: Duration,
+    ) -> HookEventDecision {
+        let Some(event_kind) = event_kind(tool, event, status) else {
+            return HookEventDecision::Unsupported;
+        };
+        let transition = event_kind.transition();
+        let previous = self.aggregate_phase();
+        let session_key = session_id.unwrap_or("__default__").to_owned();
+
+        if event_kind == HookEventKind::SessionEnd {
+            return self.apply_session_end(session_key, observed_at, previous);
+        }
+
+        if event_kind == HookEventKind::SessionStart {
+            return self.apply_session_start(
+                session_key,
+                session_id.is_some(),
+                observed_at,
+                previous,
+            );
+        }
+
+        // 结束墓碑只允许显式 SessionStart 覆盖；任何迟到事件（包括重复 Stop
+        // 和新的工作事件）均不刷新墓碑时间，也不能隐式复活会话。
+        if self
+            .sessions
+            .get(&session_key)
+            .is_some_and(|session| session.ended)
+        {
+            return HookEventDecision::Ignore;
+        }
+
+        // 完成类事件不是可靠的工作起点。Monitor 若中途启动、没有见过对应
+        // 会话或工作开始，则直接忽略且不留下幽灵记录。
+        if matches!(event_kind, HookEventKind::WorkCompletion(_))
+            && !self.sessions.contains_key(&session_key)
+        {
+            return HookEventDecision::Ignore;
+        }
+
+        self.ensure_capacity_for(&session_key);
+        let session = self
+            .sessions
+            .entry(session_key)
+            .or_insert_with(|| HookSessionState {
+                last_seen_at: observed_at,
+                ..HookSessionState::default()
+            });
+
+        if event_kind == HookEventKind::WorkStart {
+            session.turn_active = true;
+            session.turn_id = turn_id.map(str::to_owned);
+            session.phase = HookPhase::Running;
+            session.last_seen_at = observed_at;
+            return phase_decision(previous, self.aggregate_phase());
+        }
+
+        if event_kind == HookEventKind::Stop {
+            if turn_is_stale(session, turn_id) {
+                return HookEventDecision::Ignore;
+            }
+            session.turn_active = false;
+            session.phase = HookPhase::Idle;
+            session.last_seen_at = observed_at;
+            return phase_decision(previous, self.aggregate_phase());
+        }
+
+        if matches!(event_kind, HookEventKind::WorkCompletion(_))
+            && (!session.turn_active || turn_is_stale(session, turn_id))
+        {
+            return HookEventDecision::Ignore;
+        }
+
+        if turn_is_stale(session, turn_id) {
+            return HookEventDecision::Ignore;
+        }
+        let next = match transition {
+            HookTransition::Release => HookPhase::Released,
+            HookTransition::Display(HookBehavior::Idle) => HookPhase::Idle,
+            HookTransition::Display(HookBehavior::Running) => {
+                session.turn_active = true;
+                if let Some(turn_id) = turn_id {
+                    session.turn_id = Some(turn_id.to_owned());
+                }
+                HookPhase::Running
+            }
+            HookTransition::Display(HookBehavior::Asking) => {
+                session.turn_active = true;
+                if let Some(turn_id) = turn_id {
+                    session.turn_id = Some(turn_id.to_owned());
+                }
+                HookPhase::Asking
+            }
+            HookTransition::Display(HookBehavior::Error) => {
+                session.turn_active = false;
+                HookPhase::Error
+            }
+        };
+        session.phase = next;
+        session.last_seen_at = observed_at;
+        phase_decision(previous, self.aggregate_phase())
+    }
+
+    fn apply_session_end(
+        &mut self,
+        session_key: String,
+        observed_at: Duration,
+        previous: HookPhase,
+    ) -> HookEventDecision {
+        if self
+            .sessions
+            .get(&session_key)
+            .is_some_and(|session| session.ended)
+        {
+            return HookEventDecision::Ignore;
+        }
+
+        self.ensure_capacity_for(&session_key);
+        self.sessions.insert(
+            session_key,
+            HookSessionState {
+                phase: HookPhase::Released,
+                turn_active: false,
+                turn_id: None,
+                ended: true,
+                last_seen_at: observed_at,
+            },
+        );
+        let next = self.aggregate_phase();
+        // 即使 Monitor 在会话开始后才启动，也要让首次结束事件向目标设备
+        // 幂等释放一次。墓碑保证同一结束事件重放时不会形成请求风暴。
+        if next == HookPhase::Released {
+            return HookEventDecision::Forward(HookTransition::Release);
+        }
+        phase_decision(previous, next)
+    }
+
+    fn apply_session_start(
+        &mut self,
+        session_key: String,
+        has_session_id: bool,
+        observed_at: Duration,
+        previous: HookPhase,
+    ) -> HookEventDecision {
+        // Cursor 的 workspaceOpen 不带 conversation_id，先以默认占位展示空闲；
+        // 真正的 sessionStart 到来后必须替换该占位，否则 SessionEnd 后会残留
+        // 一个永远无法释放的“工作区会话”。
+        if has_session_id {
+            self.sessions.remove("__default__");
+        }
+        // 同一会话的重复或迟到 SessionStart 只算作存活信号，不能把已经
+        // Running/Asking/Error 的状态倒退回 Idle；真正结束后的 tombstone
+        // 仍允许由显式 SessionStart 覆盖，支持会话 ID 被上游重新使用。
+        if let Some(existing) = self.sessions.get_mut(&session_key)
+            && !existing.ended
+        {
+            existing.last_seen_at = observed_at;
+            return phase_decision(previous, self.aggregate_phase());
+        }
+        self.ensure_capacity_for(&session_key);
+        self.sessions.insert(
+            session_key,
+            HookSessionState {
+                phase: HookPhase::Idle,
+                turn_active: false,
+                turn_id: None,
+                ended: false,
+                last_seen_at: observed_at,
+            },
+        );
+        phase_decision(previous, self.aggregate_phase())
+    }
+
+    /// 一次性清理所有到期记录，并只根据清理前后的最终聚合状态返回一个决定。
+    /// 使用 `saturating_sub` 防御调用方意外传入较小时间值，避免下溢。
+    pub(crate) fn expire_inactive_sessions(
+        &mut self,
+        observed_at: Duration,
+        timeout: Duration,
+    ) -> HookEventDecision {
+        let previous = self.aggregate_phase();
+        self.sessions
+            .retain(|_, session| observed_at.saturating_sub(session.last_seen_at) < timeout);
+        phase_decision(previous, self.aggregate_phase())
+    }
+
+    /// 为新会话腾出一个位置：优先淘汰最旧墓碑，其次最旧非活跃会话，
+    /// 最后才淘汰最旧活跃会话。相同时间以会话键排序，保证行为可复现。
+    fn ensure_capacity_for(&mut self, session_key: &str) {
+        if self.sessions.contains_key(session_key) {
+            return;
+        }
+        while self.sessions.len() >= MAX_TRACKED_HOOK_SESSIONS {
+            let Some(eviction_key) = self
+                .sessions
+                .iter()
+                .min_by(|(left_key, left), (right_key, right)| {
+                    session_eviction_priority(left)
+                        .cmp(&session_eviction_priority(right))
+                        .then_with(|| left.last_seen_at.cmp(&right.last_seen_at))
+                        .then_with(|| left_key.cmp(right_key))
+                })
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.sessions.remove(&eviction_key);
+        }
+    }
+
+    fn aggregate_phase(&self) -> HookPhase {
+        [
+            HookPhase::Asking,
+            HookPhase::Error,
+            HookPhase::Running,
+            HookPhase::Idle,
+        ]
+        .into_iter()
+        .find(|phase| {
+            self.sessions
+                .values()
+                .any(|session| !session.ended && session.phase == *phase)
+        })
+        .unwrap_or(HookPhase::Released)
+    }
+
+    #[cfg(test)]
+    fn tracked_session_count(&self) -> usize {
+        self.sessions.len()
+    }
+}
+
+fn session_eviction_priority(session: &HookSessionState) -> u8 {
+    if session.ended {
+        0
+    } else if !session.turn_active {
+        1
+    } else {
+        2
+    }
+}
+
+fn turn_is_stale(session: &HookSessionState, incoming_turn_id: Option<&str>) -> bool {
+    incoming_turn_id.is_some_and(|incoming| {
+        session
+            .turn_id
+            .as_deref()
+            .is_some_and(|current| current != incoming)
+    })
+}
+
+fn phase_decision(previous: HookPhase, next: HookPhase) -> HookEventDecision {
+    if previous == next {
+        return HookEventDecision::Ignore;
+    }
+    HookEventDecision::Forward(match next {
+        HookPhase::Released => HookTransition::Release,
+        HookPhase::Idle => HookTransition::Display(HookBehavior::Idle),
+        HookPhase::Running => HookTransition::Display(HookBehavior::Running),
+        HookPhase::Asking => HookTransition::Display(HookBehavior::Asking),
+        HookPhase::Error => HookTransition::Display(HookBehavior::Error),
+    })
+}
+
+// 标准 Base64 编码实现（自实现而非依赖第三方库）：每 3 字节输入编码为 4 个输出字符。
+pub(crate) fn encode_base64(bytes: &[u8]) -> String {
+    // 标准 Base64 字符表（不含 URL-safe 变体）。
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    // 预分配容量：每 3 字节输入产生 4 字节输出，向上取整分组数。
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    // 按 3 字节一组处理输入（最后一组可能不足 3 字节）。
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        // 分组不足 3/2 字节时，缺失的字节按 0 处理（真正的截断由后面 '=' 填充体现）。
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        // 第一个输出字符：取第一字节的高 6 位。
+        encoded.push(char::from(ALPHABET[usize::from(first >> 2)]));
+        // 第二个输出字符：第一字节低 2 位 + 第二字节高 4 位。
+        encoded.push(char::from(
+            ALPHABET[usize::from(((first & 0b11) << 4) | (second >> 4))],
+        ));
+        // 第三个输出字符：分组含第二字节时才有效，否则用 '=' 填充。
+        encoded.push(if chunk.len() > 1 {
+            char::from(ALPHABET[usize::from(((second & 0b1111) << 2) | (third >> 6))])
+        } else {
+            '='
+        });
+        // 第四个输出字符：分组含第三字节时才有效，否则用 '=' 填充。
+        encoded.push(if chunk.len() > 2 {
+            char::from(ALPHABET[usize::from(third & 0b11_1111)])
+        } else {
+            '='
+        });
+    }
+    encoded
+}

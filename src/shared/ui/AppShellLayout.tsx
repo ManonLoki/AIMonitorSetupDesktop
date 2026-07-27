@@ -31,13 +31,15 @@ import { DeviceSwitchMenu } from "../../features/monitor/components/DeviceSwitch
 import { useMonitorConnection } from "../../features/monitor/hooks/useMonitorConnection";
 import { AnimatedContent } from "./react-bits/AnimatedContent";
 import { OnboardingGuide } from "./OnboardingGuide";
+// 引入路由路径常量的唯一来源
+import { ROUTES } from "../routes";
 
 // 侧边导航菜单项配置：标签、目标路由、图标名、是否需要设备才可点击
 const navigation = [
-  { label: "工作台", to: "/" as const, icon: "dashboard" as const, requiresDevice: false },
-  { label: "监控管理", to: "/ai-management" as const, icon: "ai" as const, requiresDevice: true },
-  { label: "图片管理", to: "/images" as const, icon: "image" as const, requiresDevice: true },
-  { label: "设置", to: "/settings" as const, icon: "settings" as const, requiresDevice: false },
+  { label: "工作台", to: ROUTES.home, icon: "dashboard" as const, requiresDevice: false },
+  { label: "监控管理", to: ROUTES.aiManagement, icon: "ai" as const, requiresDevice: true },
+  { label: "图片管理", to: ROUTES.images, icon: "image" as const, requiresDevice: true },
+  { label: "设置", to: ROUTES.settings, icon: "settings" as const, requiresDevice: false },
 ];
 
 // 应用整体外壳布局：侧边导航栏 + 主内容区（Outlet 渲染当前路由页面）
