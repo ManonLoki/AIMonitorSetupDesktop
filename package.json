@@ -1,5 +1,7 @@
 {
   "name": "ai-monitor-setup",
+  "displayName": "AIMonitorSetup",
+  "releaseName": "AIMonitorSetup",
   "private": true,
   "version": "2.2.0",
   "license": "SEE LICENSE IN LICENSE",
@@ -17,7 +19,9 @@
     "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "check": "pnpm typecheck && pnpm check:rust && pnpm test:rust",
-    "release:desktop": "bash scripts/publish-desktop.sh",
+    "build:mac": "node scripts/build-release.mjs mac",
+    "build:win": "node scripts/build-release.mjs win",
+    "build:release": "node scripts/build-release.mjs all",
     "tauri": "tauri"
   },
   "dependencies": {

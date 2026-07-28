@@ -21,6 +21,9 @@ pnpm check:rust         # cargo fmt --check + cargo clippy -D warnings (src-taur
 pnpm test:rust          # cargo test (src-tauri)
 pnpm check              # typecheck + check:rust + test:rust — run before considering work done
 pnpm tauri build         # full production build
+pnpm run build:mac       # universal DMG; AIMONITOR_MAC_TARGET can select one architecture
+pnpm run build:win       # Windows x64 NSIS through cargo-xwin
+pnpm run build:release   # both release installers, then publish checksums
 ```
 
 To run a single Rust test, use cargo directly against the src-tauri manifest, e.g.:

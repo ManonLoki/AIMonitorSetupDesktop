@@ -49,6 +49,9 @@
 Cargo 二进制目标名固定为 `AIMonitor`，与 Tauri 的 `productName` 和
 `mainBinaryName` 保持一致。这样开发构建与正式 `.app` 注册开机自启时，
 macOS 都显示 `AIMonitor`，不会退回 Cargo 包名 `ai-monitor-setup`。
+发布文件使用独立且固定的 `AIMonitorSetup` 前缀，不改变应用和 Hook relay 的
+`AIMonitor` 运行时身份；macOS、Windows 与校验文件的命名模板和
+AIMonitorDesktop 保持一致。
 
 本机 Hook 接口使用 Axum 路由并通过 Tokio `TcpListener` 提供服务，仅绑定
 `127.0.0.1:10240`；listener 复用 Tauri 的 Tokio runtime，协议面只覆盖短连接

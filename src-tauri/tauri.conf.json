@@ -27,7 +27,6 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
     "category": "Utility",
     "publisher": "AIMonitor",
     "copyright": "Copyright © 2026 AIMonitor. All rights reserved.",
@@ -39,22 +38,6 @@
       "icons/ai-monitor/128x128@2x.png",
       "icons/ai-monitor/icon.icns",
       "icons/ai-monitor/icon.ico"
-    ],
-    "windows": {
-      "nsis": {
-        "installerIcon": "icons/ai-monitor/icon.ico",
-        "uninstallerIcon": "icons/ai-monitor/icon.ico",
-        "installMode": "currentUser",
-        "languages": [
-          "SimpChinese",
-          "English"
-        ],
-        "displayLanguageSelector": false,
-        "customLanguageFiles": {
-          "SimpChinese": "windows/nsis/languages/SimpChinese.nsh",
-          "English": "windows/nsis/languages/English.nsh"
-        }
-      }
-    }
+    ]
   }
 }

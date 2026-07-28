@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/ai-monitor/icon.ico",
+        "uninstallerIcon": "icons/ai-monitor/icon.ico",
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "customLanguageFiles": {
+          "SimpChinese": "windows/nsis/languages/SimpChinese.nsh",
+          "English": "windows/nsis/languages/English.nsh"
+        }
+      }
+    }
+  }
+}
