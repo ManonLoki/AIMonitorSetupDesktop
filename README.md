@@ -1,81 +1,96 @@
-# AI Monitor Setup
+# AIMonitor Setup
 
-AIMonitor 桌面配置与中继应用。它负责发现局域网内的 AIMonitor 设备，管理
-AI 客户端的展示位置、状态图片与 Hooks，并在本机接收 Codex、Claude Code、
-Cursor 等工具的事件后转发到已配置设备。
+**English** | [简体中文](README_zh.md)
 
-项目采用 Tauri + React：Rust 是唯一业务后端，React 只负责界面、交互和调用
-类型化 Tauri command。
+AIMonitor Setup is the desktop configuration and relay application for AIMonitor
+devices. It discovers AIMonitor devices on the local network, manages per-client
+display positions, state images, and Hooks, and forwards local events from Codex,
+Claude Code, Cursor, OpenCode, WorkBuddy, Hermes, OpenClaw, and CodeBuddy to every
+configured online device.
 
-## 功能
+The project is built with Tauri and React. Rust is the sole business backend;
+React is limited to presentation, interaction, and typed Tauri command calls.
 
-- 通过 mDNS 与 UDP 广播自动发现局域网设备，并持续维护在线状态。
-- 为每台设备、每个 AI 客户端分别配置 25 个显示位置以及空闲、运行中、询问、
-  异常四种展示状态。
-- 浏览、筛选、批量上传和管理设备图片。
-- 为支持的 AI 客户端写入本机 Hooks 中继配置；命令型 Hook 由 AIMonitor 自身的
-  轻量模式归约为四字段事件信封，Windows 不依赖 PowerShell。
-- 查看在线设备、Hook listener、转发结果与时序抑制等运行指标。
-- 支持开机静默自启、系统托盘、多设备切换与首次使用引导。
+## Features
 
-## 实机界面
+- Discover local AIMonitor devices through mDNS and UDP broadcast, then keep their
+  online state refreshed in the background.
+- Configure any of 25 display positions and four states—idle, running, asking,
+  and error—separately for each device and AI client.
+- Browse, filter, batch upload, and manage JPEG, PNG, GIF, BMP, and WebP images.
+  The Rust backend validates, resizes, and converts images for device compatibility.
+- Write local relay configuration for supported AI clients. Command Hooks use
+  AIMonitor's lightweight relay mode and do not depend on PowerShell on Windows.
+- Inspect online devices and local relay metrics, including received, forwarded,
+  failed, pending, deduplicated, and suppressed events.
+- Use the interface in English or Simplified Chinese, run silently at startup,
+  control the app from the system tray, switch between devices, and follow the
+  first-run guide.
 
-以下截图来自 macOS 上按本文开发流程运行的 AIMonitor（截图时版本为 v2.0.9，界面细节可能已随后续版本更新）。
+## Screenshots
 
-### 启动与设备扫描
+The following screenshots were captured from AIMonitor v2.2.2 on macOS and match
+the current repository version.
 
-应用启动时会同时通过 mDNS、UDP 广播和已保存地址检查可用设备。
+### Startup and device discovery
 
-![启动与设备扫描](docs/screenshots/device-scan.jpg)
+At startup, AIMonitor checks available devices through mDNS, UDP broadcast, and
+previously saved addresses.
 
-### 工作台
+![Startup and device discovery](docs/screenshots/device-scan.jpg)
 
-集中展示在线设备以及本机 Hook 中继的接收、转发、失败、等待处理和时序抑制
-状态。
+### Workbench
 
-![工作台](docs/screenshots/workbench.jpg)
+The workbench shows online devices and the local Hook relay's received, forwarded,
+failed, pending, and suppressed event counts.
 
-### 监控管理
+![Workbench](docs/screenshots/workbench.jpg)
 
-按设备与 AI 客户端隔离保存显示位置和四种行为状态的展示配置。
+### Monitor management
 
-![监控管理](docs/screenshots/monitor-management.jpg)
+Display positions and all four behavior states are stored independently for each
+device and AI client.
 
-### 图片管理
+![Monitor management](docs/screenshots/monitor-management.jpg)
 
-查看设备图片数量与格式分类，并支持刷新、筛选和批量上传。
+### Image management
 
-![图片管理](docs/screenshots/image-management.jpg)
+Review image totals and formats, refresh or filter the list, and upload multiple
+images at once.
 
-### 设置
+![Image management](docs/screenshots/image-management.jpg)
 
-管理启用的 AI 客户端、Hooks 配置目录、显示用户名、设备检查间隔和开机自启。
+### Settings
 
-![设置](docs/screenshots/settings.jpg)
+Choose AI clients, manage Hook configuration directories, set the shared display
+name and discovery interval, select a language, and configure launch at startup.
 
-### 新手引导
+![Settings](docs/screenshots/settings.jpg)
 
-首次运行时按顺序引导完成 AI 客户端选择、Hooks 写入、图片上传和展示配置。
+### Getting started
 
-![新手引导](docs/screenshots/onboarding.jpg)
+The first-run guide walks through AI client selection, Hook setup, image upload,
+and display configuration.
 
-## 开发
+![Getting started](docs/screenshots/onboarding.jpg)
 
-环境要求：
+## Development
+
+Requirements:
 
 - Node.js 22.12+
 - pnpm 10.30+
-- Rust stable（项目当前验证版本为 1.97）
-- Tauri 对应平台的系统依赖
+- Rust stable (currently verified with 1.97)
+- The Tauri system dependencies for your target platform
 
-正常启动流程：
+Install dependencies and start the development application:
 
 ```bash
 pnpm install
 pnpm tauri dev
 ```
 
-常用检查：
+Common checks:
 
 ```bash
 pnpm build
@@ -83,15 +98,17 @@ pnpm check
 pnpm tauri build
 ```
 
-## 发布构建（维护者手册）
+## Release builds (maintainer guide)
 
-发布入口与 AIMonitorDesktop 使用同一套命令、平台标签和产物命名规则。
-macOS 包只有在 Developer ID 签名、公证、票据装订和 Gatekeeper 校验全部通过后，
-才会进入 `publish/`。
+The release workflow uses the same commands, platform labels, and artifact naming
+conventions as AIMonitorDesktop. A macOS package is copied to `publish/` only
+after Developer ID signing, notarization, ticket stapling, and Gatekeeper
+validation all succeed.
 
-### 首次配置构建机
+### One-time build machine setup
 
-安装依赖、Rust 目标和 Windows 交叉构建工具：
+Install project dependencies, Rust targets, and the Windows cross-compilation
+tools:
 
 ```bash
 pnpm install
@@ -101,14 +118,16 @@ brew install llvm nsis
 cargo install --locked cargo-xwin
 ```
 
-macOS 钥匙串中必须安装有效的 `Developer ID Application` 证书及其私钥：
+The macOS keychain must contain a valid `Developer ID Application` certificate
+and its private key:
 
 ```bash
 security find-identity -v -p codesigning
 ```
 
-创建 Developer 权限的 App Store Connect API Key，将下载的 `.p8` 私钥保存到
-本机安全目录，再把公证凭据写入钥匙串。尖括号内容必须替换为自己的值：
+Create an App Store Connect API key with Developer access, save the downloaded
+`.p8` key in a secure local directory, and store the notarization credentials in
+the keychain. Replace every placeholder before running these commands:
 
 ```bash
 mkdir -p "$HOME/.appstoreconnect/private_keys"
@@ -121,106 +140,116 @@ xcrun notarytool store-credentials AIMonitorNotary \
   --issuer "<ISSUER_ID>"
 ```
 
-验证钥匙串凭据：
+Verify the stored credentials:
 
 ```bash
 xcrun notarytool history --keychain-profile AIMonitorNotary
 ```
 
-证书、证书私钥、API Key、`.p8` 文件和 Issuer ID 都不得提交到仓库。若使用其他
-profile 名称，构建前设置 `AIMONITOR_NOTARY_PROFILE`。
+Never commit the certificate, its private key, the App Store Connect API key, the
+`.p8` file, or the Issuer ID. Set `AIMONITOR_NOTARY_PROFILE` before building if
+you use a different keychain profile name.
 
-### 每次发布
+### Building a release
 
-1. 同步修改 `package.json`、`src-tauri/Cargo.toml` 和
-   `src-tauri/tauri.conf.json` 中的版本号，三处必须一致。
-2. 执行发布前检查：
+1. Update the version in `package.json`, `src-tauri/Cargo.toml`, and
+   `src-tauri/tauri.conf.json`. All three values must match.
+2. Run the pre-release checks:
 
    ```bash
    pnpm build
    pnpm check
    ```
 
-3. 根据目标选择一个发布命令：
+3. Choose a target:
 
    ```bash
-   # macOS 通用架构（Apple Silicon + Intel）
+   # macOS universal binary (Apple Silicon + Intel)
    pnpm run build:mac
 
-   # Windows x64（在 macOS/Linux 上使用 cargo-xwin）
+   # Windows x64 through cargo-xwin on macOS/Linux
    pnpm run build:win
 
-   # 依次构建 macOS 通用架构和 Windows x64
+   # Build macOS universal and Windows x64 in sequence
    pnpm run build:release
    ```
 
-   如只需单一 macOS 架构，可覆盖默认目标：
+   To build a single macOS architecture, override the default target:
 
    ```bash
    AIMONITOR_MAC_TARGET=aarch64-apple-darwin pnpm run build:mac
    AIMONITOR_MAC_TARGET=x86_64-apple-darwin pnpm run build:mac
    ```
 
-4. 命令成功后检查 `publish/`：
+4. After a successful build, inspect `publish/`:
 
-   - `AIMonitorSetup-macOS-<架构>-v<版本>.dmg`
-   - `AIMonitorSetup-Windows-x64-v<版本>-setup.exe`
+   - `AIMonitorSetup-macOS-<architecture>-v<version>.dmg`
+   - `AIMonitorSetup-Windows-x64-v<version>-setup.exe`
    - `AIMonitorSetup-SHA256SUMS.txt`
 
-脚本只会在本次请求的所有平台均构建成功后清空并重建 `publish/`，不会发布
-半成品。macOS 自动流程为：Tauri 构建并签名 → 校验 DMG 签名 → 提交 Apple
-公证并等待 `Accepted` → staple 公证票据 → Gatekeeper 校验 → 复制安装器。
+The release script clears and repopulates `publish/` only after every requested
+platform succeeds, so it does not publish partial output. The automated macOS
+flow is: Tauri build and signing → DMG signature validation → Apple notarization
+and wait for `Accepted` → staple the ticket → Gatekeeper validation → copy the
+installer.
 
-Windows x64 安装器通过 `cargo-xwin` 和 NSIS 构建，目前使用 `--no-sign`，没有
-Authenticode 签名；它与 macOS Developer ID 签名、公证是两套独立机制。
+The Windows x64 installer is built through `cargo-xwin` and NSIS with `--no-sign`;
+it does not have an Authenticode signature. Windows signing and macOS Developer
+ID signing/notarization are independent processes.
 
-### 发布后验证
+### Post-release validation
 
-将文件名中的版本替换为本次实际版本：
+Replace the version in each filename with the actual release version:
 
 ```bash
-xcrun stapler validate "publish/AIMonitorSetup-macOS-<架构>-v<版本>.dmg"
+xcrun stapler validate "publish/AIMonitorSetup-macOS-<architecture>-v<version>.dmg"
 spctl --assess --verbose=2 --type open \
   --context context:primary-signature \
-  "publish/AIMonitorSetup-macOS-<架构>-v<版本>.dmg"
+  "publish/AIMonitorSetup-macOS-<architecture>-v<version>.dmg"
 shasum -a 256 -c publish/AIMonitorSetup-SHA256SUMS.txt
 ```
 
-`stapler validate` 应成功；`spctl` 输出应包含 `accepted` 和
-`source=Notarized Developer ID`。最后建议在另一台 Mac 和一台 Windows 机器上
-分别完成安装与首次启动测试。
+`stapler validate` must succeed, and `spctl` must report `accepted` and
+`source=Notarized Developer ID`. Finally, test installation and first launch on
+another Mac and on a Windows machine.
 
-### 更换电脑或轮换密钥
+### Moving to a new machine or rotating keys
 
-新电脑需要同时迁移 Developer ID 证书及其私钥，以及 App Store Connect `.p8`
-私钥。导入签名证书后，在新电脑重新运行 `notarytool store-credentials`。确认新
-配置可以构建和公证后，再在 App Store Connect 撤销不再使用的旧 API Key。
+A new build machine needs both the Developer ID certificate with its private key
+and the App Store Connect `.p8` key. After importing the signing certificate,
+run `notarytool store-credentials` again. Revoke the old API key in App Store
+Connect only after the new setup can build and notarize successfully.
 
-### 常见问题
+### Troubleshooting
 
-- 找不到签名身份：确认钥匙串内同时存在证书和对应私钥，再运行
-  `security find-identity -v -p codesigning`。
-- 找不到 `AIMonitorNotary`：重新执行 `notarytool store-credentials`，或设置正确的
-  `AIMONITOR_NOTARY_PROFILE`。
-- 公证返回 `Invalid`：从构建输出取得 Submission ID，然后执行
-  `xcrun notarytool log <SUBMISSION_ID> --keychain-profile AIMonitorNotary` 查看原因。
-- Windows 构建缺少工具：确认 `cargo-xwin`、`makensis` 和 LLVM 已安装，并确保
-  `llvm-rc` 在 `PATH` 中。
-- DMG 被 Gatekeeper 拦截：不要通过“仍要打开”绕过后直接发布；确认
-  `stapler validate` 成功且 `spctl` 显示 `Notarized Developer ID`。
+- Signing identity not found: confirm that both the certificate and its private
+  key are present in the keychain, then run
+  `security find-identity -v -p codesigning`.
+- `AIMonitorNotary` not found: run `notarytool store-credentials` again or set
+  `AIMONITOR_NOTARY_PROFILE` to the correct profile.
+- Notarization returns `Invalid`: obtain the Submission ID from the build output,
+  then run
+  `xcrun notarytool log <SUBMISSION_ID> --keychain-profile AIMonitorNotary`.
+- Windows build tools missing: confirm that `cargo-xwin`, `makensis`, and LLVM
+  are installed and that `llvm-rc` is on `PATH`.
+- Gatekeeper blocks the DMG: do not bypass the warning and publish it. Confirm
+  that `stapler validate` succeeds and `spctl` reports
+  `Notarized Developer ID`.
 
-## 项目约束
+## Project rules
 
-- [技术栈与版本](docs/technology-stack.md)
-- [架构与代码边界](docs/architecture.md)
-- [Hooks 事实标准](docs/hooks-contract.md)
-- [代理协作规则](AGENTS.md)
+- [Technology stack and versions](docs/technology-stack.md)
+- [Architecture and code boundaries](docs/architecture.md)
+- [Hooks contract](docs/hooks-contract.md)
+- [Agent collaboration rules](AGENTS.md)
 
-## 许可证
+## License
 
-本项目源码以 [PolyForm Noncommercial License 1.0.0](LICENSE) 提供，可用于
-个人、研究、教育及其他许可证允许的非商业用途，也可在这些用途范围内修改和
-分发。未经版权所有者另行书面授权，不得用于商业用途。
+The source code is provided under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). It may be used, modified, and
+distributed for personal, research, educational, and other noncommercial
+purposes allowed by the license. Commercial use requires separate written
+permission from the copyright holder.
 
-由于包含非商业用途限制，本项目属于“源码可用（source-available）”，不属于
-OSI 定义的开源软件。
+Because the license restricts commercial use, this project is source-available
+rather than open source under the OSI definition.
