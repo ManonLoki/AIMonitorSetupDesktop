@@ -24,6 +24,7 @@ require_command() {
 
 require_command cargo
 require_command cargo-xwin
+require_command codesign
 require_command file
 require_command lipo
 require_command makensis
@@ -120,8 +121,7 @@ cd "${REPO_ROOT}"
 printf 'Building %s %s for macOS ARM64...\n' "${PRODUCT_NAME}" "${VERSION}"
 pnpm tauri build \
   --target "${MAC_TARGET}" \
-  --bundles app,dmg \
-  --no-sign
+  --bundles app,dmg
 
 printf 'Building %s %s for Windows x64 with cargo-xwin...\n' "${PRODUCT_NAME}" "${VERSION}"
 pnpm tauri build \
@@ -142,6 +142,8 @@ WINDOWS_INSTALLER="${TARGET_DIR}/${WINDOWS_TARGET}/release/bundle/nsis/${PRODUCT
 
 [[ "$(lipo -archs "${MAC_APP_BINARY}")" == "arm64" ]] ||
   fail "macOS application binary is not ARM64: ${MAC_APP_BINARY}"
+codesign --verify --deep --strict --verbose=2 \
+  "${TARGET_DIR}/${MAC_TARGET}/release/bundle/macos/${PRODUCT_NAME}.app"
 file "${WINDOWS_APP_BINARY}" | grep -Eq 'PE32\+.*x86-64' ||
   fail "Windows application binary is not x86-64: ${WINDOWS_APP_BINARY}"
 
