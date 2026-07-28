@@ -26,7 +26,7 @@ import { AI_TOOLS, enabledAiTools } from "../components/aiTools";
 // 引入图片选择器组件
 import { ImagePicker } from "../components/ImagePicker";
 // 引入设备未就绪时的统一拦截组件
-import { monitorDeviceGate } from "../components/MonitorDeviceGate";
+import { useMonitorDeviceGate } from "../components/MonitorDeviceGate";
 // 引入展示位选择器组件
 import { SlotPicker } from "../components/SlotPicker";
 // 引入维护当前工具 Tab、自动回退到可见工具的共享 hook
@@ -39,17 +39,17 @@ import {
   monitorKeys,
   remoteImagesQuery,
 } from "../queries/monitor";
+import { useI18n } from "../../../shared/i18n";
 
 // 可配置的 hook 行为列表：取值、展示名与徽标颜色，用于渲染各行为的展示配置卡片
 const behaviors: Array<{
   value: HookBehavior;
-  label: string;
   color: string;
 }> = [
-  { value: "idle", label: "空闲", color: "gray" },
-  { value: "running", label: "运行中", color: "violet" },
-  { value: "asking", label: "询问", color: "yellow" },
-  { value: "error", label: "异常", color: "red" },
+  { value: "idle", color: "gray" },
+  { value: "running", color: "violet" },
+  { value: "asking", color: "yellow" },
+  { value: "error", color: "red" },
 ];
 
 // 构造某个工具的空白 Profile 草稿：deviceId 留空、slot 默认第 1 位，每种行为都生成一条空 hook
@@ -74,6 +74,7 @@ function initialDrafts(): Record<AiTool, AiProfile> {
 }
 
 export function AiManagementPage() {
+  const { t } = useI18n();
   // 获取 QueryClient 实例，用于在 mutation 成功后手动写入缓存
   const queryClient = useQueryClient();
   // 查询当前设备下所有 AI 工具的 Profile 列表（对接 list_ai_profiles 命令）
@@ -167,18 +168,18 @@ export function AiManagementPage() {
   // 可供选择的远端图片列表，查询未返回数据时兜底为空数组
   const availableImages = images.data ?? [];
   // 设备门禁：设备未配置或不可用时，返回统一的拦截提示，阻止渲染正式页面内容
-  const deviceGate = monitorDeviceGate({
+  const deviceGate = useMonitorDeviceGate({
     isPending: monitorPending,
     hasConfiguredDevice,
     hasAvailableDevice,
-    featureLabel: "监控管理",
+    featureLabel: t("monitor.feature"),
   });
   if (deviceGate) return deviceGate;
 
   if (visibleTools.length === 0) {
     return (
       <Alert color="blue">
-        暂未选择 AI 客户端，请先到“设置 → AI 客户端”中勾选需要管理的客户端。
+        {t("monitor.noClient")}
       </Alert>
     );
   }
@@ -219,19 +220,19 @@ export function AiManagementPage() {
 
               <Group justify="space-between" align="flex-end">
                 <div>
-                  <Text fw={650}>行为展示</Text>
+                  <Text fw={650}>{t("monitor.behaviorDisplay")}</Text>
                   <Text size="sm" c="dimmed" mt={3}>
-                    为每种行为选择图片；显示内容可按需填写。
+                    {t("monitor.behaviorDescription")}
                   </Text>
                 </div>
                 <Badge variant="light" color="violet" size="lg">
-                  已配置 {configuredBehaviorCount} / {behaviors.length}
+                  {t("monitor.configuredCount", { configured: configuredBehaviorCount, total: behaviors.length })}
                 </Badge>
               </Group>
 
               {!images.isPending && availableImages.length === 0 && (
                 <Alert color="yellow" variant="light">
-                  暂无可选图片，请先到“图片管理”上传至少一张图片。
+                  {t("monitor.noImages")}
                 </Alert>
               )}
 
@@ -257,9 +258,9 @@ export function AiManagementPage() {
                           <Group gap="sm" wrap="nowrap">
                             <span className="behavior-card-status" />
                             <div>
-                              <Text fw={700}>{behavior.label}</Text>
+                              <Text fw={700}>{t(`behavior.${behavior.value}`)}</Text>
                               <Text size="xs" c="dimmed" mt={1}>
-                                设备处于此状态时展示
+                                {t("monitor.stateDescription")}
                               </Text>
                             </div>
                           </Group>
@@ -268,7 +269,7 @@ export function AiManagementPage() {
                             variant="light"
                             radius="sm"
                           >
-                            {hook.image ? "已配置" : "待选择图片"}
+                            {hook.image ? t("common.configured") : t("common.notConfigured")}
                           </Badge>
                         </Group>
                       </div>
@@ -284,18 +285,18 @@ export function AiManagementPage() {
                         <Textarea
                           label={
                             <span>
-                              内容{" "}
+                              {t("monitor.content")}{" "}
                               <Text
                                 component="span"
                                 size="xs"
                                 fw={400}
                                 c="dimmed"
                               >
-                                可选
+                                {t("common.optional")}
                               </Text>
                             </span>
                           }
-                          placeholder="输入设备上显示的补充内容"
+                          placeholder={t("monitor.contentPlaceholder")}
                           autosize
                           minRows={1}
                           value={hook.content}
@@ -317,18 +318,18 @@ export function AiManagementPage() {
                 <Group justify="space-between" wrap="wrap">
                   <div>
                     <Text size="sm" fw={650}>
-                      展示配置
+                      {t("monitor.displayConfig")}
                     </Text>
                     <Text size="xs" c="dimmed" mt={2}>
                       {isComplete
-                        ? "所有状态均已配置，可以保存。"
-                        : `还需为 ${behaviors.length - configuredBehaviorCount} 种状态选择图片。`}
+                        ? t("monitor.ready")
+                        : t("monitor.remaining", { count: behaviors.length - configuredBehaviorCount })}
                     </Text>
                   </div>
                   <Group>
                     {save.isSuccess && save.data.tool === activeTool && (
                       <Badge variant="light" color="teal">
-                        已保存
+                        {t("common.saved")}
                       </Badge>
                     )}
                     <Button
@@ -337,7 +338,7 @@ export function AiManagementPage() {
                       loading={save.isPending}
                       disabled={!isComplete}
                     >
-                      保存展示配置
+                      {t("monitor.save")}
                     </Button>
                   </Group>
                 </Group>

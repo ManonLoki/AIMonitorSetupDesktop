@@ -2,9 +2,11 @@
 import { Loader, Stack, Text } from "@mantine/core";
 // 引入应用图标资源（打包后的 URL）
 import appIconUrl from "../../../src-tauri/icons/ai-monitor/128x128.png";
+import { useI18n } from "../i18n";
 
 // 应用启动/路由加载中展示的占位屏幕，用于路由 beforeLoad 预取数据期间的过渡态
 export function AppBootScreen() {
+  const { t } = useI18n();
   return (
     // 整体容器，承载背景光晕与内容
     <div className="boot-screen">
@@ -18,11 +20,11 @@ export function AppBootScreen() {
         <Stack align="center" gap={6}>
           {/* 主提示文案 */}
           <Text fw={700} size="lg">
-            正在初始化设备连接
+            {t("boot.title")}
           </Text>
           {/* 副提示文案，说明具体在做什么 */}
           <Text size="sm" c="dimmed">
-            正在扫描局域网内的 AIMonitor 设备…
+            {t("boot.description")}
           </Text>
         </Stack>
         {/* 加载动画指示器 */}

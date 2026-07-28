@@ -16,26 +16,28 @@ import type { DiscoveredMonitorDevice } from "../api/monitor";
 import { monitorDevicesQuery, monitorSettingsQuery } from "../queries/monitor";
 import { useConnectDevice } from "../hooks/useConnectDevice";
 import { LineIcon } from "../../../shared/ui/LineIcon";
+import { useI18n } from "../../../shared/i18n";
 
 // 根据设备信息推导出面板展示所需的分组标题、徽标文案与徽标颜色
-function deviceStatus(device: DiscoveredMonitorDevice | undefined) {
+function deviceStatus(device: DiscoveredMonitorDevice | undefined, t: ReturnType<typeof useI18n>["t"]) {
   // 未选中任何设备时，展示"当前保存设备"分组，徽标标记为未发现
   if (!device) {
-    return { sectionLabel: "当前保存设备", badgeLabel: "未发现", badgeColor: "gray" };
+    return { sectionLabel: t("device.savedSection"), badgeLabel: t("device.notFoundBadge"), badgeColor: "gray" };
   }
   // 设备通过 mDNS 发现
   if (device.discoverySource === "mdns") {
-    return { sectionLabel: "已发现设备", badgeLabel: "mDNS 发现", badgeColor: "teal" };
+    return { sectionLabel: t("device.discoveredSection"), badgeLabel: t("device.mdns"), badgeColor: "teal" };
   }
   // 设备通过 UDP 广播发现
   if (device.discoverySource === "udpBroadcast") {
-    return { sectionLabel: "广播发现设备", badgeLabel: "UDP 广播", badgeColor: "teal" };
+    return { sectionLabel: t("device.broadcastSection"), badgeLabel: t("device.udp"), badgeColor: "teal" };
   }
   // 其余情况视为通过已保存地址直接降级连接
-  return { sectionLabel: "降级连接设备", badgeLabel: "直连在线", badgeColor: "teal" };
+  return { sectionLabel: t("device.fallbackSection"), badgeLabel: t("device.direct"), badgeColor: "teal" };
 }
 
 export function DeviceConnectPanel() {
+  const { t } = useI18n();
   // 拉取已保存的设备设置
   const settings = useQuery(monitorSettingsQuery);
   // 拉取当前发现到的设备列表
@@ -74,14 +76,14 @@ export function DeviceConnectPanel() {
       value: device.id,
       label:
         device.discoverySource === "udpBroadcast"
-          ? `${device.name}（UDP 广播）`
+          ? `${device.name} (${t("device.udp")})`
           : device.name,
     })),
     ...(savedSettings && savedDeviceUnavailable
       ? [
           {
             value: savedSettings.deviceId,
-            label: `${savedSettings.deviceName}（当前不可用）`,
+            label: `${savedSettings.deviceName} (${t("device.notFoundBadge")})`,
           },
         ]
       : []),
@@ -90,7 +92,7 @@ export function DeviceConnectPanel() {
   // 连接设备的 mutation
   const connect = useConnectDevice();
   // 根据当前选中设备计算展示状态
-  const status = deviceStatus(selectedDevice);
+  const status = deviceStatus(selectedDevice, t);
 
   // 测试连接的 mutation：向指定 baseUrl 发起可达性检测
   const test = useMutation({
@@ -104,10 +106,10 @@ export function DeviceConnectPanel() {
         <Skeleton height={72} radius="md" />
       ) : (
         <Select
-          label="AIMonitor 设备"
-          description="优先使用 mDNS，失败时自动通过每张网卡发送 UDP 广播"
+          label={t("device.selectorLabel")}
+          description={t("device.selectorDescription")}
           placeholder={
-            devices.data?.length ? "选择发现的设备" : "未发现设备"
+            devices.data?.length ? t("device.selectorPlaceholder") : t("device.noneFound")
           }
           data={deviceOptions}
           value={selectedDeviceId}
@@ -152,7 +154,7 @@ export function DeviceConnectPanel() {
       {/* 加载完成但没有发现任何设备时，提示用户检查设备联网状态 */}
       {!devices.isPending && devices.data?.length === 0 && (
         <Alert color="yellow" variant="light">
-          mDNS、UDP 广播和已保存地址均未发现可用设备，请确认设备已开机并接入同一局域网。
+          {t("device.noneFoundDescription")}
         </Alert>
       )}
 
@@ -164,7 +166,7 @@ export function DeviceConnectPanel() {
               {status.sectionLabel}
             </Text>
             <Text size="sm" fw={600} mt={4}>
-              {selectedDevice?.name ?? settings.data?.deviceName ?? "尚未选择"}
+              {selectedDevice?.name ?? settings.data?.deviceName ?? t("device.notSelected")}
             </Text>
             <Text size="xs" ff="monospace" c="dimmed" mt={3}>
               {selectedDevice?.baseUrl ?? settings.data?.baseUrl ?? "—"}
@@ -175,7 +177,7 @@ export function DeviceConnectPanel() {
               {status.badgeLabel}
             </Badge>
             <Text size="xs" c="dimmed">
-              已发现 {devices.data?.length ?? 0} 台
+              {t("device.foundCount", { count: devices.data?.length ?? 0 })}
             </Text>
           </Stack>
         </Group>
@@ -200,7 +202,7 @@ export function DeviceConnectPanel() {
           onClick={() => devices.refetch()}
           loading={devices.isFetching}
         >
-          重新扫描
+          {t("device.rescan")}
         </Button>
         <Button
           variant="default"
@@ -208,7 +210,7 @@ export function DeviceConnectPanel() {
           loading={test.isPending}
           disabled={!selectedDevice}
         >
-          测试连接
+          {t("device.testConnection")}
         </Button>
         <Button
           onClick={() => {
@@ -219,7 +221,7 @@ export function DeviceConnectPanel() {
           leftSection={<LineIcon name="check" size={17} />}
           disabled={!selectedDevice}
         >
-          连接设备
+          {t("device.connect")}
         </Button>
       </Group>
     </Stack>

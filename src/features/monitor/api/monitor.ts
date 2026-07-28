@@ -254,10 +254,11 @@ export function saveHookConfigDirectory(
 // 弹出系统目录选择框，让用户为某工具挑选 hook 配置目录；取消时返回 null
 export async function chooseHookConfigDirectory(
   defaultPath: string,
+  title: string,
 ): Promise<string | null> {
   return open({
     // 弹窗标题
-    title: "选择 Hooks 配置目录",
+    title,
     // 只允许选择目录
     directory: true,
     // 不允许多选

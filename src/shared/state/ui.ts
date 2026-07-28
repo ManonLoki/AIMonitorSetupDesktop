@@ -9,6 +9,15 @@ export const colorSchemeAtom = atomWithStorage<"light" | "dark">(
   "light",
 );
 
+// 界面语言属于本机 UI 偏好；默认跟随系统，也允许用户显式固定中英文。
+export type LanguagePreference = "system" | "zh-CN" | "en";
+export const languagePreferenceAtom = atomWithStorage<LanguagePreference>(
+  "ai-monitor-language",
+  "system",
+  undefined,
+  { getOnInit: true },
+);
+
 // 侧边栏是否折叠的状态，持久化到 localStorage 键 "ai-monitor-sidebar-collapsed"，默认展开
 export const sidebarCollapsedAtom = atomWithStorage<boolean>(
   "ai-monitor-sidebar-collapsed",

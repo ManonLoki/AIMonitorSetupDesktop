@@ -33,17 +33,18 @@ import { AnimatedContent } from "./react-bits/AnimatedContent";
 import { OnboardingGuide } from "./OnboardingGuide";
 // 引入路由路径常量的唯一来源
 import { ROUTES } from "../routes";
+import { useI18n } from "../i18n";
 
 // 侧边导航菜单项配置：标签、目标路由、图标名、是否需要设备才可点击
-const navigation = [
-  { label: "工作台", to: ROUTES.home, icon: "dashboard" as const, requiresDevice: false },
-  { label: "监控管理", to: ROUTES.aiManagement, icon: "ai" as const, requiresDevice: true },
-  { label: "图片管理", to: ROUTES.images, icon: "image" as const, requiresDevice: true },
-  { label: "设置", to: ROUTES.settings, icon: "settings" as const, requiresDevice: false },
-];
-
 // 应用整体外壳布局：侧边导航栏 + 主内容区（Outlet 渲染当前路由页面）
 export function AppShellLayout() {
+  const { t } = useI18n();
+  const navigation = [
+    { label: t("nav.workbench"), to: ROUTES.home, icon: "dashboard" as const, requiresDevice: false },
+    { label: t("nav.monitor"), to: ROUTES.aiManagement, icon: "ai" as const, requiresDevice: true },
+    { label: t("nav.images"), to: ROUTES.images, icon: "image" as const, requiresDevice: true },
+    { label: t("nav.settings"), to: ROUTES.settings, icon: "settings" as const, requiresDevice: false },
+  ];
   // 移动端侧边栏展开/收起状态（opened 为是否展开，toggle/close 为操作方法）
   const [opened, { toggle, close }] = useDisclosure();
   // 从路由状态中读取当前路径名，用于高亮当前激活的导航项
@@ -85,7 +86,7 @@ export function AppShellLayout() {
                 <Text fw={700}>AI Monitor</Text>
                 <Text size="xs" c="dimmed">
                   {/* 版本号加载完成前展示占位文案 */}
-                  {overview.data ? `v${overview.data.version}` : "版本加载中"}
+                  {overview.data ? `v${overview.data.version}` : t("shell.versionLoading")}
                 </Text>
               </div>
             )}
@@ -93,7 +94,7 @@ export function AppShellLayout() {
           <Group gap={4} wrap="nowrap" className="app-brand-controls">
             {/* 主题切换按钮：根据当前主题展示提示文案与图标 */}
             <Tooltip
-              label={colorScheme === "dark" ? "浅色模式" : "深色模式"}
+              label={colorScheme === "dark" ? t("shell.lightMode") : t("shell.darkMode")}
               position={collapsed ? "right" : "bottom"}
             >
               <ActionIcon
@@ -104,7 +105,7 @@ export function AppShellLayout() {
                   // 点击时在浅色/深色之间切换主题
                   setColorScheme(colorScheme === "dark" ? "light" : "dark")
                 }
-                aria-label="切换主题"
+                aria-label={t("shell.toggleTheme")}
               >
                 <LineIcon
                   name={colorScheme === "dark" ? "sun" : "moon"}
@@ -114,7 +115,7 @@ export function AppShellLayout() {
             </Tooltip>
             {/* 侧边栏折叠/展开按钮 */}
             <Tooltip
-              label={collapsed ? "展开侧边栏" : "收起侧边栏"}
+              label={collapsed ? t("shell.expandSidebar") : t("shell.collapseSidebar")}
               position={collapsed ? "right" : "bottom"}
             >
               <ActionIcon
@@ -122,7 +123,7 @@ export function AppShellLayout() {
                 color="gray"
                 size="sm"
                 onClick={() => setCollapsed((value) => !value)}
-                aria-label="切换侧边栏"
+                aria-label={t("shell.toggleSidebar")}
               >
                 <LineIcon name="panel" size={16} />
               </ActionIcon>
@@ -138,7 +139,7 @@ export function AppShellLayout() {
               // 折叠模式：仅展示图标，用 Tooltip 显示完整标签
               <Tooltip key={item.to} label={item.label} position="right">
                 <span
-                  aria-label={`${item.label}${disabled ? "（无可用设备）" : ""}`}
+                  aria-label={`${item.label}${disabled ? t("shell.noDeviceSuffix") : ""}`}
                   aria-disabled={disabled || undefined}
                   className={
                     `rail-link${pathname === item.to ? " active" : ""}${disabled ? " disabled" : ""}`
@@ -184,7 +185,7 @@ export function AppShellLayout() {
           onClick={toggle}
           hiddenFrom="sm"
           size="sm"
-          aria-label="切换导航"
+          aria-label={t("shell.toggleNavigation")}
           className="mobile-nav-trigger"
         />
         <main className="page-container">

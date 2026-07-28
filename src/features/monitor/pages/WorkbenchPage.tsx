@@ -23,15 +23,15 @@ import {
 } from "../queries/monitor";
 // 引入通用图标组件
 import { LineIcon } from "../../../shared/ui/LineIcon";
-
-// 设备发现来源枚举值到中文展示文案的映射表
-const discoverySourceLabel: Record<DiscoveredMonitorDevice["discoverySource"], string> = {
-  mdns: "mDNS 发现",
-  udpBroadcast: "UDP 广播",
-  savedAddress: "已保存地址",
-};
+import { useI18n } from "../../../shared/i18n";
 
 export function WorkbenchPage() {
+  const { t } = useI18n();
+  const discoverySourceLabel: Record<DiscoveredMonitorDevice["discoverySource"], string> = {
+    mdns: t("device.mdns"),
+    udpBroadcast: t("device.udp"),
+    savedAddress: t("device.savedAddress"),
+  };
   // 查询运行时概览信息（含 hook 中继状态），对接 get_runtime_overview 命令，每 3 秒自动轮询一次
   const runtime = useQuery(runtimeOverviewQuery);
   // 查询当前监控设置（用于判断哪个设备是“当前连接”），对接 get_monitor_settings 命令
@@ -52,9 +52,9 @@ export function WorkbenchPage() {
           {/* 标题、说明文案与“强制重新检查”按钮 */}
           <Group justify="space-between" align="flex-start">
             <div>
-              <Title order={3}>在线设备</Title>
+              <Title order={3}>{t("workbench.onlineTitle")}</Title>
               <Text size="sm" c="dimmed" mt={4}>
-                按设置页配置的间隔自动刷新，也可以立即强制重新检查一次。
+                {t("workbench.onlineDescription")}
               </Text>
             </div>
             <Button
@@ -64,7 +64,7 @@ export function WorkbenchPage() {
               onClick={() => devices.refetch()}
               loading={devices.isFetching}
             >
-              强制重新检查
+              {t("workbench.forceCheck")}
             </Button>
           </Group>
 
@@ -74,7 +74,7 @@ export function WorkbenchPage() {
           {/* 查询完成但未发现任何设备时的提示 */}
           {!devices.isPending && devices.data?.length === 0 && (
             <Alert color="yellow" variant="light">
-              暂未发现在线设备，请确认设备已开机并接入同一局域网。
+              {t("workbench.noOnline")}
             </Alert>
           )}
 
@@ -93,7 +93,7 @@ export function WorkbenchPage() {
                           {device.id === settings.data?.deviceId && (
                             <Text component="span" size="xs" c="dimmed">
                               {" "}
-                              · 当前连接
+                              · {t("device.currentConnection")}
                             </Text>
                           )}
                         </Text>
@@ -120,24 +120,24 @@ export function WorkbenchPage() {
           {/* 标题、说明文案与监听状态徽标 */}
           <Group justify="space-between" align="flex-start">
             <div>
-              <Title order={3}>本机 Hook 中继</Title>
+              <Title order={3}>{t("workbench.relayTitle")}</Title>
               <Text size="sm" c="dimmed" mt={4}>
-                AI 工具只连接本机，中继按 AI 标识遍历所有已配置设备。
+                {t("workbench.relayDescription")}
               </Text>
             </div>
             <Badge color={relay?.listening ? "green" : "red"} variant="light">
-              {relay?.listening ? "监听中" : "未运行"}
+              {relay?.listening ? t("workbench.listening") : t("workbench.notRunning")}
             </Badge>
           </Group>
 
           {/* 中继统计指标网格：接收数、转发成功/失败数、等待处理数、时序抑制数 */}
           <SimpleGrid cols={{ base: 2, sm: 3 }}>
-            <RelayMetric label="已接收事件" value={relay?.receivedCount ?? 0} />
-            <RelayMetric label="设备转发成功" value={relay?.forwardedCount ?? 0} />
-            <RelayMetric label="设备转发失败" value={relay?.failedCount ?? 0} />
-            <RelayMetric label="等待处理" value={relay?.pendingCount ?? 0} />
+            <RelayMetric label={t("workbench.received")} value={relay?.receivedCount ?? 0} />
+            <RelayMetric label={t("workbench.forwarded")} value={relay?.forwardedCount ?? 0} />
+            <RelayMetric label={t("workbench.failed")} value={relay?.failedCount ?? 0} />
+            <RelayMetric label={t("workbench.pending")} value={relay?.pendingCount ?? 0} />
             <RelayMetric
-              label="累计去重 / 抑制"
+              label={t("workbench.suppressed")}
               value={relay?.suppressedCount ?? 0}
             />
           </SimpleGrid>
@@ -145,17 +145,17 @@ export function WorkbenchPage() {
           {/* 最近一次事件的工具、hook 类型与对应行为（若无行为则说明是释放位置） */}
           {relay?.lastHookType && (
             <Text size="sm">
-              最近事件：<Code>{relay.lastTool}</Code> /{" "}
+              {t("workbench.latestEvent")} <Code>{relay.lastTool}</Code> /{" "}
               <Code>{relay.lastHookType}</Code>
               {relay.lastBehavior
-                ? ` · 当前记录行为：${relay.lastBehavior}`
-                : " · 当前记录行为：释放位置"}
+                ? ` · ${t("workbench.currentBehavior", { behavior: t(`behavior.${relay.lastBehavior}`) })}`
+                : ` · ${t("workbench.released")}`}
             </Text>
           )}
 
           {/* 最近一次转发失败时展示错误详情 */}
           {relay?.lastError && (
-            <Alert color="red" title="最近一次转发存在失败">
+            <Alert color="red" title={t("workbench.latestFailure")}>
               {relay.lastError}
             </Alert>
           )}

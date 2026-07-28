@@ -2,6 +2,7 @@ import { ActionIcon, Group, Loader, Menu, Stack, Text } from "@mantine/core";
 import { useMonitorConnection } from "../hooks/useMonitorConnection";
 import { useConnectDevice } from "../hooks/useConnectDevice";
 import { LineIcon } from "../../../shared/ui/LineIcon";
+import { useI18n } from "../../../shared/i18n";
 
 // collapsed 为 true 时使用侧边栏收起态的图标按钮样式，否则展示完整的设备信息条
 interface DeviceSwitchMenuProps {
@@ -9,6 +10,7 @@ interface DeviceSwitchMenuProps {
 }
 
 export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
+  const { t } = useI18n();
   // 从统一的设备连接 hook 中取出设置、当前已连接设备、其他可切换设备等状态
   const {
     settings,
@@ -35,7 +37,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
         color="gray"
         size="lg"
         disabled
-        aria-label="无可用设备"
+        aria-label={t("device.none")}
       >
         <LineIcon name="server" size={18} />
       </ActionIcon>
@@ -43,7 +45,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
       <Group gap="sm" wrap="nowrap" className="sidebar-device-button">
         <div className="status-dot offline" />
         <Text size="sm" c="dimmed" fw={600}>
-          无可用设备
+          {t("device.none")}
         </Text>
       </Group>
     );
@@ -54,7 +56,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
       {/* 切换设备失败时，在展开态下展示错误提示 */}
       {connect.isError && !collapsed && (
         <Text size="xs" c="red" px={4}>
-          切换设备失败：{connect.error.message}
+          {t("device.switchFailed", { message: connect.error.message })}
         </Text>
       )}
       <Menu shadow="md" width={220} position="top-start" withinPortal>
@@ -68,8 +70,8 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
               className="sidebar-device-button-collapsed"
               aria-label={
                 currentName
-                  ? `当前设备：${currentName}${currentAvailable ? "" : "，未发现"}`
-                  : "选择设备"
+                  ? t("device.currentNamed", { name: currentName, suffix: currentAvailable ? "" : t("device.notDiscoveredSuffix") })
+                  : t("device.choose")
               }
             >
               <LineIcon name="server" size={18} />
@@ -87,10 +89,10 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
               />
               <div className="min-width-zero">
                 <Text size="sm" fw={600} truncate>
-                  {currentName ?? "选择设备"}
+                  {currentName ?? t("device.choose")}
                 </Text>
                 <Text size="xs" c="dimmed" truncate>
-                  {currentAvailable ? currentBaseUrl : "当前设备未发现"}
+                  {currentAvailable ? currentBaseUrl : t("device.notDiscovered")}
                 </Text>
               </div>
               <LineIcon name="chevronDown" size={14} />
@@ -98,14 +100,14 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
           )}
         </Menu.Target>
         <Menu.Dropdown>
-          <Menu.Label>当前设备</Menu.Label>
+          <Menu.Label>{t("device.current")}</Menu.Label>
           {/* 当前设备信息条目：有设备名则展示名称与地址（未发现时附加提示），否则展示未连接文案 */}
           {currentName ? (
             <Menu.Item disabled>
               <Stack gap={0}>
                 <Text size="sm" fw={600}>
                   {currentName}
-                  {!currentAvailable && "（未发现）"}
+                  {!currentAvailable && t("device.notDiscoveredParenthetical")}
                 </Text>
                 <Text size="xs" c="dimmed">
                   {currentBaseUrl}
@@ -113,13 +115,13 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
               </Stack>
             </Menu.Item>
           ) : (
-            <Menu.Item disabled>尚未连接设备</Menu.Item>
+            <Menu.Item disabled>{t("device.notConnected")}</Menu.Item>
           )}
           <Menu.Divider />
-          <Menu.Label>切换设备</Menu.Label>
+          <Menu.Label>{t("device.switch")}</Menu.Label>
           {/* 其他可切换设备列表：为空时展示提示，否则逐个渲染可点击切换的设备条目 */}
           {otherDevices.length === 0 ? (
-            <Menu.Item disabled>未发现其他可连接设备</Menu.Item>
+            <Menu.Item disabled>{t("device.noOthers")}</Menu.Item>
           ) : (
             otherDevices.map((device) => (
               <Menu.Item

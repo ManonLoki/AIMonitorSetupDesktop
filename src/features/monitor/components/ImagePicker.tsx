@@ -12,6 +12,7 @@ import { useId, useState } from "react";
 import type { RemoteImage } from "../api/monitor";
 import { useImageCategoryFilter } from "../hooks/useImageCategoryFilter";
 import { LineIcon } from "../../../shared/ui/LineIcon";
+import { useI18n } from "../../../shared/i18n";
 
 // images 为可选图片列表，value 为当前已选图片的文件名，onChange 在选择/清除时回调
 interface ImagePickerProps {
@@ -27,6 +28,7 @@ export function ImagePicker({
   disabled,
   onChange,
 }: ImagePickerProps) {
+  const { t } = useI18n();
   // 控制弹出层（Popover）的展开/收起状态
   const [opened, setOpened] = useState(false);
   // 图片分类筛选 hook：提供当前分类、切换分类方法、按分类过滤后的图片、各分类数量
@@ -42,15 +44,15 @@ export function ImagePicker({
       {/* 字段标题行：展示"展示图片"标签，若已选图片则显示清除按钮 */}
       <Group justify="space-between" mb={7}>
         <Text component="span" size="sm" fw={500} id={labelId}>
-          展示图片 <span className="required-mark">*</span>
+          {t("image.field")} <span className="required-mark">*</span>
         </Text>
         {selectedImage && (
-          <Tooltip label="清除选择">
+          <Tooltip label={t("image.clear")}>
             <ActionIcon
               variant="subtle"
               color="gray"
               size="sm"
-              aria-label="清除已选图片"
+              aria-label={t("image.clearAria")}
               onClick={() => onChange("")}
             >
               <LineIcon name="close" size={15} />
@@ -85,13 +87,13 @@ export function ImagePicker({
                 <img src={selectedImage.image} alt={selectedImage.filename} />
                 <span className="image-picker-overlay">
                   <LineIcon name="image" size={17} />
-                  更换图片
+                  {t("image.change")}
                 </span>
               </>
             ) : (
               <span className="image-picker-empty">
                 <LineIcon name="image" size={24} />
-                {disabled ? "正在加载图片" : "点击选择图片"}
+                {disabled ? t("image.loading") : t("image.clickChoose")}
               </span>
             )}
           </UnstyledButton>
@@ -102,18 +104,18 @@ export function ImagePicker({
           <Group justify="space-between" mb="sm">
             <div>
               <Text size="sm" fw={650}>
-                选择展示图片
+                {t("image.chooseTitle")}
               </Text>
               <Text size="xs" c="dimmed">
                 {category === "all"
-                  ? `共 ${images.length} 张`
-                  : `显示 ${filteredImages.length} / 共 ${images.length} 张`}
+                  ? t("common.imagesTotal", { count: images.length })
+                  : t("common.imagesFiltered", { visible: filteredImages.length, total: images.length })}
               </Text>
             </div>
             <ActionIcon
               variant="subtle"
               color="gray"
-              aria-label="关闭图片选择"
+              aria-label={t("image.closeAria")}
               onClick={() => setOpened(false)}
             >
               <LineIcon name="close" size={17} />
@@ -130,7 +132,7 @@ export function ImagePicker({
               setCategory(nextCategory as typeof category)
             }
             data={[
-              { value: "all", label: `全部 ${images.length}` },
+              { value: "all", label: t("common.allCount", { count: images.length }) },
               { value: "jpeg", label: `JPEG ${counts.jpeg}` },
               { value: "png", label: `PNG ${counts.png}` },
               { value: "gif", label: `GIF ${counts.gif}` },
@@ -147,7 +149,7 @@ export function ImagePicker({
                       type="button"
                       role="option"
                       aria-selected={image.filename === value}
-                      aria-label={`选择图片 ${image.filename}`}
+                      aria-label={t("image.selectAria", { filename: image.filename })}
                       className="image-picker-option"
                       data-selected={image.filename === value || undefined}
                       onClick={() => {
@@ -169,7 +171,7 @@ export function ImagePicker({
               </SimpleGrid>
             ) : (
               <Text c="dimmed" size="sm" ta="center" py="xl">
-                该分类暂无图片
+                {t("image.emptyCategory")}
               </Text>
             )}
           </div>

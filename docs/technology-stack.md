@@ -24,6 +24,7 @@
 | 路由 | TanStack Router | 1.170.18 | 页面、导航、URL 状态 |
 | 异步状态 | TanStack Query | 5.101.4 | Rust command 的生命周期、缓存和失效 |
 | 客户端状态 | Jotai | 2.20.2 | 主题、面板开关等纯 UI 状态 |
+| 界面国际化 | 内建类型化资源 | 仓库源码 | 中英文资源、变量插值、系统语言解析与设置页切换；不引入额外运行时依赖 |
 | 原生通信 | `@tauri-apps/api` | 2.11.1 | 类型化 `invoke` 调用 |
 | 原生目录选择 | `@tauri-apps/plugin-dialog` | 2.7.2 | 仅用于选择 Hooks 配置目录，路径保存与校验仍由 Rust 完成 |
 | 系统外链 | `@tauri-apps/plugin-opener` | 2.5.4 | 仅允许设置页项目地址通过系统默认浏览器打开 |

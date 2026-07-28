@@ -12,6 +12,7 @@ import { queryClient } from "./query-client";
 import { colorSchemeAtom } from "../shared/state/ui";
 // 引入监控设备事件订阅 hook，用于监听 Rust 端推送的设备相关事件
 import { useMonitorDeviceEvents } from "../features/monitor/hooks/useMonitorDeviceEvents";
+import { I18nProvider } from "../shared/i18n";
 
 // 定义 Mantine 主题：主色调、默认圆角、字体等全局视觉配置
 const theme = createTheme({
@@ -33,14 +34,16 @@ export function AppProviders({ children }: PropsWithChildren) {
 
   return (
     // 提供 QueryClient 上下文，使子树内组件可以使用 useQuery / useMutation
-    <QueryClientProvider client={queryClient}>
-      {/* 提供 Mantine 主题上下文，并根据 Jotai 状态强制指定当前配色方案 */}
-      <MantineProvider theme={theme} forceColorScheme={colorScheme}>
-        {/* 挂载设备事件监听组件（本身不渲染任何内容） */}
-        <MonitorDeviceEvents />
-        {children}
-      </MantineProvider>
-    </QueryClientProvider>
+    <I18nProvider>
+      <QueryClientProvider client={queryClient}>
+        {/* 提供 Mantine 主题上下文，并根据 Jotai 状态强制指定当前配色方案 */}
+        <MantineProvider theme={theme} forceColorScheme={colorScheme}>
+          {/* 挂载设备事件监听组件（本身不渲染任何内容） */}
+          <MonitorDeviceEvents />
+          {children}
+        </MantineProvider>
+      </QueryClientProvider>
+    </I18nProvider>
   );
 }
 

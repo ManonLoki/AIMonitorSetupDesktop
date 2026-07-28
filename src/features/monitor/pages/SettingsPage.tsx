@@ -7,6 +7,7 @@ import {
   Checkbox,
   Group,
   NumberInput,
+  Select,
   SimpleGrid,
   Stack,
   Switch,
@@ -41,6 +42,8 @@ import {
   onboardingOpenAtom,
 } from "../../../shared/state/ui";
 import { LineIcon } from "../../../shared/ui/LineIcon";
+import { useI18n } from "../../../shared/i18n";
+import type { LanguagePreference } from "../../../shared/state/ui";
 
 // 在线设备自动检查间隔（分钟）的默认值与允许范围，与 Rust 侧
 // domain::monitor 的 DEFAULT/MIN/MAX_DISCOVERY_INTERVAL_MINUTES 保持一致。
@@ -51,6 +54,7 @@ const AUTHOR = "ManonLoki";
 const GITHUB_URL = "https://github.com/ManonLoki/AIMonitorSetupDesktop";
 
 export function SettingsPage() {
+  const { t, preference, setPreference } = useI18n();
   // 获取 QueryClient 实例，用于在 mutation 成功后手动写入缓存
   const queryClient = useQueryClient();
   const setOnboardingCompleted = useSetAtom(onboardingCompletedAtom);
@@ -134,15 +138,15 @@ export function SettingsPage() {
         <Stack gap="sm">
           <Group justify="space-between" align="flex-start" wrap="nowrap">
             <div>
-              <Title order={4}>AI 客户端</Title>
+              <Title order={4}>{t("settings.aiClients")}</Title>
               <Text size="xs" c="dimmed" mt={2}>
-                选择需要管理的客户端；保存后会同步调整监控管理和 Hooks 管理中的选项卡。
+                {t("settings.aiClientsDescription")}
               </Text>
             </div>
             <Group gap="xs" wrap="nowrap">
               {saveTools.isSuccess && (
                 <Text size="xs" c="teal" style={{ whiteSpace: "nowrap" }}>
-                  已保存
+                  {t("common.saved")}
                 </Text>
               )}
               <Button
@@ -151,7 +155,7 @@ export function SettingsPage() {
                 loading={saveTools.isPending}
                 disabled={!toolsDirty}
               >
-                保存 AI 客户端
+                {t("settings.saveAiClients")}
               </Button>
             </Group>
           </Group>
@@ -195,9 +199,9 @@ export function SettingsPage() {
           {/* 通用设置标题与说明文案 */}
           <Group justify="space-between" align="flex-start" wrap="wrap">
             <div>
-              <Title order={4}>通用设置</Title>
+              <Title order={4}>{t("settings.general")}</Title>
               <Text size="xs" c="dimmed" mt={2}>
-                显示用户名由所有 AIMonitor 设备共享，不随当前设备切换。
+                {t("settings.generalDescription")}
               </Text>
             </div>
             <Button
@@ -209,7 +213,7 @@ export function SettingsPage() {
                 setOnboardingOpen(true);
               }}
             >
-              新手引导
+              {t("settings.onboarding")}
             </Button>
           </Group>
           <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
@@ -217,9 +221,9 @@ export function SettingsPage() {
             <Group align="flex-end" wrap="nowrap">
               <TextInput
                 size="xs"
-                label="显示用户名"
-                description="状态转发时显示在所有设备上的名称"
-                placeholder="输入显示用户名"
+                label={t("settings.username")}
+                description={t("settings.usernameDescription")}
+                placeholder={t("settings.usernamePlaceholder")}
                 value={username}
                 onChange={(event) => {
                   // 编辑用户名时清空上一次保存结果状态
@@ -229,7 +233,7 @@ export function SettingsPage() {
                 disabled={settings.isPending}
                 error={
                   !settings.isPending && !username.trim()
-                    ? "显示用户名不能为空"
+                    ? t("settings.usernameRequired")
                     : undefined
                 }
                 style={{ flex: "1 1 auto", minWidth: 0 }}
@@ -244,7 +248,7 @@ export function SettingsPage() {
                   username.trim() === settings.data?.username
                 }
               >
-                保存用户名
+                {t("settings.saveUsername")}
               </Button>
             </Group>
 
@@ -252,9 +256,9 @@ export function SettingsPage() {
             <Group align="flex-end" wrap="nowrap">
               <NumberInput
                 size="xs"
-                label="在线设备自动检查间隔"
-                description="后台重新发现在线设备，默认 1 分钟"
-                suffix=" 分钟"
+                label={t("settings.interval")}
+                description={t("settings.intervalDescription")}
+                suffix={t("settings.minutesSuffix")}
                 min={MIN_DISCOVERY_INTERVAL_MINUTES}
                 max={MAX_DISCOVERY_INTERVAL_MINUTES}
                 step={1}
@@ -282,7 +286,7 @@ export function SettingsPage() {
                     settings.data?.discoveryIntervalMinutes
                 }
               >
-                保存间隔
+                {t("settings.saveInterval")}
               </Button>
             </Group>
           </SimpleGrid>
@@ -290,24 +294,39 @@ export function SettingsPage() {
             <Group gap="md">
               {saveUsername.isSuccess && (
                 <Text size="xs" c="teal">
-                  显示用户名已保存。
+                  {t("settings.usernameSaved")}
                 </Text>
               )}
               {saveInterval.isSuccess && (
                 <Text size="xs" c="teal">
-                  自动检查间隔已保存，立即生效。
+                  {t("settings.intervalSaved")}
                 </Text>
               )}
             </Group>
           )}
+
+          <Select
+            size="xs"
+            label={t("language.label")}
+            description={t("language.description")}
+            value={preference}
+            data={[
+              { value: "system", label: t("language.system") },
+              { value: "zh-CN", label: t("language.zhCN") },
+              { value: "en", label: t("language.en") },
+            ]}
+            onChange={(value) => {
+              if (value) setPreference(value as LanguagePreference);
+            }}
+          />
 
           {/* 开机自动运行开关，切换时直接触发 mutation */}
           <Switch
             size="sm"
             checked={runtime.data?.autostartEnabled ?? false}
             disabled={runtime.isPending}
-            label="开机自动运行"
-            description="自启时不显示主窗口；再次打开 AIMonitor 会唤起现有窗口。"
+            label={t("settings.autostart")}
+            description={t("settings.autostartDescription")}
             onChange={(event) =>
               autostart.mutate(event.currentTarget.checked)
             }
@@ -323,15 +342,15 @@ export function SettingsPage() {
       >
         <Stack gap="xs">
           <div>
-            <Title order={4}>关于</Title>
+            <Title order={4}>{t("settings.about")}</Title>
             <Text size="xs" c="dimmed" mt={2}>
-              AIMonitor 的项目与维护信息。
+              {t("settings.aboutDescription")}
             </Text>
           </div>
           <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
             <div>
               <Text size="xs" c="dimmed">
-                作者
+                {t("settings.author")}
               </Text>
               <Text size="sm" fw={600}>
                 {AUTHOR}

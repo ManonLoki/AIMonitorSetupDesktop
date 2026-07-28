@@ -34,6 +34,7 @@ import {
 } from "../queries/monitor";
 // 引入全部受支持 AI 工具的取值/展示名映射与可见性过滤函数
 import { AI_TOOLS, enabledAiTools } from "./aiTools";
+import { useI18n } from "../../../shared/i18n";
 
 // 按 AI_TOOLS 固定顺序为全部工具生成空白目录草稿，避免逐个手写全部取值
 function initialDirectoryDrafts(): Record<AiTool, string> {
@@ -48,21 +49,22 @@ function hookActivationGuidance(
   tool: AiTool,
   filename: string,
   configChanged: boolean,
+  t: ReturnType<typeof useI18n>["t"],
 ): string | null {
   if (!configChanged) {
-    return "配置没有变化；如状态仍未生效，请确认 AIMonitor 规则已启用。";
+    return t("hooks.guidanceUnchanged");
   }
   switch (tool) {
     case "codex":
-      return `配置已写入 ${filename}。请在 Codex CLI 中运行 /hooks，审核并信任包含 AIMonitor 标识的新增规则，然后重启 Codex App 或创建新任务。`;
+      return t("hooks.guidanceCodex", { filename });
     case "workBuddy":
-      return `配置已写入 ${filename}。请在 WorkBuddy 的 Hooks 配置面板中审核并信任包含 AIMonitor 标识的新增规则，然后创建新任务。`;
+      return t("hooks.guidanceWorkBuddy", { filename });
     case "codeBuddy":
-      return `配置已写入 ${filename}。请在 CodeBuddy 中运行 /hooks 审核 AIMonitor 规则，然后重启 CodeBuddy 或创建新会话。`;
+      return t("hooks.guidanceCodeBuddy", { filename });
     case "openClaw":
-      return `AIMonitor 插件已写入 ${filename} 所在目录。请依次运行 openclaw plugins enable aimonitor、openclaw config set plugins.entries.aimonitor.hooks.allowConversationAccess true 和 openclaw gateway restart。`;
+      return t("hooks.guidanceOpenClaw", { filename });
     case "hermes":
-      return `AIMonitor 插件已写入 ${filename} 所在目录。请运行 hermes plugins enable aimonitor，然后重启 Hermes 或创建新会话。`;
+      return t("hooks.guidanceHermes", { filename });
     default:
       return null;
   }
@@ -75,6 +77,7 @@ interface HooksManagementCardProps {
 export function HooksManagementCard({
   enabledTools,
 }: HooksManagementCardProps) {
+  const { t } = useI18n();
   // 获取 QueryClient 实例，用于在 mutation 成功后手动写入缓存
   const queryClient = useQueryClient();
   // 查询各工具的 hook 配置文件目录信息（对接 list_hook_config_locations 命令）
@@ -145,9 +148,9 @@ export function HooksManagementCard({
     >
       <Stack gap="sm">
         <div>
-          <Title order={4}>Hooks 管理</Title>
+          <Title order={4}>{t("hooks.title")}</Title>
           <Text size="xs" c="dimmed" mt={2}>
-            配置各客户端的目录，并将本机中继规则写入对应的 Hooks 配置。
+            {t("hooks.description")}
           </Text>
         </div>
         {error && <Alert color="red">{error.message}</Alert>}
@@ -155,7 +158,7 @@ export function HooksManagementCard({
 
         {visibleTools.length === 0 ? (
           <Alert color="blue" variant="light">
-            请先在上方“AI 客户端”卡片中选择并保存至少一个客户端。
+            {t("hooks.chooseClientFirst")}
           </Alert>
         ) : (
           <Tabs
@@ -194,6 +197,7 @@ export function HooksManagementCard({
                     tool.value,
                     writeResult.filename,
                     writeResult.configChanged,
+                    t,
                   )
                 : null;
 
@@ -202,10 +206,10 @@ export function HooksManagementCard({
                   <Stack gap="xs">
                     <TextInput
                       size="xs"
-                      label="配置目录"
-                      description="AIMonitor 会将本机中继规则写入该目录下的客户端配置文件"
-                      aria-label={`${tool.label} 配置目录`}
-                      placeholder="选择或输入绝对目录"
+                      label={t("hooks.directory")}
+                      description={t("hooks.directoryDescription")}
+                      aria-label={t("hooks.directoryAria", { tool: tool.label })}
+                      placeholder={t("hooks.directoryPlaceholder")}
                       value={directoryDraft}
                       disabled={locations.isPending}
                       onChange={(event) => {
@@ -233,6 +237,7 @@ export function HooksManagementCard({
                             try {
                               const selected = await chooseHookConfigDirectory(
                                 directoryDraft || location?.directory || "",
+                                t("hooks.dialogTitle"),
                               );
                               if (selected) {
                                 write.reset();
@@ -252,7 +257,7 @@ export function HooksManagementCard({
                             }
                           }}
                         >
-                          选择目录
+                          {t("hooks.chooseDirectory")}
                         </Button>
                         <Button
                           size="xs"
@@ -270,7 +275,7 @@ export function HooksManagementCard({
                           }
                           disabled={!directoryDraft.trim() || !pathDirty}
                         >
-                          保存路径
+                          {t("hooks.savePath")}
                         </Button>
                         <Button
                           size="xs"
@@ -289,7 +294,7 @@ export function HooksManagementCard({
                           }
                           disabled={!location?.isCustom}
                         >
-                          恢复默认
+                          {t("hooks.restoreDefault")}
                         </Button>
                       </Group>
 
@@ -297,10 +302,10 @@ export function HooksManagementCard({
                         {writeResult && (
                           <Badge variant="light" color="teal">
                             {writeResult.requiresReview
-                              ? "已写入，待确认"
+                              ? t("hooks.writtenReview")
                               : writeResult.configChanged
-                                ? "已写入"
-                                : "配置无变化"}
+                                ? t("hooks.written")
+                                : t("hooks.unchanged")}
                           </Badge>
                         )}
                         <Button
@@ -314,14 +319,14 @@ export function HooksManagementCard({
                             locations.isPending || pathDirty
                           }
                         >
-                          写入 Hooks 配置
+                          {t("hooks.write")}
                         </Button>
                       </Group>
                     </Group>
 
                     {pathDirty && (
                       <Alert color="yellow" variant="light">
-                        路径尚未保存。保存后写入会切换到新目录；旧文件不会被移动或删除。
+                        {t("hooks.unsavedPath")}
                       </Alert>
                     )}
 
@@ -335,10 +340,10 @@ export function HooksManagementCard({
                         }
                         title={
                           writeResult.requiresReview
-                            ? `还需要在 ${tool.label} 中信任配置`
+                            ? t("hooks.trustTitle", { tool: tool.label })
                             : writeResult.restartRequired
-                              ? `还需要重新加载 ${tool.label} 配置`
-                              : `${tool.label} 配置没有变化`
+                              ? t("hooks.reloadTitle", { tool: tool.label })
+                              : t("hooks.unchangedTitle", { tool: tool.label })
                         }
                       >
                         {guidance}

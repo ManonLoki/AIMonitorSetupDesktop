@@ -32,9 +32,11 @@ import { LineIcon } from "../../../shared/ui/LineIcon";
 // 引入监控设备连接状态 hook
 import { useMonitorConnection } from "../hooks/useMonitorConnection";
 // 引入设备未就绪时的统一拦截组件
-import { monitorDeviceGate } from "../components/MonitorDeviceGate";
+import { useMonitorDeviceGate } from "../components/MonitorDeviceGate";
+import { useI18n } from "../../../shared/i18n";
 
 export function ImagesPage() {
+  const { t } = useI18n();
   // 隐藏的文件选择 input 的引用，用于以编程方式触发点击
   const inputRef = useRef<HTMLInputElement>(null);
   // 获取 QueryClient 实例，用于在 mutation 结束后使相关查询失效
@@ -77,11 +79,11 @@ export function ImagesPage() {
     useImageCategoryFilter(imageList);
 
   // 设备门禁：设备未配置或不可用时，返回统一的拦截提示，阻止渲染正式页面内容
-  const deviceGate = monitorDeviceGate({
+  const deviceGate = useMonitorDeviceGate({
     isPending: monitorPending,
     hasConfiguredDevice,
     hasAvailableDevice,
-    featureLabel: "图片管理",
+    featureLabel: t("image.feature"),
   });
   if (deviceGate) return deviceGate;
 
@@ -96,7 +98,7 @@ export function ImagesPage() {
           onClick={() => images.refetch()}
           loading={images.isFetching}
         >
-          刷新
+          {t("common.refresh")}
         </Button>
         <Button
           leftSection={<LineIcon name="upload" size={17} />}
@@ -104,7 +106,7 @@ export function ImagesPage() {
           onClick={() => inputRef.current?.click()}
           loading={upload.isPending}
         >
-          批量上传
+          {t("image.upload")}
         </Button>
         <input
           ref={inputRef}
@@ -126,7 +128,7 @@ export function ImagesPage() {
       {/* 上传成功后的提示，展示成功上传的图片数量 */}
       {upload.isSuccess && (
         <Alert color="teal">
-          已成功上传 {upload.data.length} 张图片。
+          {t("image.uploaded", { count: upload.data.length })}
         </Alert>
       )}
 
@@ -141,15 +143,15 @@ export function ImagesPage() {
           <Group justify="space-between" align="center">
             <Text size="sm" c="dimmed">
               {category === "all"
-                ? `共 ${imageList.length} 张图片`
-                : `显示 ${filteredImages.length} / 共 ${imageList.length} 张`}
+                ? t("common.imagesTotal", { count: imageList.length })
+                : t("common.imagesFiltered", { visible: filteredImages.length, total: imageList.length })}
             </Text>
             <SegmentedControl
               size="sm"
               value={category}
               onChange={(value) => setCategory(value as typeof category)}
               data={[
-                { value: "all", label: `全部 ${imageList.length}` },
+                { value: "all", label: t("common.allCount", { count: imageList.length }) },
                 { value: "jpeg", label: `JPEG ${counts.jpeg}` },
                 { value: "png", label: `PNG ${counts.png}` },
                 { value: "gif", label: `GIF ${counts.gif}` },
@@ -172,7 +174,7 @@ export function ImagesPage() {
             </SimpleGrid>
           ) : (
             <Center py={64}>
-              <Text c="dimmed">该分类暂无图片</Text>
+              <Text c="dimmed">{t("image.emptyCategory")}</Text>
             </Center>
           )}
         </>
@@ -183,18 +185,17 @@ export function ImagesPage() {
             <LineIcon name="image" size={30} />
           </div>
           <Text fw={650} mt="md">
-            还没有远端图片
+            {t("image.emptyTitle")}
           </Text>
           <Text c="dimmed" size="sm" maw={360} ta="center" mt={6}>
-            可一次选择多张 JPEG、PNG 或 GIF 图片，上传后直接分配给 AI
-            实例。
+            {t("image.emptyDescription")}
           </Text>
           <Button
             mt="lg"
             variant="light"
             onClick={() => inputRef.current?.click()}
           >
-            批量选择图片
+            {t("image.chooseMultiple")}
           </Button>
         </Card>
       )}
@@ -210,6 +211,7 @@ interface RemoteImageCardProps {
 
 // 单张远端图片卡片：展示图片预览、类型徽标、加载后的实际像素尺寸，以及删除操作菜单
 function RemoteImageCard({ image, onDelete }: RemoteImageCardProps) {
+  const { t } = useI18n();
   // 图片加载完成后读取到的实际宽高，加载前为 null（显示“读取中…”）
   const [dimensions, setDimensions] = useState<{
     width: number;
@@ -238,10 +240,10 @@ function RemoteImageCard({ image, onDelete }: RemoteImageCardProps) {
       <Group p="sm" justify="space-between" wrap="nowrap">
         <div className="min-width-zero">
           <Text fw={600} size="sm" truncate>
-            {dimensions ? `${dimensions.width} × ${dimensions.height}` : "读取中…"}
+            {dimensions ? `${dimensions.width} × ${dimensions.height}` : t("image.reading")}
           </Text>
           <Text c="dimmed" size="xs" mt={3}>
-            远端缓存
+            {t("image.remoteCache")}
           </Text>
         </div>
         <Menu shadow="md" position="bottom-end">
@@ -257,7 +259,7 @@ function RemoteImageCard({ image, onDelete }: RemoteImageCardProps) {
               leftSection={<LineIcon name="trash" size={16} />}
               onClick={onDelete}
             >
-              删除图片
+              {t("image.delete")}
             </Menu.Item>
           </Menu.Dropdown>
         </Menu>
