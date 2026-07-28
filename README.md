@@ -37,42 +37,42 @@ the current repository version.
 At startup, AIMonitor checks available devices through mDNS, UDP broadcast, and
 previously saved addresses.
 
-![Startup and device discovery](docs/screenshots/device-scan.jpg)
+![Startup and device discovery](docs/screenshots/en/device-scan.jpg)
 
 ### Workbench
 
 The workbench shows online devices and the local Hook relay's received, forwarded,
 failed, pending, and suppressed event counts.
 
-![Workbench](docs/screenshots/workbench.jpg)
+![Workbench](docs/screenshots/en/workbench.jpg)
 
 ### Monitor management
 
 Display positions and all four behavior states are stored independently for each
 device and AI client.
 
-![Monitor management](docs/screenshots/monitor-management.jpg)
+![Monitor management](docs/screenshots/en/monitor-management.jpg)
 
 ### Image management
 
 Review image totals and formats, refresh or filter the list, and upload multiple
 images at once.
 
-![Image management](docs/screenshots/image-management.jpg)
+![Image management](docs/screenshots/en/image-management.jpg)
 
 ### Settings
 
 Choose AI clients, manage Hook configuration directories, set the shared display
 name and discovery interval, select a language, and configure launch at startup.
 
-![Settings](docs/screenshots/settings.jpg)
+![Settings](docs/screenshots/en/settings.jpg)
 
 ### Getting started
 
 The first-run guide walks through AI client selection, Hook setup, image upload,
 and display configuration.
 
-![Getting started](docs/screenshots/onboarding.jpg)
+![Getting started](docs/screenshots/en/onboarding.jpg)
 
 ## Development
 
