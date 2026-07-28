@@ -58,6 +58,13 @@ enum HookPhase {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoppedTurnDecision {
+    NotApplicable,
+    SuppressLateEvent,
+    StartNewTurn,
+}
+
 impl HookStateMachine {
     /// 把原生 Hook 事件归一化后推进状态机，并返回唯一需要由应用层执行的动作。
     #[cfg(test)]
@@ -177,8 +184,21 @@ impl HookStateMachine {
             return HookEventDecision::Ignore;
         }
 
-        if turn_is_stale(session, turn_id) {
+        // Goal 模式暂停/恢复或自动续跑时，Codex 会在同一会话内创建新 turn，
+        // 但不会再次产生 UserPromptSubmit。已停止会话收到不同 turn 的明确进度、
+        // 询问或异常时，应把它视为新的隐式工作起点；同一 turn 的迟到事件仍需
+        // 抑制，避免 Stop 后被旧 PreToolUse 等进度事件重新激活。
+        let starts_new_implicit_turn = match stopped_turn_decision(session, event_kind, turn_id) {
+            StoppedTurnDecision::SuppressLateEvent => return HookEventDecision::Ignore,
+            StoppedTurnDecision::StartNewTurn => true,
+            StoppedTurnDecision::NotApplicable => false,
+        };
+
+        if turn_is_stale(session, turn_id) && !starts_new_implicit_turn {
             return HookEventDecision::Ignore;
+        }
+        if starts_new_implicit_turn {
+            session.turn_id = turn_id.map(str::to_owned);
         }
         let next = match transition {
             HookTransition::Release => HookPhase::Released,
@@ -375,6 +395,30 @@ fn turn_is_stale(session: &HookSessionState, incoming_turn_id: Option<&str>) -> 
             .as_deref()
             .is_some_and(|current| current != incoming)
     })
+}
+
+// 对已停止轮次收到的“可作为工作起点”的事件分类：同一 turn 只能是迟到事件，
+// 不同 turn 则是 Goal 模式恢复或自动续跑产生的新隐式轮次。
+fn stopped_turn_decision(
+    session: &HookSessionState,
+    event_kind: HookEventKind,
+    turn_id: Option<&str>,
+) -> StoppedTurnDecision {
+    if session.turn_active
+        || turn_id.is_none()
+        || session.turn_id.is_none()
+        || !matches!(
+            event_kind,
+            HookEventKind::WorkProgress(_) | HookEventKind::State(_)
+        )
+    {
+        return StoppedTurnDecision::NotApplicable;
+    }
+    if turn_is_stale(session, turn_id) {
+        StoppedTurnDecision::StartNewTurn
+    } else {
+        StoppedTurnDecision::SuppressLateEvent
+    }
 }
 
 // 把聚合状态的变化转换成应用层需要执行的动作：状态未变则忽略，

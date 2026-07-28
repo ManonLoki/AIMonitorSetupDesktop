@@ -65,6 +65,9 @@ listener。
   映射，以对应 `hooks/<tool>.rs` 的 `EVENTS` 为唯一事件表。
 - Codex、Claude Code、Cursor、OpenCode 使用会话/轮次状态机和 latest-wins
   目标队列；WorkBuddy、Hermes、OpenClaw、CodeBuddy 按事件 FIFO 直通。
+- Codex Goal 模式在暂停、恢复或自动续跑后可能沿用 `session_id` 并切换
+  `turn_id`，且不再产生 `UserPromptSubmit`。已停止会话收到不同轮次的进度、
+  询问或异常事件时建立新的隐式轮次；同一已停止轮次的迟到事件继续抑制。
 - 一次状态转换的候选目标必须同时满足：设备存在已保存路由、该工具存在 Profile、
   设备 ID 位于当前在线快照。
 - 每次槽位 POST 必须携带本控制端稳定的 `clientId`。后台每 30 秒向同一在线目标调用

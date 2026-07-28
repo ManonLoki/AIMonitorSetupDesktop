@@ -275,3 +275,61 @@ fn state_machine_rejects_events_from_an_older_turn() {
         HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
     );
 }
+
+#[test]
+fn codex_goal_mode_resumes_with_a_new_turn_without_another_user_prompt() {
+    let mut machine = HookStateMachine::default();
+    machine.apply_event(AiTool::Codex, "SessionStart", Some("goal-session"), None);
+    machine.apply_event(
+        AiTool::Codex,
+        "UserPromptSubmit",
+        Some("goal-session"),
+        Some("turn-1"),
+    );
+    assert_eq!(
+        machine.apply_event(AiTool::Codex, "Stop", Some("goal-session"), Some("turn-1"),),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+    );
+
+    // 已停止轮次的迟到进度和完成事件都不能重新激活展示。
+    for event in ["PreToolUse", "PostToolUse"] {
+        assert_eq!(
+            machine.apply_event(AiTool::Codex, event, Some("goal-session"), Some("turn-1"),),
+            HookEventDecision::Ignore,
+            "同一已停止轮次的迟到事件 {event} 应被抑制"
+        );
+    }
+
+    // Goal 模式恢复不会再次提交用户 prompt；新 turn 的首个工作进度必须能
+    // 建立隐式轮次并恢复 Running。
+    assert_eq!(
+        machine.apply_event(
+            AiTool::Codex,
+            "PreToolUse",
+            Some("goal-session"),
+            Some("turn-2"),
+        ),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
+    );
+    assert_eq!(
+        machine.apply_event(AiTool::Codex, "Stop", Some("goal-session"), Some("turn-1"),),
+        HookEventDecision::Ignore
+    );
+    assert_eq!(
+        machine.apply_event(AiTool::Codex, "Stop", Some("goal-session"), Some("turn-2"),),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+    );
+    assert_eq!(
+        machine.apply_event(
+            AiTool::Codex,
+            "PermissionRequest",
+            Some("goal-session"),
+            Some("turn-3"),
+        ),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Asking))
+    );
+    assert_eq!(
+        machine.apply_event(AiTool::Codex, "Stop", Some("goal-session"), Some("turn-3"),),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+    );
+}

@@ -136,7 +136,10 @@ export function WorkbenchPage() {
             <RelayMetric label="设备转发成功" value={relay?.forwardedCount ?? 0} />
             <RelayMetric label="设备转发失败" value={relay?.failedCount ?? 0} />
             <RelayMetric label="等待处理" value={relay?.pendingCount ?? 0} />
-            <RelayMetric label="时序抑制" value={relay?.suppressedCount ?? 0} />
+            <RelayMetric
+              label="累计去重 / 抑制"
+              value={relay?.suppressedCount ?? 0}
+            />
           </SimpleGrid>
 
           {/* 最近一次事件的工具、hook 类型与对应行为（若无行为则说明是释放位置） */}
@@ -144,7 +147,9 @@ export function WorkbenchPage() {
             <Text size="sm">
               最近事件：<Code>{relay.lastTool}</Code> /{" "}
               <Code>{relay.lastHookType}</Code>
-              {relay.lastBehavior ? ` → ${relay.lastBehavior}` : " → 释放位置"}
+              {relay.lastBehavior
+                ? ` · 当前记录行为：${relay.lastBehavior}`
+                : " · 当前记录行为：释放位置"}
             </Text>
           )}
 
