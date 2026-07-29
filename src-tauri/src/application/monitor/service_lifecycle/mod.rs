@@ -14,11 +14,13 @@ use super::{
     HOOK_BIND_ADDRESS, HOOK_LISTENER_PORT, HookRelayStatus, MonitorService, STORE_FILENAME,
     config_io::{read_optional_config, write_atomic_file, write_config},
     hook_config::{detect_hook_config_directories, detect_system_username},
+    wsl::WslDirectory,
 };
 use crate::domain::monitor::{
     AiProfile, AiTool, HookConfigLocation, HookConfigWriteResult, MonitorSettings,
-    SavedMonitorData, generate_hook_auxiliary_configs, generate_hook_config, hook_config_filename,
-    hook_requires_review, hook_restart_required, merge_hook_config, normalize_enabled_ai_tools,
+    SavedMonitorData, generate_hook_auxiliary_configs, generate_hook_config,
+    generate_wsl_hook_config, hook_config_filename, hook_requires_review, hook_restart_required,
+    hook_supports_wsl, merge_hook_config, normalize_enabled_ai_tools,
     validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
     validate_username,
 };
@@ -229,9 +231,54 @@ impl MonitorService {
         // 已安装程序的绝对路径固化进配置；移动安装位置后重新执行一次写入即可。
         let relay_executable = std::env::current_exe()
             .map_err(|error| format!("无法定位 AIMonitor Hook relay：{error}"))?;
-        let generated = generate_hook_config(tool, &relay_executable)?;
         let location = self.hook_config_location(&data, tool);
+        let wsl_directory = WslDirectory::parse(&location.directory);
+        if wsl_directory.is_some() && !hook_supports_wsl(tool) {
+            return Err(format!(
+                "{} 的 WSL 原生插件暂不支持由 Windows AIMonitor 托管，请使用 Windows 客户端配置目录",
+                crate::domain::monitor::ai_tool_name(tool)
+            ));
+        }
+        let generated = if let Some(wsl_directory) = &wsl_directory {
+            let wsl_executable = wsl_directory.translate_windows_executable(&relay_executable)?;
+            generate_wsl_hook_config(tool, &relay_executable, &wsl_executable)?
+        } else {
+            generate_hook_config(tool, &relay_executable)?
+        };
         let config_path = PathBuf::from(&location.config_path);
+
+        if let Some(wsl_directory) = wsl_directory {
+            let mut generated_files =
+                vec![(wsl_directory.join(hook_config_filename(tool)), generated)];
+            generated_files.extend(
+                generate_hook_auxiliary_configs(tool)
+                    .into_iter()
+                    .map(|preview| (wsl_directory.join(&preview.filename), preview)),
+            );
+            let mut writes = Vec::with_capacity(generated_files.len());
+            for (path, generated) in generated_files {
+                let existing = path.read_optional()?;
+                let merged = merge_hook_config(existing.as_deref(), &generated, tool)?;
+                let changed = existing.as_deref() != Some(merged.content.as_str());
+                writes.push((path, merged, changed));
+            }
+            let config_changed = writes.iter().any(|(_, _, changed)| *changed);
+            for (path, merged, changed) in &writes {
+                if *changed {
+                    path.write_atomic(&merged.content).map_err(|error| {
+                        format!("无法写入 Hooks 配置 {}：{error}", path.display())
+                    })?;
+                }
+            }
+            return Ok(HookConfigWriteResult {
+                requires_review: hook_requires_review(tool) && config_changed,
+                restart_required: hook_restart_required(tool) && config_changed,
+                tool,
+                filename: config_path.to_string_lossy().into_owned(),
+                config_changed,
+            });
+        }
+
         let mut generated_files = vec![(config_path.clone(), generated)];
         generated_files.extend(
             generate_hook_auxiliary_configs(tool)

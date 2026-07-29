@@ -111,6 +111,24 @@ fn claude_preview_covers_permission_and_lifecycle_events() {
     assert!(value["hooks"]["SessionStart"][0].get("matcher").is_none());
 }
 
+#[test]
+fn wsl_hook_uses_translated_posix_executable() {
+    let preview = super::generate_wsl_hook_config(
+        AiTool::ClaudeCode,
+        Path::new(r"C:\Program Files\AIMonitor\AIMonitor.exe"),
+        "/mnt/c/Program Files/AIMonitor/AIMonitor.exe",
+    )
+    .unwrap();
+
+    assert!(
+        preview
+            .content
+            .contains("'/mnt/c/Program Files/AIMonitor/AIMonitor.exe' --aimonitor-hook-relay")
+    );
+    assert!(!preview.content.contains("cmd.exe"));
+    assert!(!preview.content.contains(r"C:\\Program Files"));
+}
+
 // 验证 Codex 生成的 Hooks 配置：事件名使用 PascalCase 且没有独立 Error 事件；
 // 每个 handler 只写入当前编译目标对应的命令，直接调用 AIMonitor 自身的
 // 轻量 relay 子命令，不依赖 PowerShell/curl。
@@ -201,7 +219,7 @@ fn windows_command_variants_survive_a_powershell_host_without_creating_a_pipelin
 
     for tool in [AiTool::Codex, AiTool::Cursor] {
         let protocol = protocol(tool);
-        let commands = super::managed_commands(protocol, protocol.events()[0].name, &probe);
+        let commands = super::managed_commands(protocol, protocol.events()[0].name, &probe, None);
         let command = &commands.windows_powershell_host;
         let result = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", command])

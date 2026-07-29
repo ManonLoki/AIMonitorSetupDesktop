@@ -151,6 +151,10 @@ Hook 成功/失败统计，也不阻塞其他设备或状态投递。
   POSIX `command` 与 `commandWindows`。WorkBuddy、CodeBuddy 是例外：客户端自身
   固定通过随产品提供的 Git Bash/POSIX shell 执行 Hook，因此配置直接启动
   `AIMonitor.exe`，不调用外部脚本、curl 或用户另行安装的 Bash。
+- Windows 宿主选择 WSL UNC 配置目录时，由 application 层识别发行版并通过
+  `wsl.exe` 完成 Linux 配置读写及 `wslpath` 路径转换，domain 生成 POSIX command；
+  普通 Windows 目录继续生成既有 CMD command。WSL 与原生 Windows 是显式分支，
+  不通过写入失败后的隐式 fallback 相互切换。
 - 应用启动不扫描或改写任何 Hooks 文件。Hooks 更新只在用户从“Hooks 管理”
   明确执行写入时发生；生成与合并只认识当前管理标识和当前协议结构。
 - Profile 按“设备 ID + AI 工具”隔离保存显示位置及四种显示状态，不保存

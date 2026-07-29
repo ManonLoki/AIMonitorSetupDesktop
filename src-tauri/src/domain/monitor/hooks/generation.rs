@@ -13,6 +13,24 @@ pub fn generate_hook_config(
     tool: AiTool,
     relay_executable: &Path,
 ) -> Result<HookConfigPreview, String> {
+    generate_hook_config_with_executable(tool, relay_executable, None)
+}
+
+/// 为运行在 WSL 内的客户端生成 POSIX Hook 命令。relay 本身仍是 Windows
+/// AIMonitor.exe，但 executable 已由 application 层通过 wslpath 转换为 Linux 路径。
+pub fn generate_wsl_hook_config(
+    tool: AiTool,
+    relay_executable: &Path,
+    wsl_executable: &str,
+) -> Result<HookConfigPreview, String> {
+    generate_hook_config_with_executable(tool, relay_executable, Some(wsl_executable))
+}
+
+fn generate_hook_config_with_executable(
+    tool: AiTool,
+    relay_executable: &Path,
+    wsl_executable: Option<&str>,
+) -> Result<HookConfigPreview, String> {
     let protocol = protocol(tool);
     if let Some(content) = protocol.standalone_config() {
         return Ok(HookConfigPreview {
@@ -23,7 +41,7 @@ pub fn generate_hook_config(
     let mut hooks = Map::new();
 
     for event in protocol.events() {
-        let commands = managed_commands(protocol, event.name, relay_executable);
+        let commands = managed_commands(protocol, event.name, relay_executable, wsl_executable);
         hooks.insert(event.name.to_owned(), protocol.handler(event, &commands));
     }
 
@@ -118,10 +136,13 @@ fn managed_commands(
     protocol: &dyn HookProtocol,
     event: &str,
     relay_executable: &Path,
+    wsl_executable: Option<&str>,
 ) -> ManagedCommands {
     let marker = managed_hook_marker(protocol.tool());
     let executable = relay_executable.to_string_lossy().into_owned();
-    let posix_executable = if cfg!(windows) {
+    let posix_executable = if let Some(wsl_executable) = wsl_executable {
+        wsl_executable.to_owned()
+    } else if cfg!(windows) {
         executable.replace('\\', "/")
     } else {
         executable.clone()
@@ -149,6 +170,7 @@ fn managed_commands(
     );
     ManagedCommands {
         posix,
+        is_wsl: wsl_executable.is_some(),
         windows,
         windows_powershell_host,
     }

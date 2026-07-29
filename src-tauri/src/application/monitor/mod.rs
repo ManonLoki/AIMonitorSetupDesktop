@@ -27,6 +27,7 @@ mod service_discovery;
 mod service_images;
 mod service_lifecycle;
 mod service_relay;
+mod wsl;
 
 #[cfg(test)]
 mod test_support;

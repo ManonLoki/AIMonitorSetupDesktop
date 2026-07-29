@@ -38,6 +38,11 @@ AIMonitor 管理的文件时整组拒绝覆盖。
 - 不生成或识别 PowerShell/curl 直传、编码 PowerShell、runner 脚本或其他标识。
 - 合并只替换带当前管理标识的条目；其他内容作为用户配置原样保留。
 - 应用启动不扫描、不重写 Hooks 文件。需要更新时由用户在“Hooks 管理”明确执行写入。
+- Windows AIMonitor 选择 `\\wsl.localhost\<发行版>\...` 或
+  `\\wsl$\<发行版>\...` 时，视为 WSL command Hook 环境：通过对应发行版的
+  `wsl.exe` 读写 Linux 配置并以 `wslpath` 转换 relay 路径，生成 POSIX command。
+  普通 Windows 配置目录继续生成原有 `cmd.exe` command，两条路径不互相 fallback。
+  当前原生插件不使用该 WSL 分支。
 
 ## 本机 listener 契约
 

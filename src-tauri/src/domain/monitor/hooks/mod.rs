@@ -16,7 +16,7 @@ mod work_buddy;
 use serde_json::{Map, Value, json};
 
 use generation::command_has_marker;
-pub use generation::{generate_hook_config, merge_hook_config};
+pub use generation::{generate_hook_config, generate_wsl_hook_config, merge_hook_config};
 
 use super::{AiTool, HookBehavior, HookConfigPreview, HookTransition};
 
@@ -77,6 +77,8 @@ impl HookEvent {
 
 pub(super) struct ManagedCommands {
     pub posix: String,
+    // WSL 配置必须选择 POSIX 命令；普通 Windows 配置仍保持现有 CMD 分支。
+    pub is_wsl: bool,
     // 这两个字段只在 `#[cfg(target_os = "windows")]` 分支中被读取
     // （见 `platform_command` 与 `codex.rs` 的 `handler`），非 Windows 平台
     // 编译时会被 dead_code 检查误判为未使用，因此显式允许。
@@ -178,6 +180,12 @@ pub fn hook_config_filename(tool: AiTool) -> &'static str {
     protocol(tool).config_filename()
 }
 
+/// WSL 内目前只托管 command Hook。原生插件直接从 Linux 进程访问 listener，
+/// 其 Windows/WSL 网络边界与 command relay 不同，不能复用本分支。
+pub fn hook_supports_wsl(tool: AiTool) -> bool {
+    protocol(tool).standalone_config().is_none()
+}
+
 // 返回该工具的展示名称，用于转发请求体的 `aiName` 字段等面向用户的场景。
 pub fn ai_tool_name(tool: AiTool) -> &'static str {
     protocol(tool).name()
@@ -239,6 +247,9 @@ pub(super) fn command_group(command: &str, matcher: Option<&str>) -> Value {
 
 // 按编译目标平台选取应写入配置的命令变体（Windows 用 PowerShell 包装，POSIX 直接执行）。
 pub(super) fn platform_command(commands: &ManagedCommands) -> &str {
+    if commands.is_wsl {
+        return &commands.posix;
+    }
     #[cfg(target_os = "windows")]
     {
         &commands.windows

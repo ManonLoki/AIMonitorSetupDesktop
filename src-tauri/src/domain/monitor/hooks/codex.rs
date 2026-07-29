@@ -1,8 +1,6 @@
 use serde_json::{Value, json};
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use super::platform_command;
-use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands};
+use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands, platform_command};
 use crate::domain::monitor::{AiTool, HookBehavior};
 
 pub(super) static CODEX: CodexProtocol = CodexProtocol;
@@ -66,7 +64,11 @@ impl HookProtocol for CodexProtocol {
 
     fn handler(&self, event: &HookEvent, commands: &ManagedCommands) -> Value {
         #[cfg(target_os = "windows")]
-        let command = &commands.windows_powershell_host;
+        let command = if commands.is_wsl {
+            platform_command(commands)
+        } else {
+            &commands.windows_powershell_host
+        };
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         let command = platform_command(commands);
         let mut command = json!({

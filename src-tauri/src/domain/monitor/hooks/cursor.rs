@@ -1,8 +1,8 @@
 use serde_json::{Map, Value, json};
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use super::platform_command;
-use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands, entry_is_managed};
+use super::{
+    HookEvent, HookEventKind, HookProtocol, ManagedCommands, entry_is_managed, platform_command,
+};
 use crate::domain::monitor::{AiTool, HookBehavior};
 
 pub(super) static CURSOR: CursorProtocol = CursorProtocol;
@@ -102,7 +102,11 @@ impl HookProtocol for CursorProtocol {
     // `{ hooks: [...] }`。
     fn handler(&self, _event: &HookEvent, commands: &ManagedCommands) -> Value {
         #[cfg(target_os = "windows")]
-        let command = &commands.windows_powershell_host;
+        let command = if commands.is_wsl {
+            platform_command(commands)
+        } else {
+            &commands.windows_powershell_host
+        };
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         let command = platform_command(commands);
         json!([{ "command": command }])
