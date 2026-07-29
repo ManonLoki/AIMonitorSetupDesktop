@@ -4,8 +4,8 @@
 
 AIMonitor 桌面配置与中继应用。它负责发现局域网内的 AIMonitor 设备，管理
 AI 客户端的展示位置、状态图片与 Hooks，并在本机接收 Codex、Claude Code、
-Cursor、OpenCode、WorkBuddy、Hermes、OpenClaw 和 CodeBuddy 的事件后转发到
-已配置设备。
+Cursor、OpenCode、WorkBuddy、Hermes、OpenClaw、CodeBuddy、Qwen Code、Kimi Code、
+Qoder、Gemini CLI 和 GitHub Copilot CLI 的事件后转发到已配置设备。
 
 项目采用 Tauri + React：Rust 是唯一业务后端，React 只负责界面、交互和调用
 类型化 Tauri command。
@@ -17,6 +17,10 @@ Cursor、OpenCode、WorkBuddy、Hermes、OpenClaw 和 CodeBuddy 的事件后转�
   异常四种展示状态。
 - 浏览、筛选、批量上传和管理 JPEG、PNG、GIF、BMP 与 WebP 图片；上传前由
   Rust 后端完成校验、缩放和兼容格式转换。
+- 扩展支持策略：
+  - 状态机 latest-wins：Codex、Claude Code、Cursor、OpenCode、Qwen Code、Kimi Code、
+    Qoder、Gemini CLI、GitHub Copilot CLI。
+  - 逐事件 FIFO：WorkBuddy、Hermes、OpenClaw、CodeBuddy。
 - 为支持的 AI 客户端写入本机 Hooks 中继配置；命令型 Hook 由 AIMonitor 自身的
   轻量模式归约为四字段事件信封，Windows 不依赖 PowerShell。
 - 查看在线设备、Hook listener、转发结果与时序抑制等运行指标。
@@ -24,7 +28,7 @@ Cursor、OpenCode、WorkBuddy、Hermes、OpenClaw 和 CodeBuddy 的事件后转�
 
 ## 实机界面
 
-以下截图来自 macOS 上运行的 AIMonitor v2.2.3，与当前仓库版本一致。
+以下截图来自 macOS 上运行的 AIMonitor v2.2.3，所展示的界面仍适用于 v2.2.4。
 
 ### 启动与设备扫描
 

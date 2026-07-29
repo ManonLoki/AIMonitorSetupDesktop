@@ -215,6 +215,112 @@ fn expiring_last_active_session_falls_back_to_idle_without_releasing_slot() {
 }
 
 #[test]
+fn phase2_tools_use_expected_mapping_and_latest_turn_wins() {
+    let mut qwen = HookStateMachine::default();
+    assert_eq!(
+        qwen.apply_event(AiTool::QwenCode, "SessionStart", Some("s"), None),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+    );
+    assert_eq!(
+        qwen.apply_event(
+            AiTool::QwenCode,
+            "UserPromptSubmit",
+            Some("s"),
+            Some("turn-1")
+        ),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
+    );
+    assert_eq!(
+        qwen.apply_event(AiTool::QwenCode, "Stop", Some("s"), Some("turn-1"),),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+    );
+    assert_eq!(
+        qwen.apply_event(AiTool::QwenCode, "PreToolUse", Some("s"), Some("turn-1")),
+        HookEventDecision::Ignore
+    );
+    assert_eq!(
+        qwen.apply_event(AiTool::QwenCode, "PreToolUse", Some("s"), Some("turn-2")),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
+    );
+
+    let mut qoder = HookStateMachine::default();
+    assert_eq!(
+        qoder.apply_event(AiTool::Qoder, "UserPromptSubmit", Some("q"), Some("turn-1")),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
+    );
+    assert_eq!(
+        qoder.apply_event(AiTool::Qoder, "Stop", Some("q"), Some("turn-1")),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+    );
+    assert_eq!(
+        qoder.apply_event(AiTool::Qoder, "PreToolUse", Some("q"), Some("turn-1")),
+        HookEventDecision::Ignore
+    );
+
+    let mut gemini = HookStateMachine::default();
+    assert_eq!(
+        gemini.apply_event(AiTool::GeminiCli, "SessionStart", Some("g"), None),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+    );
+    assert_eq!(
+        gemini.apply_event(AiTool::GeminiCli, "BeforeAgent", Some("g"), Some("turn-1")),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
+    );
+    assert_eq!(
+        gemini.apply_event(AiTool::GeminiCli, "AfterAgent", Some("g"), Some("turn-1")),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+    );
+    assert_eq!(
+        gemini.apply_event(AiTool::GeminiCli, "PreCompress", Some("g"), Some("turn-1"),),
+        HookEventDecision::Ignore
+    );
+
+    let mut copilot = HookStateMachine::default();
+    assert_eq!(
+        copilot.apply_event(AiTool::GitHubCopilot, "sessionStart", Some("c"), None),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+    );
+    assert_eq!(
+        copilot.apply_event(
+            AiTool::GitHubCopilot,
+            "userPromptSubmitted",
+            Some("c"),
+            Some("turn-1"),
+        ),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
+    );
+    assert_eq!(
+        copilot.apply_event(
+            AiTool::GitHubCopilot,
+            "agentStop",
+            Some("c"),
+            Some("turn-1")
+        ),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
+    );
+    assert_eq!(
+        copilot.apply_event(
+            AiTool::GitHubCopilot,
+            "preToolUse",
+            Some("c"),
+            Some("turn-1")
+        ),
+        HookEventDecision::Ignore
+    );
+    // 这些公开 payload 不保证提供 turn_id；下一次真实的工作开始事件仍须在
+    // 同一 session 内开启新轮次，不能永久停留在 Idle。
+    assert_eq!(
+        copilot.apply_event(
+            AiTool::GitHubCopilot,
+            "userPromptSubmitted",
+            Some("c"),
+            None,
+        ),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
+    );
+}
+
+#[test]
 fn session_tracking_stays_bounded_and_uses_eviction_priority() {
     let mut machine = HookStateMachine::default();
     for index in 0..MAX_TRACKED_HOOK_SESSIONS {

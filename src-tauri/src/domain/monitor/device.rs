@@ -48,11 +48,16 @@ pub enum AiTool {
     Hermes,
     OpenClaw,
     CodeBuddy,
+    QwenCode,
+    KimiCode,
+    Qoder,
+    GeminiCli,
+    GitHubCopilot,
 }
 
 impl AiTool {
     // 遍历全部工具时使用的固定顺序数组。
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 13] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::Cursor,
@@ -61,6 +66,11 @@ impl AiTool {
         Self::Hermes,
         Self::OpenClaw,
         Self::CodeBuddy,
+        Self::QwenCode,
+        Self::KimiCode,
+        Self::Qoder,
+        Self::GeminiCli,
+        Self::GitHubCopilot,
     ];
 }
 
@@ -137,5 +147,19 @@ mod tests {
             ]),
             vec![AiTool::Codex, AiTool::Cursor, AiTool::OpenClaw]
         );
+    }
+
+    #[test]
+    fn phase2_tool_names_match_the_frontend_contract() {
+        for (tool, expected) in [
+            (AiTool::QwenCode, r#""qwenCode""#),
+            (AiTool::KimiCode, r#""kimiCode""#),
+            (AiTool::Qoder, r#""qoder""#),
+            (AiTool::GeminiCli, r#""geminiCli""#),
+            (AiTool::GitHubCopilot, r#""gitHubCopilot""#),
+        ] {
+            assert_eq!(serde_json::to_string(&tool).unwrap(), expected);
+            assert_eq!(serde_json::from_str::<AiTool>(expected).unwrap(), tool);
+        }
     }
 }

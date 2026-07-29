@@ -43,6 +43,16 @@ pub struct HookConfigDirectories {
     pub open_claw: String,
     #[serde(default)]
     pub code_buddy: String,
+    #[serde(default)]
+    pub qwen_code: String,
+    #[serde(default)]
+    pub kimi_code: String,
+    #[serde(default)]
+    pub qoder: String,
+    #[serde(default)]
+    pub gemini_cli: String,
+    #[serde(default)]
+    pub github_copilot: String,
 }
 
 impl HookConfigDirectories {
@@ -57,6 +67,11 @@ impl HookConfigDirectories {
             AiTool::Hermes => &self.hermes,
             AiTool::OpenClaw => &self.open_claw,
             AiTool::CodeBuddy => &self.code_buddy,
+            AiTool::QwenCode => &self.qwen_code,
+            AiTool::KimiCode => &self.kimi_code,
+            AiTool::Qoder => &self.qoder,
+            AiTool::GeminiCli => &self.gemini_cli,
+            AiTool::GitHubCopilot => &self.github_copilot,
         }
     }
 
@@ -71,6 +86,11 @@ impl HookConfigDirectories {
             AiTool::Hermes => self.hermes = directory,
             AiTool::OpenClaw => self.open_claw = directory,
             AiTool::CodeBuddy => self.code_buddy = directory,
+            AiTool::QwenCode => self.qwen_code = directory,
+            AiTool::KimiCode => self.kimi_code = directory,
+            AiTool::Qoder => self.qoder = directory,
+            AiTool::GeminiCli => self.gemini_cli = directory,
+            AiTool::GitHubCopilot => self.github_copilot = directory,
         }
     }
 }
@@ -103,5 +123,28 @@ mod tests {
         let serialized = serde_json::to_value(directories).unwrap();
         assert_eq!(serialized["hermes"], "/hooks/hermes");
         assert!(serialized.get("harness").is_none());
+    }
+
+    #[test]
+    fn hook_config_directories_cover_new_phase2_tools() {
+        let mut directories = HookConfigDirectories::default();
+        directories.set(AiTool::QwenCode, "/qwen".to_owned());
+        directories.set(AiTool::KimiCode, "/kimi-code".to_owned());
+        directories.set(AiTool::Qoder, "/qoder".to_owned());
+        directories.set(AiTool::GeminiCli, "/gemini".to_owned());
+        directories.set(AiTool::GitHubCopilot, "/copilot".to_owned());
+
+        assert_eq!(directories.get(AiTool::QwenCode), "/qwen");
+        assert_eq!(directories.get(AiTool::KimiCode), "/kimi-code");
+        assert_eq!(directories.get(AiTool::Qoder), "/qoder");
+        assert_eq!(directories.get(AiTool::GeminiCli), "/gemini");
+        assert_eq!(directories.get(AiTool::GitHubCopilot), "/copilot");
+
+        let serialized = serde_json::to_value(directories).unwrap();
+        assert_eq!(serialized["qwenCode"], "/qwen");
+        assert_eq!(serialized["kimiCode"], "/kimi-code");
+        assert_eq!(serialized["qoder"], "/qoder");
+        assert_eq!(serialized["geminiCli"], "/gemini");
+        assert_eq!(serialized["githubCopilot"], "/copilot");
     }
 }

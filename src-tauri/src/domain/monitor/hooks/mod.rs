@@ -7,10 +7,15 @@ mod claude_code;
 mod code_buddy;
 mod codex;
 mod cursor;
+mod gemini_cli;
 mod generation;
+mod github_copilot;
 mod hermes;
+mod kimi_code;
 mod open_claw;
 mod open_code;
+mod qoder;
+mod qwen_code;
 mod work_buddy;
 
 use serde_json::{Map, Value, json};
@@ -138,6 +143,19 @@ pub(super) trait HookProtocol: Sync {
         json!({ "hooks": Value::Object(hooks) })
     }
 
+    /// 把逐事件生成的 handler 序列化为最终配置。默认输出 JSON；若未来出现公开
+    /// 配置格式不是 JSON 的 command Hook，可覆盖该步骤。
+    fn render_config(&self, hooks: Map<String, Value>) -> Result<String, String> {
+        serde_json::to_string_pretty(&self.config_root(hooks))
+            .map_err(|error| format!("无法生成 Hooks 配置：{error}"))
+    }
+
+    /// 是否绕过公共 JSON 合并器。独立插件默认需要自定义合并；共享 TOML 等
+    /// 非 JSON 配置也可显式启用，同时仍保留 command Hook 的 WSL 能力。
+    fn uses_custom_merge(&self) -> bool {
+        self.standalone_config().is_some()
+    }
+
     /// 从一组 hooks 事件条目中过滤掉本工具的受管处理器；一个条目的处理器
     /// 全部被移除后，连同这个条目本身一起丢弃，避免留下空壳分组。
     fn remove_managed_entries(&self, entries: &mut Vec<Value>) {
@@ -172,6 +190,11 @@ pub(super) fn protocol(tool: AiTool) -> &'static dyn HookProtocol {
         AiTool::Hermes => &hermes::HERMES,
         AiTool::OpenClaw => &open_claw::OPEN_CLAW,
         AiTool::CodeBuddy => &code_buddy::CODE_BUDDY,
+        AiTool::QwenCode => &qwen_code::QWEN_CODE,
+        AiTool::KimiCode => &kimi_code::KIMI_CODE,
+        AiTool::Qoder => &qoder::QODER,
+        AiTool::GeminiCli => &gemini_cli::GEMINI_CLI,
+        AiTool::GitHubCopilot => &github_copilot::GITHUB_COPILOT,
     }
 }
 
@@ -263,11 +286,19 @@ pub(super) fn platform_command(commands: &ManagedCommands) -> &str {
 }
 
 pub(crate) fn forwards_every_event(tool: AiTool) -> bool {
-    // 只有具备稳定会话/轮次语义并经过状态机适配验证的四个工具执行抑制；
+    // 只有具备稳定会话/工作开始语义并经过状态机适配验证的工具执行抑制；
     // 其他协议按事件到达顺序直通，避免公共状态机误丢上游事件。
     !matches!(
         tool,
-        AiTool::Codex | AiTool::ClaudeCode | AiTool::Cursor | AiTool::OpenCode
+        AiTool::Codex
+            | AiTool::ClaudeCode
+            | AiTool::Cursor
+            | AiTool::OpenCode
+            | AiTool::QwenCode
+            | AiTool::KimiCode
+            | AiTool::Qoder
+            | AiTool::GeminiCli
+            | AiTool::GitHubCopilot
     )
 }
 

@@ -105,6 +105,11 @@ pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String
         &data.hook_config_directories.hermes,
         &data.hook_config_directories.open_claw,
         &data.hook_config_directories.code_buddy,
+        &data.hook_config_directories.qwen_code,
+        &data.hook_config_directories.kimi_code,
+        &data.hook_config_directories.qoder,
+        &data.hook_config_directories.gemini_cli,
+        &data.hook_config_directories.github_copilot,
     ] {
         if !directory.is_empty() && !Path::new(directory).is_absolute() {
             return Err("持久化 Hooks 配置目录必须使用绝对路径".to_owned());

@@ -52,15 +52,30 @@ pub fn run_from_process_args() -> Option<i32> {
             return Some(exit_code);
         }
     };
-    let result = validate_relay_arguments(&arguments)
-        .and_then(|tool| relay_stdin(tool, &arguments.tool_slug, &arguments.event));
-    Some(match result {
+    let tool = match validate_relay_arguments(&arguments) {
+        Ok(tool) => tool,
+        Err(error) => {
+            eprintln!("{error}");
+            return Some(1);
+        }
+    };
+    Some(relay_exit_code(
+        tool,
+        relay_stdin(tool, &arguments.tool_slug, &arguments.event),
+    ))
+}
+
+// Copilot CLI 的 preToolUse 在命令非零退出时会拒绝工具调用。AIMonitor 是旁路
+// 观测器，桌面端未运行或 listener 暂时不可达时绝不能改变 AI 工具行为，因此
+// Copilot 投递失败只记录 stderr 并以成功退出；其他工具保持既有错误可见语义。
+fn relay_exit_code(tool: AiTool, result: Result<(), String>) -> i32 {
+    match result {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("{error}");
-            1
+            i32::from(tool != AiTool::GitHubCopilot)
         }
-    })
+    }
 }
 
 // 只有当第二个参数正好是 `--aimonitor-hook-relay` 时才进入 relay 模式（返回
@@ -98,7 +113,7 @@ fn validate_relay_arguments(arguments: &HookRelayArguments) -> Result<AiTool, St
 }
 
 // 读取 AI 工具通过 stdin 传来的原生 Hook JSON，压缩成最小信封后 POST 给本机
-// listener；Cursor 要求 command Hook 的 stdout 必须是合法 JSON。
+// listener；需要 stdout JSON 的协议由下方按工具显式处理。
 fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> Result<(), String> {
     let mut native_json = Vec::new();
     io::stdin()
@@ -113,11 +128,12 @@ fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> Result<(), String>
         .build()
         .map_err(|error| format!("无法创建 Hook relay 客户端：{error}"))?;
     post_minimal_payload(&client, &endpoint, event, &payload)?;
-    // Cursor 要求 command Hook 的 stdout 是合法 JSON；其他工具成功时保持空输出。
-    if tool == AiTool::Cursor {
+    // Cursor、Qwen Code 与 Gemini CLI 都要求 command Hook 的 stdout 是合法 JSON；
+    // 其他工具成功时保持空输出，避免干扰各自的默认 Hook 决策。
+    if matches!(tool, AiTool::Cursor | AiTool::QwenCode | AiTool::GeminiCli) {
         io::stdout()
             .write_all(b"{}\n")
-            .map_err(|error| format!("无法写入 Cursor Hook 响应：{error}"))?;
+            .map_err(|error| format!("无法写入 AI Hook JSON 响应：{error}"))?;
     }
     Ok(())
 }
@@ -201,6 +217,11 @@ mod tests {
             ("hermes", AiTool::Hermes),
             ("openclaw", AiTool::OpenClaw),
             ("codebuddy", AiTool::CodeBuddy),
+            ("qwen-code", AiTool::QwenCode),
+            ("kimi-code", AiTool::KimiCode),
+            ("qoder", AiTool::Qoder),
+            ("gemini-cli", AiTool::GeminiCli),
+            ("github-copilot", AiTool::GitHubCopilot),
         ] {
             let marker = managed_hook_marker(tool);
             let parsed = parse_relay_arguments([
@@ -259,6 +280,18 @@ mod tests {
         assert_eq!(
             validate_relay_arguments(&parsed),
             Err("Hook relay 的管理标识与 AI 工具不匹配".to_owned())
+        );
+    }
+
+    #[test]
+    fn copilot_delivery_failure_is_fail_open() {
+        assert_eq!(
+            relay_exit_code(AiTool::GitHubCopilot, Err("listener offline".to_owned())),
+            0
+        );
+        assert_eq!(
+            relay_exit_code(AiTool::Codex, Err("listener offline".to_owned())),
+            1
         );
     }
 

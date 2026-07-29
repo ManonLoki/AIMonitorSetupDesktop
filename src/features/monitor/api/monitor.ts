@@ -64,7 +64,12 @@ export type AiTool =
   | "workBuddy"
   | "hermes"
   | "openClaw"
-  | "codeBuddy";
+  | "codeBuddy"
+  | "qwenCode"
+  | "kimiCode"
+  | "qoder"
+  | "geminiCli"
+  | "gitHubCopilot";
 
 // hook 触发时对应的行为状态
 export type HookBehavior = "idle" | "running" | "asking" | "error";

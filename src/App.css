@@ -583,14 +583,18 @@ body {
 }
 
 .ai-tool-tabs .mantine-Tabs-list {
+  flex-wrap: nowrap;
   gap: 4px;
   padding: 3px;
+  overflow-x: auto;
+  scrollbar-width: thin;
   border: 0;
   border-radius: var(--mantine-radius-lg);
   background: var(--app-muted);
 }
 
 .ai-tool-tabs .mantine-Tabs-tab {
+  flex: 0 0 auto;
   border: 0;
   border-radius: var(--mantine-radius-md);
   font-weight: 650;
