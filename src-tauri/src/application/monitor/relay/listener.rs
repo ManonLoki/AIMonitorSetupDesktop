@@ -190,6 +190,11 @@ mod tests {
             ("hermes", AiTool::Hermes),
             ("openclaw", AiTool::OpenClaw),
             ("codebuddy", AiTool::CodeBuddy),
+            ("qwen-code", AiTool::QwenCode),
+            ("kimi-code", AiTool::KimiCode),
+            ("qoder", AiTool::Qoder),
+            ("gemini-cli", AiTool::GeminiCli),
+            ("github-copilot", AiTool::GitHubCopilot),
         ] {
             let body = br#"{"hook_event_name":"probe"}"#;
 

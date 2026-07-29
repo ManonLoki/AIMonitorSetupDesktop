@@ -126,6 +126,7 @@ export const zhCNMessages = {
   "hooks.guidanceCodeBuddy": "配置已写入 {{filename}}。请在 CodeBuddy 中运行 /hooks 审核 AIMonitor 规则，然后重启 CodeBuddy 或创建新会话。",
   "hooks.guidanceOpenClaw": "AIMonitor 插件已写入 {{filename}} 所在目录。请依次运行 openclaw plugins enable aimonitor、openclaw config set plugins.entries.aimonitor.hooks.allowConversationAccess true 和 openclaw gateway restart。",
   "hooks.guidanceHermes": "AIMonitor 插件已写入 {{filename}} 所在目录。请运行 hermes plugins enable aimonitor，然后重启 Hermes 或创建新会话。",
+  "hooks.guidanceRestart": "配置已写入 {{filename}}。请重启 {{tool}} 或创建新会话，以加载 AIMonitor Hooks。",
   "hooks.dialogTitle": "选择 Hooks 配置目录",
   "onboarding.dialog": "AIMonitor 新手引导",
   "onboarding.title": "新手引导",

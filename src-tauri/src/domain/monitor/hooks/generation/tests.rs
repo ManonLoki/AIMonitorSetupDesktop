@@ -48,7 +48,10 @@ fn every_generated_hook_contract_uses_canonical_slugs_events_and_markers() {
         } else {
             assert!(preview.content.contains("--aimonitor-hook-relay"));
             #[cfg(target_os = "windows")]
-            if matches!(tool, AiTool::CodeBuddy | AiTool::WorkBuddy) {
+            if matches!(
+                tool,
+                AiTool::CodeBuddy | AiTool::WorkBuddy | AiTool::KimiCode
+            ) {
                 assert!(preview.content.contains(&format!("'{slug}'")));
             } else {
                 assert!(preview.content.contains(slug));

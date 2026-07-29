@@ -34,6 +34,7 @@ import {
 } from "../queries/monitor";
 // 引入全部受支持 AI 工具的取值/展示名映射与可见性过滤函数
 import { AI_TOOLS, enabledAiTools } from "./aiTools";
+import { hookActivationGuidance } from "./hookActivationGuidance";
 import { useI18n } from "../../../shared/i18n";
 
 // 按 AI_TOOLS 固定顺序为全部工具生成空白目录草稿，避免逐个手写全部取值
@@ -41,33 +42,6 @@ function initialDirectoryDrafts(): Record<AiTool, string> {
   return Object.fromEntries(
     AI_TOOLS.map(({ value }) => [value, ""]),
   ) as Record<AiTool, string>;
-}
-
-// 写入配置后给出的后续操作提示：内容与 Rust 侧各 HookProtocol 的
-// requires_review/restart_required 语义对应，仅在此处维护具体的操作步骤文案。
-function hookActivationGuidance(
-  tool: AiTool,
-  filename: string,
-  configChanged: boolean,
-  t: ReturnType<typeof useI18n>["t"],
-): string | null {
-  if (!configChanged) {
-    return t("hooks.guidanceUnchanged");
-  }
-  switch (tool) {
-    case "codex":
-      return t("hooks.guidanceCodex", { filename });
-    case "workBuddy":
-      return t("hooks.guidanceWorkBuddy", { filename });
-    case "codeBuddy":
-      return t("hooks.guidanceCodeBuddy", { filename });
-    case "openClaw":
-      return t("hooks.guidanceOpenClaw", { filename });
-    case "hermes":
-      return t("hooks.guidanceHermes", { filename });
-    default:
-      return null;
-  }
 }
 
 interface HooksManagementCardProps {
@@ -195,6 +169,7 @@ export function HooksManagementCard({
               const guidance = writeResult
                 ? hookActivationGuidance(
                     tool.value,
+                    tool.label,
                     writeResult.filename,
                     writeResult.configChanged,
                     t,

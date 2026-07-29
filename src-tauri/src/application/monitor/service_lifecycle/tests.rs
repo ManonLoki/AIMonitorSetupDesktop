@@ -75,6 +75,14 @@ fn profile_save_does_not_write_hooks_when_data_persistence_fails() {
                 .join(".codebuddy")
                 .to_string_lossy()
                 .into_owned(),
+            qwen_code: config_home.join(".qwen").to_string_lossy().into_owned(),
+            kimi_code: config_home
+                .join(".kimi-code")
+                .to_string_lossy()
+                .into_owned(),
+            qoder: config_home.join(".qoder").to_string_lossy().into_owned(),
+            gemini_cli: config_home.join(".gemini").to_string_lossy().into_owned(),
+            github_copilot: config_home.join(".copilot").to_string_lossy().into_owned(),
         },
         data: Arc::new(RwLock::new(SavedMonitorData {
             client_id: "test-client".to_owned(),

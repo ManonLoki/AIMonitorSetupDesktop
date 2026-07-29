@@ -114,7 +114,7 @@ Rust DTO 使用 `serde` 的 `camelCase` 输出以匹配 TypeScript。Command
 AI 工具的 Hooks 不再直接访问监控屏。桌面端是状态计算与转发的唯一事实来源：
 
 ```text
-Codex / Claude Code / Cursor / WorkBuddy / CodeBuddy command Hook
+Codex / Claude Code / Cursor / WorkBuddy / CodeBuddy / Qwen Code / Kimi Code / Qoder / Gemini CLI / GitHub Copilot CLI command Hook
   ↓ AIMonitor --aimonitor-hook-relay：读取原生 stdin，仅提取必要上下文
 OpenCode / Hermes / OpenClaw native plugin
   ↓ 直接构造相同的最小信封
@@ -135,22 +135,25 @@ Hook 成功/失败统计，也不阻塞其他设备或状态投递。
 
 - Hooks 的完整唯一契约见 [`hooks-contract.md`](hooks-contract.md)。协议实现与该
   文档共同构成事实标准，不保留历史格式迁移入口。
+- 接入候选、竞品比较和后续优先级见
+  [`ai-tool-coverage-roadmap.md`](ai-tool-coverage-roadmap.md)；候选表不能替代已实现契约。
 - listener 只绑定环回地址，不向局域网暴露 Hook 接口。
 - 命令型 Hooks 不依赖 PowerShell、curl 或额外 `.sh`/`.ps1` 文件，而是调用当前
   已安装 AIMonitor 可执行文件的轻量 relay 子命令；该模式在 `main` 入口先行
   截获，不初始化 Tauri、单实例插件或 UI。配置不保存监控屏 IP、用户名、图片或
   状态规则；应用安装路径移动后需重新执行一次 Hooks 写入。
 - AI 客户端与桌面端同时冷启动时，Hook 可能早于本机 listener 完成绑定；轻量
-  relay 会对本机中继的连接拒绝额外重试 5 次、每次间隔 1 秒。该重试只覆盖
-  工具到本机中继的启动竞态，不改变中继到设备“一次转换只投递一次”的规则。
+  relay 会对本机中继的连接重试 5 次、每次间隔 1 秒。该重试只覆盖工具到本机
+  中继的启动竞态，不改变中继到设备“一次转换只投递一次”的规则。GitHub Copilot
+  CLI 使用 fail-open：relay 异常不应阻断 CLI 本地命令流程。
 - 所有新托管 Hook 命令统一携带大小写固定的 `AIMonitor` 前缀（完整标识如
   `AIMonitor:tool=codex`）。标识不包含 shell 元字符，避免 Windows Hook 宿主在
   `cmd.exe` 前额外经过 PowerShell 时把参数拆成管道。合并、覆盖和后续删除只按
   当前标识识别。
 - Windows 原生 command Hook 执行器只写入标准 `cmd.exe` 命令；不同时混入
-  POSIX `command` 与 `commandWindows`。WorkBuddy、CodeBuddy 是例外：客户端自身
-  固定通过随产品提供的 Git Bash/POSIX shell 执行 Hook，因此配置直接启动
-  `AIMonitor.exe`，不调用外部脚本、curl 或用户另行安装的 Bash。
+  POSIX `command` 与 `commandWindows`。WorkBuddy、CodeBuddy、Kimi Code 是例外：
+  客户端自身固定通过随产品提供的 Git Bash/POSIX shell 执行 Hook，因此配置直接
+  启动 `AIMonitor.exe`，不调用外部脚本、curl 或用户另行安装的 Bash。
 - Windows 宿主选择 WSL UNC 配置目录时，由 application 层识别发行版并通过
   `wsl.exe` 完成 Linux 配置读写及 `wslpath` 路径转换，domain 生成 POSIX command；
   普通 Windows 目录继续生成既有 CMD command。WSL 与原生 Windows 是显式分支，
@@ -207,15 +210,18 @@ Hook 成功/失败统计，也不阻塞其他设备或状态投递。
   Codex Goal 模式暂停、恢复或自动续跑时可能在同一会话内切换 `turn_id`，且不再
   产生 `UserPromptSubmit`；已停止会话收到不同轮次的进度、询问或异常事件时将其
   视为新轮次的隐式工作起点，而同一已停止轮次的迟到事件继续抑制。
-  只有 Codex、Claude Code、Cursor、OpenCode 执行重复状态消除、旧轮次判断、
-  结束墓碑和多会话聚合抑制；其他 AI 工具统一采用逐事件直通策略，每个受支持
-  Hook 均按协议映射立即转发，不进行抑制。
-- Codex、Claude Code、Cursor、OpenCode、WorkBuddy、Hermes、OpenClaw、CodeBuddy
+  只有 Codex、Claude Code、Cursor、OpenCode、Qwen Code、Kimi Code、Qoder、Gemini
+  CLI、GitHub Copilot CLI 执行重复状态消除、旧轮次判断、结束墓碑和多会话聚合抑制；
+  其他 AI 工具统一采用逐事件直通策略，每个受支持 Hook 均按协议映射立即转发，
+  不进行抑制。
+- Codex、Claude Code、Cursor、OpenCode、Qwen Code、Kimi Code、Qoder、Gemini CLI、
+  GitHub Copilot CLI、WorkBuddy、Hermes、OpenClaw、CodeBuddy
   的协议实现分别位于 `domain/monitor/hooks/`
   下的独立文件，并统一实现 `HookProtocol`。Trait 负责约束工具元数据、事件语义、
   原生 handler/config 结构、stdout 约定和托管条目清理；公共生成、合并和状态机
-  不得按工具硬编码事件字符串。Cursor 的 `conversation_id`/`generation_id` 在
-  轻量 relay 边界归一化为 session/turn，`stop.status=error` 归一化为异常展示。
+  不得按工具硬编码事件字符串。Cursor 的 `conversation_id`/`generation_id` 在轻量
+  relay 边界归一化为 session/turn 上下文；GitHub Copilot CLI 的 `sessionId` 归一化
+  为 session 上下文。`stop.status=error` 归一化为异常展示。
   OpenCode 使用官方自动发现的全局插件文件订阅公开事件流，独立文件只允许覆盖
   带 AIMonitor 标识的内容；WorkBuddy 使用其内置 CodeBuddy Agent 引擎自 v2.48
   起独立的 `~/.workbuddy/settings.json`，不与 CodeBuddy CLI 配置混用；其 command
@@ -229,14 +235,26 @@ Hook 成功/失败统计，也不阻塞其他设备或状态投递。
   `extensions/aimonitor/`，主入口、manifest 与 package metadata 在写入前统一校验，
   任一既有文件不是 AIMonitor 管理时整组拒绝覆盖；安装后由用户显式启用插件、
   授予 conversation lifecycle Hook 权限并重启 Gateway。
+- Qwen Code 约定 Claude-style 生命周期与权限事件；写入后需重启或新建会话重载配置。
+  Kimi Code 在 `($KIMI_CODE_HOME 或 ~/.kimi-code)/config.toml` 使用 `[[hooks]]` TOML
+  数组；AIMonitor 只替换带完整 begin/end 标识的托管区块，保留模型、权限及用户规则。
+  Windows 由 Kimi Code 的 Git Bash 执行 POSIX relay 命令，写入后需新建会话。
+  Qoder 使用 IDE、JetBrains 插件与 CLI 都支持的 `UserPromptSubmit`、`PreToolUse`、
+  `PostToolUse`、`PostToolUseFailure` 和 `Stop` 兼容基线，配置改动立即生效。
+  Gemini CLI 使用
+  `Before/After Agent`、`Before/After Model`、
+  `Before/After Tool`、`Session`、`Notification`、`PreCompress`；其中继要求 stdout
+  能解析为标准 JSON。GitHub Copilot CLI 使用版本 1 的扁平化 command hooks，配置文件为
+  `($COPILOT_HOME 或 ~/.copilot)/hooks/aimonitor.json`，在执行失败时保持 fail-open。
 - listener、状态机 worker 与设备投递 workers 分为两个阶段：最小 Hook 事件先进入
   容量 256 的有界队列并按接收顺序推进状态机，不会因设备网络慢而停止计算当前
   状态；投递层按“设备 ID + AI 工具”拆成独立 worker 和目标队列。尚未发送的
   中间态可按工具策略被新状态覆盖并计入时序抑制，因此单台设备不会形成网络请求
   长队，离线或慢设备也不会阻塞其他在线设备及时收到询问、异常、停止等短暂状态。
   每个目标设备每次转换只转发一次，失败后不重试。Codex、Claude Code、Cursor、
-  OpenCode 在每个目标队列内使用 latest-wins；其他工具在每个目标队列内使用逐事件
-  FIFO，不覆盖任何尚未发送的事件。
+  OpenCode、Qwen Code、Kimi Code、Qoder、Gemini CLI、GitHub Copilot CLI 在每个目标
+  队列内使用 latest-wins；其他工具在每个目标队列内使用逐事件 FIFO，不覆盖任何
+  尚未发送的事件。
 - Rust 在启动后立即执行一次在线设备发现，之后按设置页以“分钟”为单位配置的
   间隔（默认一分钟）持续刷新在线设备快照；后台循环以 1 秒粒度醒来并重新读取当前
   间隔，因此在设置页修改间隔后无需重启即可立即生效。设备发现同时执行

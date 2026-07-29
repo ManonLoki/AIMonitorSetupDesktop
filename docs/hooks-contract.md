@@ -23,6 +23,11 @@ application 层按工具硬编码另一份事件表。
 | Cursor | `cursor` | `~/.cursor/hooks.json` | command Hook | 无 |
 | OpenCode | `opencode` | `~/.config/opencode/plugins/aimonitor.js` | 原生插件 | 无 |
 | WorkBuddy | `workbuddy` | `~/.workbuddy/settings.json` | Git Bash/POSIX command Hook | 审核，并重启或新建会话 |
+| Qwen Code | `qwen-code` | `~/.qwen/settings.json` | command Hook | 重启或新建会话 |
+| Kimi Code | `kimi-code` | `($KIMI_CODE_HOME 或 ~/.kimi-code)/config.toml` | Git Bash/POSIX TOML command Hook | 新建会话 |
+| Qoder | `qoder` | `~/.qoder/settings.json` | command Hook | 无（配置立即生效） |
+| Gemini CLI | `gemini-cli` | `~/.gemini/settings.json` | command Hook | 重启或新建会话 |
+| GitHub Copilot CLI | `github-copilot` | `($COPILOT_HOME 或 ~/.copilot)/hooks/aimonitor.json` | command Hook | 重启 |
 | Hermes | `hermes` | `~/.hermes/plugins/aimonitor/__init__.py` | 原生 observer 插件 | 启用插件，并重启或新建会话 |
 | OpenClaw | `openclaw` | `~/.openclaw/extensions/aimonitor/index.mjs` | 原生插件 | 启用并授权插件，重启 Gateway |
 | CodeBuddy | `codebuddy` | `~/.codebuddy/settings.json` | Git Bash/POSIX command Hook | 审核，并重启或新建会话 |
@@ -68,13 +73,23 @@ listener。
 
 - 各工具支持的精确事件名及其 `Idle`、`Running`、`Asking`、`Error`、`Release`
   映射，以对应 `hooks/<tool>.rs` 的 `EVENTS` 为唯一事件表。
-- Codex、Claude Code、Cursor、OpenCode 使用会话/轮次状态机和 latest-wins
-  目标队列；WorkBuddy、Hermes、OpenClaw、CodeBuddy 按事件 FIFO 直通。
+- Codex、Claude Code、Cursor、OpenCode、Qwen Code、Kimi Code、Qoder、Gemini CLI、
+  GitHub Copilot CLI 使用会话/轮次状态机和 latest-wins 目标队列；WorkBuddy、Hermes、
+  OpenClaw、CodeBuddy 按事件 FIFO 直通。
 - Codex Goal 模式在暂停、恢复或自动续跑后可能沿用 `session_id` 并切换
   `turn_id`，且不再产生 `UserPromptSubmit`。已停止会话收到不同轮次的进度、
   询问或异常事件时建立新的隐式轮次；同一已停止轮次的迟到事件继续抑制。
 - 一次状态转换的候选目标必须同时满足：设备存在已保存路由、该工具存在 Profile、
   设备 ID 位于当前在线快照。
+- Qwen Code 使用 Claude-style 生命周期与权限事件，包含生命周期与授权信号。
+- Kimi Code 的 Hooks 与其他设置共存于 TOML `[[hooks]]` 数组；写入和移除只允许替换
+  唯一且完整的 AIMonitor begin/end 托管区块，边界损坏或重复时拒绝改写。
+- Qoder 使用 IDE、JetBrains 插件与 CLI 共同支持的 `UserPromptSubmit`、`PreToolUse`、
+  `PostToolUse`、`PostToolUseFailure`、`Stop` 兼容基线。
+- Gemini CLI 使用 `Before/After Agent`、`Before/After Model`、`Before/After Tool`、
+  `Session`、`Notification`、`PreCompress`，并要求 strict JSON stdout。
+- GitHub Copilot CLI 为版本 1 的扁平 command hooks；Relay 失败按 fail-open 语义处理，
+  不阻断本地 CLI 主流程。
 - 每次槽位 POST 必须携带本控制端稳定的 `clientId`。后台每 30 秒向同一在线目标调用
   `/api/clients/{clientId}/heartbeat`；接收端 2 分钟未收到续租时按 DELETE 等价语义
   清理该客户端拥有的全部槽位。该租约流量不计入 Hook 中继统计。

@@ -4,9 +4,10 @@
 
 AIMonitor Setup is the desktop configuration and relay application for AIMonitor
 devices. It discovers AIMonitor devices on the local network, manages per-client
-display positions, state images, and Hooks, and forwards local events from Codex,
-Claude Code, Cursor, OpenCode, WorkBuddy, Hermes, OpenClaw, and CodeBuddy to every
-configured online device.
+display positions, state images, and Hooks, and forwards local events from
+Codex, Claude Code, Cursor, OpenCode, WorkBuddy, Hermes, OpenClaw, CodeBuddy, Qwen
+Code, Kimi Code, Qoder, Gemini CLI, and GitHub Copilot CLI to every configured
+online device.
 
 The project is built with Tauri and React. Rust is the sole business backend;
 React is limited to presentation, interaction, and typed Tauri command calls.
@@ -19,6 +20,10 @@ React is limited to presentation, interaction, and typed Tauri command calls.
   and error—separately for each device and AI client.
 - Browse, filter, batch upload, and manage JPEG, PNG, GIF, BMP, and WebP images.
   The Rust backend validates, resizes, and converts images for device compatibility.
+- Apply per-tool delivery semantics:
+  - Stateful latest-wins: Codex, Claude Code, Cursor, OpenCode, Qwen Code, Kimi
+    Code, Qoder, Gemini CLI, GitHub Copilot CLI.
+  - Event-by-event FIFO: WorkBuddy, Hermes, OpenClaw, CodeBuddy.
 - Write local relay configuration for supported AI clients. Command Hooks use
   AIMonitor's lightweight relay mode and do not depend on PowerShell on Windows.
 - Inspect online devices and local relay metrics, including received, forwarded,

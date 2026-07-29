@@ -143,3 +143,110 @@ fn hook_transitions_keep_state_rules_in_the_desktop_backend() {
     );
     assert_eq!(hook_transition(AiTool::Codex, "Unknown"), None);
 }
+
+#[test]
+fn qwen_code_merge_is_idempotent_and_preserves_other_commands() {
+    let generated = generate_test_hook_config(AiTool::QwenCode).unwrap();
+    let existing = r#"{
+      "hooks": {
+        "SessionStart": [
+          { "hooks": [{ "type": "command", "command": "other-session-start" }]}
+        ],
+        "Stop": [
+          { "hooks": [{ "type": "command", "command": "other-stop" }]},
+          { "hooks": [{ "type": "command", "command": "'AIMonitor' --aimonitor-hook-relay qwen-code Stop --managed-by 'AIMonitor:tool=qwen-code'" }]}
+        ]
+      }
+    }"#;
+
+    let first = merge_hook_config(Some(existing), &generated, AiTool::QwenCode).unwrap();
+    let value: Value = serde_json::from_str(&first.content).unwrap();
+    let stop = serde_json::to_string(&value["hooks"]["Stop"]).unwrap();
+
+    assert_eq!(stop.matches("other-stop").count(), 1);
+    assert_eq!(stop.matches("AIMonitor:tool=qwen-code").count(), 1);
+    let second = merge_hook_config(Some(&first.content), &generated, AiTool::QwenCode).unwrap();
+    assert_eq!(first.content, second.content);
+}
+
+#[test]
+fn qoder_merge_is_idempotent_and_preserves_other_commands() {
+    let generated = generate_test_hook_config(AiTool::Qoder).unwrap();
+    let existing = r#"{
+      "hooks": {
+        "UserPromptSubmit": [
+          { "hooks": [{ "type": "command", "command": "other-prompt" }]}
+        ],
+        "PostToolUse": [
+          { "hooks": [{ "type": "command", "command": "'AIMonitor' --aimonitor-hook-relay qoder PostToolUse --managed-by 'AIMonitor:tool=qoder'" }]}
+        ]
+      }
+    }"#;
+
+    let first = merge_hook_config(Some(existing), &generated, AiTool::Qoder).unwrap();
+    let value: Value = serde_json::from_str(&first.content).unwrap();
+    let submit = serde_json::to_string(&value["hooks"]["UserPromptSubmit"]).unwrap();
+
+    assert_eq!(submit.matches("other-prompt").count(), 1);
+    assert_eq!(submit.matches("AIMonitor:tool=qoder").count(), 1);
+    let second = merge_hook_config(Some(&first.content), &generated, AiTool::Qoder).unwrap();
+    assert_eq!(first.content, second.content);
+}
+
+#[test]
+fn gemini_cli_merge_is_idempotent_and_preserves_other_commands() {
+    let generated = generate_test_hook_config(AiTool::GeminiCli).unwrap();
+    let existing = r#"{
+      "hooks": {
+        "SessionStart": [
+          { "hooks": [{ "type": "command", "command": "other-session-start" }]}
+        ],
+        "SessionEnd": [
+          { "hooks": [{ "type": "command", "command": "other-session-end" }]}
+        ]
+      }
+    }"#;
+
+    let first = merge_hook_config(Some(existing), &generated, AiTool::GeminiCli).unwrap();
+    let value: Value = serde_json::from_str(&first.content).unwrap();
+    let session_end = serde_json::to_string(&value["hooks"]["SessionEnd"]).unwrap();
+
+    assert_eq!(session_end.matches("other-session-end").count(), 1);
+    assert_eq!(session_end.matches("AIMonitor:tool=gemini-cli").count(), 1);
+    let second = merge_hook_config(Some(&first.content), &generated, AiTool::GeminiCli).unwrap();
+    assert_eq!(first.content, second.content);
+}
+
+#[test]
+fn github_copilot_merge_is_idempotent_and_preserves_other_handlers() {
+    let generated = generate_test_hook_config(AiTool::GitHubCopilot).unwrap();
+    let existing = r#"{
+      "version": 99,
+      "hooks": {
+        "sessionStart": [
+          { "type": "command", "command": "other-session-start" }
+        ],
+        "userPromptSubmitted": [
+          { "type": "command", "command": "other-user-prompt" },
+          {
+            "type": "command",
+            "command": "'AIMonitor' --aimonitor-hook-relay github-copilot userPromptSubmitted --managed-by 'AIMonitor:tool=github-copilot'"
+          }
+        ]
+      }
+    }"#;
+
+    let first = merge_hook_config(Some(existing), &generated, AiTool::GitHubCopilot).unwrap();
+    let value: Value = serde_json::from_str(&first.content).unwrap();
+    let user_prompt = serde_json::to_string(&value["hooks"]["userPromptSubmitted"]).unwrap();
+
+    assert_eq!(user_prompt.matches("other-user-prompt").count(), 1);
+    assert_eq!(value["version"], 1);
+    assert_eq!(
+        user_prompt.matches("AIMonitor:tool=github-copilot").count(),
+        1
+    );
+    let second =
+        merge_hook_config(Some(&first.content), &generated, AiTool::GitHubCopilot).unwrap();
+    assert_eq!(first.content, second.content);
+}

@@ -124,6 +124,7 @@ export const enMessages = {
   "hooks.guidanceCodeBuddy": "Configuration written to {{filename}}. Run /hooks in CodeBuddy to review the AIMonitor rule, then restart CodeBuddy or create a new session.",
   "hooks.guidanceOpenClaw": "The AIMonitor plugin was written beside {{filename}}. Run openclaw plugins enable aimonitor, openclaw config set plugins.entries.aimonitor.hooks.allowConversationAccess true, and openclaw gateway restart in order.",
   "hooks.guidanceHermes": "The AIMonitor plugin was written beside {{filename}}. Run hermes plugins enable aimonitor, then restart Hermes or create a new session.",
+  "hooks.guidanceRestart": "Configuration written to {{filename}}. Restart {{tool}} or create a new session to load the AIMonitor hooks.",
   "hooks.dialogTitle": "Choose Hooks configuration directory",
   "onboarding.dialog": "AIMonitor getting started",
   "onboarding.title": "Getting started",

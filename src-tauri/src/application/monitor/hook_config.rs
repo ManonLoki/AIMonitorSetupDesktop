@@ -34,6 +34,15 @@ pub(super) fn detect_hook_config_directories(config_home: &Path) -> HookConfigDi
             "CODEBUDDY_CONFIG_DIR",
             &config_home.join(".codebuddy"),
         ),
+        // Qwen Code 与 Qoder 的用户级配置目录均为公开固定位置。
+        qwen_code: config_home.join(".qwen").to_string_lossy().into_owned(),
+        // Kimi Code 支持 KIMI_CODE_HOME；否则使用 ~/.kimi-code。
+        kimi_code: detected_config_directory("KIMI_CODE_HOME", &config_home.join(".kimi-code")),
+        qoder: config_home.join(".qoder").to_string_lossy().into_owned(),
+        // Gemini CLI 的用户设置固定放在 ~/.gemini。
+        gemini_cli: config_home.join(".gemini").to_string_lossy().into_owned(),
+        // Copilot CLI 支持 COPILOT_HOME；AIMonitor 在其 hooks 子目录写独立文件。
+        github_copilot: detected_config_directory("COPILOT_HOME", &config_home.join(".copilot")),
     }
 }
 

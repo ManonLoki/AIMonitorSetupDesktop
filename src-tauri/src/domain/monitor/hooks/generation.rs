@@ -45,11 +45,9 @@ fn generate_hook_config_with_executable(
         hooks.insert(event.name.to_owned(), protocol.handler(event, &commands));
     }
 
-    let config = protocol.config_root(hooks);
     Ok(HookConfigPreview {
         filename: protocol.preview_filename().to_owned(),
-        content: serde_json::to_string_pretty(&config)
-            .map_err(|error| format!("无法生成 Hooks 配置：{error}"))?,
+        content: protocol.render_config(hooks)?,
     })
 }
 
@@ -61,7 +59,7 @@ pub fn merge_hook_config(
     tool: AiTool,
 ) -> Result<HookConfigPreview, String> {
     let protocol = protocol(tool);
-    if protocol.standalone_config().is_some() {
+    if protocol.uses_custom_merge() {
         return Ok(HookConfigPreview {
             filename: generated.filename.clone(),
             content: protocol.merge_standalone(existing_content, generated)?,
@@ -83,9 +81,9 @@ pub fn merge_hook_config(
 
     for (key, value) in generated_root {
         if key != "hooks" {
-            existing_root
-                .entry(key.clone())
-                .or_insert_with(|| value.clone());
+            // `version` 等由协议生成的根元数据属于该 Hook 文件契约；每次写入都
+            // 恢复为当前受支持值，同时继续保留生成器未声明的用户根字段。
+            existing_root.insert(key.clone(), value.clone());
         }
     }
 
@@ -199,4 +197,8 @@ pub(super) fn command_has_marker(command: &str, marker: &str) -> bool {
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_kimi;
+#[cfg(test)]
 mod tests_merge;
+#[cfg(test)]
+mod tests_phase2;
