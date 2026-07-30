@@ -24,6 +24,7 @@ mod heartbeat;
 mod hook_config;
 mod relay;
 mod service_discovery;
+mod service_hooks;
 mod service_images;
 mod service_lifecycle;
 mod service_relay;

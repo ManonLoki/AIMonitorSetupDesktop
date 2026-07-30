@@ -112,15 +112,22 @@ impl MonitorService {
     /// 保存设置页勾选的 AI 客户端，按固定顺序去重后供两个管理页面共同使用。
     pub fn save_enabled_ai_tools(&self, tools: &[AiTool]) -> Result<MonitorSettings, String> {
         let tools = normalize_enabled_ai_tools(tools);
-        let mut data = self
-            .data
-            .write()
-            .map_err(|_| "配置写入锁已损坏".to_owned())?;
-        let mut next_data = data.clone();
-        next_data.settings.enabled_ai_tools = tools;
-        self.persist(&next_data)?;
-        *data = next_data;
-        Ok(data.settings.clone())
+        let settings = {
+            let mut data = self
+                .data
+                .write()
+                .map_err(|_| "配置写入锁已损坏".to_owned())?;
+            let mut next_data = data.clone();
+            next_data.settings.enabled_ai_tools = tools;
+            self.persist(&next_data)?;
+            *data = next_data;
+            data.settings.clone()
+        };
+
+        // 必须先释放 data 写锁：自动写入会重新读取设置与 Hooks 路径。
+        // 写入采用 best-effort 语义，失败不回滚已经持久化成功的 AI 选择。
+        self.start_auto_write_enabled_hook_configs();
+        Ok(settings)
     }
 
     // 返回当前选中设备对应的所有 AI Profile（按 device_id 过滤）。

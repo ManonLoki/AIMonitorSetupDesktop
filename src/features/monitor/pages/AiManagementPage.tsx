@@ -33,6 +33,7 @@ import { SlotPicker } from "../components/SlotPicker";
 import { useActiveVisibleTool } from "../hooks/useActiveVisibleTool";
 // 引入监控设备连接状态 hook
 import { useMonitorConnection } from "../hooks/useMonitorConnection";
+import { useDirectImageUpload } from "../hooks/useDirectImageUpload";
 // 引入查询键与预定义的查询配置
 import {
   aiProfilesQuery,
@@ -138,6 +139,12 @@ export function AiManagementPage() {
     },
   });
 
+  const { upload, uploadedSelection, clearUploadedSelection } =
+    useDirectImageUpload({
+      setDrafts,
+      onDraftChange: save.reset,
+    });
+
   // 更新当前激活工具的草稿：先清空 save 的结果状态，再写入新的草稿内容
   const updateDraft = (next: AiProfile) => {
     save.reset();
@@ -164,6 +171,7 @@ export function AiManagementPage() {
     devices.error ??
     monitorSettings.error ??
     images.error ??
+    upload.error ??
     save.error;
   // 可供选择的远端图片列表，查询未返回数据时兜底为空数组
   const availableImages = images.data ?? [];
@@ -187,6 +195,14 @@ export function AiManagementPage() {
   return (
     <Stack gap="md">
       {error && <Alert color="red">{error.message}</Alert>}
+      {uploadedSelection?.tool === activeTool &&
+        uploadedSelection.deviceId === monitorSettings.data?.deviceId && (
+          <Alert color="teal" variant="light">
+            {t("image.uploadedAndSelected", {
+              filename: uploadedSelection.filename,
+            })}
+          </Alert>
+        )}
       <Tabs
         value={activeTool}
         onChange={(value) => {
@@ -277,10 +293,26 @@ export function AiManagementPage() {
                         <ImagePicker
                           images={availableImages}
                           value={hook.image}
-                          disabled={images.isPending}
-                          onChange={(value) =>
-                            updateHookField(behavior.value, "image", value)
+                          disabled={images.isPending || upload.isPending}
+                          uploading={
+                            upload.isPending &&
+                            upload.variables?.tool === tool.value &&
+                            upload.variables?.behavior === behavior.value
                           }
+                          onChange={(value) => {
+                            clearUploadedSelection();
+                            updateHookField(behavior.value, "image", value);
+                          }}
+                          onUpload={(file) => {
+                            const deviceId = monitorSettings.data?.deviceId;
+                            if (!deviceId) return;
+                            upload.mutate({
+                              file,
+                              tool: tool.value,
+                              behavior: behavior.value,
+                              deviceId,
+                            });
+                          }}
                         />
                         <Textarea
                           label={

@@ -26,6 +26,8 @@ React is limited to presentation, interaction, and typed Tauri command calls.
   - Event-by-event FIFO: WorkBuddy, Hermes, OpenClaw, CodeBuddy.
 - Write local relay configuration for supported AI clients. Command Hooks use
   AIMonitor's lightweight relay mode and do not depend on PowerShell on Windows.
+  Missing configurations are added when AIMonitor starts or the AI selection
+  changes, while existing AIMonitor-managed entries are left untouched.
 - Inspect online devices and local relay metrics, including received, forwarded,
   failed, pending, deduplicated, and suppressed events.
 - Use the interface in English or Simplified Chinese, run silently at startup,
@@ -54,7 +56,8 @@ failed, pending, and suppressed event counts.
 ### Monitor management
 
 Display positions and all four behavior states are stored independently for each
-device and AI client.
+device and AI client. A single image can be uploaded directly from the image
+picker and is selected automatically when the upload finishes.
 
 ![Monitor management](docs/screenshots/en/monitor-management.jpg)
 
@@ -74,8 +77,9 @@ name and discovery interval, select a language, and configure launch at startup.
 
 ### Getting started
 
-The first-run guide walks through AI client selection, Hook setup, image upload,
-and display configuration.
+The first-run guide starts with the sidebar and device switcher, then covers AI
+client selection and monitor display setup. A single image can be uploaded from
+Monitor management without visiting Image management.
 
 ![Getting started](docs/screenshots/en/onboarding.jpg)
 

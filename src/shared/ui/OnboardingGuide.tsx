@@ -23,23 +23,48 @@ import { LineIcon } from "./LineIcon";
 import { ROUTES } from "../routes";
 import { useI18n } from "../i18n";
 
+type StepItemTone = "default" | "muted";
+
+type OnboardingStep = {
+  title: string;
+  route?: string;
+  routeLabel?: string;
+  items: Array<{
+    text: string;
+    tone?: StepItemTone;
+  }>;
+};
+
 export function OnboardingGuide() {
   const { t } = useI18n();
-  const steps = [
+  const steps: OnboardingStep[] = [
     {
-      title: t("onboarding.step1Title"), route: ROUTES.settings,
-      routeLabel: t("onboarding.step1Route"),
-      items: [t("onboarding.step1Item1"), t("onboarding.step1Item2"), t("onboarding.step1Item3")],
+      title: t("onboarding.step1Title"),
+      items: [
+        { text: t("onboarding.step1Item1") },
+        { text: t("onboarding.step1Item2") },
+        { text: t("onboarding.step1Item3"), tone: "muted" },
+      ],
     },
     {
-      title: t("onboarding.step2Title"), route: ROUTES.images,
+      title: t("onboarding.step2Title"),
+      route: ROUTES.settings,
       routeLabel: t("onboarding.step2Route"),
-      items: [t("onboarding.step2Item1"), t("onboarding.step2Item2")],
+      items: [
+        { text: t("onboarding.step2Item1") },
+        { text: t("onboarding.step2Item2") },
+        { text: t("onboarding.step2Item3"), tone: "muted" },
+      ],
     },
     {
-      title: t("onboarding.step3Title"), route: ROUTES.aiManagement,
+      title: t("onboarding.step3Title"),
+      route: ROUTES.aiManagement,
       routeLabel: t("onboarding.step3Route"),
-      items: [t("onboarding.step3Item1"), t("onboarding.step3Item2"), t("onboarding.step3Item3")],
+      items: [
+        { text: t("onboarding.step3Item1") },
+        { text: t("onboarding.step3Item2") },
+        { text: t("onboarding.step3Item3") },
+      ],
     },
   ];
   const navigate = useNavigate();
@@ -111,30 +136,32 @@ export function OnboardingGuide() {
           </Text>
           <Stack gap={5} mt="xs">
             {current.items.map((item, index) => (
-              <Group key={item} gap="xs" align="flex-start" wrap="nowrap">
+              <Group key={item.text} gap="xs" align="flex-start" wrap="nowrap">
                 <Badge
                   size="xs"
                   circle
                   variant="light"
-                  color={step === 0 && index === 2 ? "gray" : "violet"}
+                  color={item.tone === "muted" ? "gray" : "violet"}
                 >
                   {index + 1}
                 </Badge>
                 <Text size="xs" lh={1.45}>
-                  {item}
+                  {item.text}
                 </Text>
               </Group>
             ))}
           </Stack>
         </div>
 
-        <Button
-          size="xs"
-          variant="light"
-          onClick={() => navigate({ to: current.route })}
-        >
-          {current.routeLabel}
-        </Button>
+        {current.route && current.routeLabel ? (
+          <Button
+            size="xs"
+            variant="light"
+            onClick={() => navigate({ to: current.route })}
+          >
+            {current.routeLabel}
+          </Button>
+        ) : null}
 
         <Group justify="space-between" gap="xs">
           <Button

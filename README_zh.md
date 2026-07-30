@@ -22,7 +22,8 @@ Qoder、Gemini CLI 和 GitHub Copilot CLI 的事件后转发到已配置设备�
     Qoder、Gemini CLI、GitHub Copilot CLI。
   - 逐事件 FIFO：WorkBuddy、Hermes、OpenClaw、CodeBuddy。
 - 为支持的 AI 客户端写入本机 Hooks 中继配置；命令型 Hook 由 AIMonitor 自身的
-  轻量模式归约为四字段事件信封，Windows 不依赖 PowerShell。
+  轻量模式归约为四字段事件信封，Windows 不依赖 PowerShell。应用启动或 AI
+  选择变更时会自动补写缺失配置，已有 AIMonitor 管理项保持不变。
 - 查看在线设备、Hook listener、转发结果与时序抑制等运行指标。
 - 支持中英文界面、开机静默自启、系统托盘、多设备切换与首次使用引导。
 
@@ -45,7 +46,8 @@ Qoder、Gemini CLI 和 GitHub Copilot CLI 的事件后转发到已配置设备�
 
 ### 监控管理
 
-按设备与 AI 客户端隔离保存显示位置和四种行为状态的展示配置。
+按设备与 AI 客户端隔离保存显示位置和四种行为状态的展示配置；选择图片时可直接
+上传单张图片，并在上传完成后自动选中。
 
 ![监控管理](docs/screenshots/monitor-management.jpg)
 
@@ -63,7 +65,8 @@ Qoder、Gemini CLI 和 GitHub Copilot CLI 的事件后转发到已配置设备�
 
 ### 新手引导
 
-首次运行时按顺序引导完成 AI 客户端选择、Hooks 写入、图片上传和展示配置。
+首次运行时先介绍侧栏功能与设备切换，再引导选择 AI 客户端并完成监控展示配置；
+单图可直接在监控管理的图片选择器内上传，无需前往图片管理页。
 
 ![新手引导](docs/screenshots/onboarding.jpg)
 

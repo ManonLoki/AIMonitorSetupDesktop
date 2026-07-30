@@ -42,7 +42,12 @@ AIMonitor 管理的文件时整组拒绝覆盖。
 - command Hook 只调用当前安装的 `AIMonitor --aimonitor-hook-relay`。
 - 不生成或识别 PowerShell/curl 直传、编码 PowerShell、runner 脚本或其他标识。
 - 合并只替换带当前管理标识的条目；其他内容作为用户配置原样保留。
-- 应用启动不扫描、不重写 Hooks 文件。需要更新时由用户在“Hooks 管理”明确执行写入。
+- 应用启动以及设置页保存 AI 客户端多选后，会在独立后台线程中为所有已选择工具
+  逐个尝试自动补写，启动与设置保存不等待该任务。自动流程读取工具主配置：只要
+  已包含当前 `AIMonitor:tool={slug}` 标识便保持原样；
+  没有标识时才复用完整生成、合并与原子写入流程。单工具失败按 best-effort 处理，
+  不阻止启动、AI 选择保存或后续工具；取消选择不删除既有配置。已有受管配置需要
+  更新可执行文件路径或协议结构时，由用户在“Hooks 管理”执行手动写入。
 - Windows AIMonitor 选择 `\\wsl.localhost\<发行版>\...` 或
   `\\wsl$\<发行版>\...` 时，视为 WSL command Hook 环境：通过对应发行版的
   `wsl.exe` 读写 Linux 配置并以 `wslpath` 转换 relay 路径，生成 POSIX command。

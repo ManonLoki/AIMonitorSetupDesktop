@@ -1,5 +1,6 @@
 import {
   ActionIcon,
+  Button,
   Group,
   Popover,
   SegmentedControl,
@@ -8,7 +9,7 @@ import {
   Tooltip,
   UnstyledButton,
 } from "@mantine/core";
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import type { RemoteImage } from "../api/monitor";
 import { useImageCategoryFilter } from "../hooks/useImageCategoryFilter";
 import { LineIcon } from "../../../shared/ui/LineIcon";
@@ -19,18 +20,24 @@ interface ImagePickerProps {
   images: RemoteImage[];
   value: string;
   disabled?: boolean;
+  uploading?: boolean;
   onChange: (value: string) => void;
+  onUpload: (file: File) => void;
 }
 
 export function ImagePicker({
   images,
   value,
   disabled,
+  uploading,
   onChange,
+  onUpload,
 }: ImagePickerProps) {
   const { t } = useI18n();
   // 控制弹出层（Popover）的展开/收起状态
   const [opened, setOpened] = useState(false);
+  // 单图上传入口使用隐藏 input；与图片管理页的批量上传相互独立。
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   // 图片分类筛选 hook：提供当前分类、切换分类方法、按分类过滤后的图片、各分类数量
   const { category, setCategory, filteredImages, counts } =
     useImageCategoryFilter(images);
@@ -112,14 +119,39 @@ export function ImagePicker({
                   : t("common.imagesFiltered", { visible: filteredImages.length, total: images.length })}
               </Text>
             </div>
-            <ActionIcon
-              variant="subtle"
-              color="gray"
-              aria-label={t("image.closeAria")}
-              onClick={() => setOpened(false)}
-            >
-              <LineIcon name="close" size={17} />
-            </ActionIcon>
+            <Group gap="xs" wrap="nowrap">
+              <Button
+                size="xs"
+                variant="light"
+                leftSection={<LineIcon name="upload" size={15} />}
+                aria-label={t("image.uploadSingleAria")}
+                loading={uploading}
+                disabled={disabled}
+                onClick={() => uploadInputRef.current?.click()}
+              >
+                {uploading ? t("image.uploading") : t("image.uploadSingle")}
+              </Button>
+              <input
+                ref={uploadInputRef}
+                hidden
+                type="file"
+                accept=".bmp,.jpg,.jpeg,.gif,.png,.webp,image/bmp,image/jpeg,image/gif,image/png,image/webp"
+                disabled={disabled}
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  if (file) onUpload(file);
+                  event.currentTarget.value = "";
+                }}
+              />
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                aria-label={t("image.closeAria")}
+                onClick={() => setOpened(false)}
+              >
+                <LineIcon name="close" size={17} />
+              </ActionIcon>
+            </Group>
           </Group>
 
           {/* 分类切换控件：全部/JPEG/PNG/GIF，各项附带对应数量 */}

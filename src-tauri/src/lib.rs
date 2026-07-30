@@ -77,6 +77,9 @@ pub fn run() {
                 MonitorService::load(&app_data_dir, &config_home).map_err(std::io::Error::other)?;
             // 启动 hook 监听器，接收外部工具发来的 hook 事件
             service.start_hook_listener();
+            // 为用户已启用的 AI 客户端自动补写缺失的 AIMonitor Hooks；
+            // 已有管理标识时保持原样，单个客户端失败也不阻止应用启动。
+            service.start_auto_write_enabled_hook_configs();
             // 启动后台设备发现任务，定期在局域网内扫描监控设备
             service.start_background_device_discovery(app.handle().clone());
             // 每 30 秒向已配置且在线的接收端发送控制端租约心跳。
