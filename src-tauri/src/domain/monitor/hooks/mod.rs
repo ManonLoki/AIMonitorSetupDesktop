@@ -224,6 +224,14 @@ pub fn hook_restart_required(tool: AiTool) -> bool {
     protocol(tool).restart_required()
 }
 
+/// 判断配置内容中是否已经包含当前工具的 `AIMonitor` 管理标识。
+///
+/// 自动补写只用这条规则判断“已有”：一旦存在受管标识便保持文件原样；
+/// 显式手动写入仍会经过完整合并，以便用户主动更新 relay 路径或协议结构。
+pub fn hook_config_has_managed_marker(content: &str, tool: AiTool) -> bool {
+    contains_managed_marker(content, tool)
+}
+
 /// 按 Hook 请求路径中的 slug 反查对应工具，避免与各协议自身的 `slug()` 重复维护映射表。
 pub fn tool_from_slug(slug: &str) -> Option<AiTool> {
     AiTool::ALL
