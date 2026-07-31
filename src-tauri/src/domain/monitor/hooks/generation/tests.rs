@@ -112,21 +112,32 @@ fn claude_preview_covers_permission_and_lifecycle_events() {
 }
 
 #[test]
-fn wsl_hook_uses_translated_posix_executable() {
-    let preview = super::generate_wsl_hook_config(
-        AiTool::ClaudeCode,
-        Path::new(r"C:\Program Files\AIMonitor\AIMonitor.exe"),
-        "/mnt/c/Program Files/AIMonitor/AIMonitor.exe",
-    )
-    .unwrap();
+fn every_wsl_command_hook_uses_its_posix_executable_and_config_path() {
+    let cases = [
+        (AiTool::Codex, ".codex/hooks.json"),
+        (AiTool::ClaudeCode, ".claude/settings.json"),
+        (AiTool::Cursor, ".cursor/hooks.json"),
+        (AiTool::WorkBuddy, ".workbuddy/settings.json"),
+        (AiTool::CodeBuddy, ".codebuddy/settings.json"),
+    ];
 
-    assert!(
-        preview
-            .content
-            .contains("'/mnt/c/Program Files/AIMonitor/AIMonitor.exe' --aimonitor-hook-relay")
-    );
-    assert!(!preview.content.contains("cmd.exe"));
-    assert!(!preview.content.contains(r"C:\\Program Files"));
+    for (tool, expected_filename) in cases {
+        let preview = super::generate_wsl_hook_config(
+            tool,
+            Path::new(r"C:\Program Files\AIMonitor\AIMonitor.exe"),
+            "/mnt/c/Program Files/AIMonitor/AIMonitor.exe",
+        )
+        .unwrap();
+
+        assert_eq!(preview.filename, expected_filename);
+        assert!(
+            preview
+                .content
+                .contains("'/mnt/c/Program Files/AIMonitor/AIMonitor.exe' --aimonitor-hook-relay")
+        );
+        assert!(!preview.content.contains("cmd.exe"));
+        assert!(!preview.content.contains(r"C:\\Program Files"));
+    }
 }
 
 // 验证 Codex 生成的 Hooks 配置：事件名使用 PascalCase 且没有独立 Error 事件；

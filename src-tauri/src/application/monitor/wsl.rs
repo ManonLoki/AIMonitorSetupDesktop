@@ -64,7 +64,11 @@ impl WslDirectory {
         let executable = executable
             .to_str()
             .ok_or_else(|| "AIMonitor 可执行文件路径不是有效 Unicode".to_owned())?;
-        let output = run_wsl(&self.distribution, wslpath_arguments(executable))?;
+        let wslpath_input = wslpath_input(executable);
+        let output = run_wsl(
+            &self.distribution,
+            ["wslpath", "-u", wslpath_input.as_str()],
+        )?;
         let translated = String::from_utf8(output)
             .map_err(|error| format!("WSL 返回了无效的路径编码：{error}"))?;
         let translated = translated.trim();
@@ -86,11 +90,12 @@ impl WslDirectory {
     }
 }
 
-// wslpath 是 WSL 自带工具，不接受常见 GNU 工具用于终止选项解析的 `--`。
-// 将参数集中在这里，确保所有发行版都使用官方支持的调用形式。
+// wsl.exe 会让 Linux 命令行再次解析传入的 Windows 路径，单个反斜杠会在该层被
+// 当作转义符吞掉（例如 `C:\Users` 变成 `C:Users`）。wslpath 同时接受正斜杠形式，
+// 因此在跨越 wsl.exe 边界前先归一化，且不传入 wslpath 不支持的 `--` 分隔符。
 #[cfg(any(target_os = "windows", test))]
-fn wslpath_arguments(executable: &str) -> [&str; 3] {
-    ["wslpath", "-u", executable]
+fn wslpath_input(executable: &str) -> String {
+    executable.replace('\\', "/")
 }
 
 impl WslFile {
@@ -128,7 +133,10 @@ impl WslFile {
             ])
             .output()
             .map_err(|error| wsl_launch_error(&self.distribution, &error))?;
-        if existence.status.code() == Some(1) && existence.stderr.is_empty() {
+        // `test -e` 用退出码 1 表示目标不存在。wsl.exe 本身可能同时在 stderr
+        // 输出与文件无关的发行版/网络提示，因此不能再要求 stderr 为空，否则
+        // 首次写入一个尚不存在的配置文件会被误判成读取失败。
+        if wsl_test_reports_missing(existence.status.code()) {
             return Ok(None);
         }
         Err(wsl_command_error(
@@ -196,6 +204,10 @@ impl WslFile {
     }
 }
 
+fn wsl_test_reports_missing(status_code: Option<i32>) -> bool {
+    status_code == Some(1)
+}
+
 #[cfg(target_os = "windows")]
 fn run_wsl<const N: usize>(distribution: &str, command: [&str; N]) -> Result<Vec<u8>, String> {
     let output = Command::new("wsl.exe")
@@ -231,18 +243,26 @@ fn wsl_command_error(distribution: &str, action: &str, stderr: &[u8]) -> String 
 
 #[cfg(test)]
 mod tests {
-    use super::{WslDirectory, wslpath_arguments};
+    use super::{WslDirectory, wsl_test_reports_missing, wslpath_input};
 
     #[test]
-    fn invokes_wslpath_without_an_unsupported_option_separator() {
+    fn normalizes_windows_executable_for_wslpath_command_parsing() {
         assert_eq!(
-            wslpath_arguments(r"C:\Users\user\AppData\Local\AIMonitor\AIMonitor.exe"),
-            [
-                "wslpath",
-                "-u",
-                r"C:\Users\user\AppData\Local\AIMonitor\AIMonitor.exe"
-            ]
+            wslpath_input(r"C:\Users\user\AppData\Local\AIMonitor\AIMonitor.exe"),
+            "C:/Users/user/AppData/Local/AIMonitor/AIMonitor.exe"
         );
+        assert_eq!(
+            wslpath_input("C:/Program Files/AIMonitor/AIMonitor.exe"),
+            "C:/Program Files/AIMonitor/AIMonitor.exe"
+        );
+    }
+
+    #[test]
+    fn missing_wsl_file_is_decided_by_test_exit_code() {
+        assert!(wsl_test_reports_missing(Some(1)));
+        assert!(!wsl_test_reports_missing(Some(0)));
+        assert!(!wsl_test_reports_missing(Some(2)));
+        assert!(!wsl_test_reports_missing(None));
     }
 
     #[test]
@@ -259,6 +279,26 @@ mod tests {
         let legacy = WslDirectory::parse(r"\\wsl$\Ubuntu-24.04\home\user\.codex").unwrap();
         assert_eq!(legacy.distribution, "Ubuntu-24.04");
         assert_eq!(legacy.linux_path, "/home/user/.codex");
+    }
+
+    #[test]
+    fn joins_every_wsl_command_hook_config_below_its_selected_directory() {
+        let cases = [
+            (".codex", "hooks.json"),
+            (".claude", "settings.json"),
+            (".cursor", "hooks.json"),
+            (".workbuddy", "settings.json"),
+            (".codebuddy", "settings.json"),
+        ];
+
+        for (directory_name, filename) in cases {
+            let unc = format!(r"\\wsl.localhost\Ubuntu-24.04\home\user\{directory_name}");
+            let directory = WslDirectory::parse(&unc).unwrap();
+            assert_eq!(
+                directory.join(filename).display(),
+                format!("/home/user/{directory_name}/{filename}")
+            );
+        }
     }
 
     #[test]

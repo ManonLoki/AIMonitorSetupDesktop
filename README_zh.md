@@ -24,7 +24,7 @@ Cursor、OpenCode、WorkBuddy、Hermes、OpenClaw 和 CodeBuddy 的事件后转�
 
 ## 实机界面
 
-以下截图来自 macOS 上运行的 AIMonitor v2.2.3，与当前仓库版本一致。
+以下截图来自 macOS 上运行的 AIMonitor v2.2.4，与当前仓库版本一致。
 
 ### 启动与设备扫描
 

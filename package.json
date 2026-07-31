@@ -3,7 +3,7 @@
   "displayName": "AIMonitorSetup",
   "releaseName": "AIMonitorSetup",
   "private": true,
-  "version": "2.2.3",
+  "version": "2.2.4",
   "license": "SEE LICENSE IN LICENSE",
   "repository": "https://github.com/ManonLoki/AIMonitorSetupDesktop.git",
   "type": "module",
