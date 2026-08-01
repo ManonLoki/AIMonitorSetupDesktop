@@ -182,6 +182,18 @@ pub fn normalize_base_url(value: &str) -> Result<String, String> {
     Ok(format!("{}://{}", scheme.as_str(), authority.as_str()))
 }
 
+/// 判断一个已经过 `normalize_base_url` 规范化的 base url 是否使用 IPv6
+/// 字面量主机。调用方不应自行重新假设 `normalize_base_url` 的输出形状
+/// （`{scheme}://{authority}`，scheme 只会是 http/https 字面量）——这个
+/// 假设和该形状本就由 `normalize_base_url` 定义，因此校验逻辑收敛在此处，
+/// 与其保持在同一模块内演进。
+pub fn is_ipv6_literal_base_url(normalized_base_url: &str) -> bool {
+    normalized_base_url
+        .strip_prefix("http://")
+        .or_else(|| normalized_base_url.strip_prefix("https://"))
+        .is_some_and(|authority| authority.starts_with('['))
+}
+
 // 将一次发现结果转换为可持久化的设备路由，同时校验 ID/名称/基地址均有效。
 pub fn validate_device_route(
     device: &DiscoveredMonitorDevice,

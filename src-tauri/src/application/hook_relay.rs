@@ -122,7 +122,7 @@ fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> Result<(), String>
         .map_err(|error| format!("无法读取 AI Hook 原始输入：{error}"))?;
     let payload = minimize_native_hook_payload(&native_json, event)?;
     let endpoint = format!("http://127.0.0.1:{DEFAULT_HOOK_RELAY_PORT}/api/hooks/{tool_slug}");
-    let client = super::harden_blocking_client(
+    let client = super::net::harden_blocking_client(
         Client::builder()
             .connect_timeout(LOCAL_RELAY_CONNECT_TIMEOUT)
             .timeout(LOCAL_RELAY_REQUEST_TIMEOUT),

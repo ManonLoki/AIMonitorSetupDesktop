@@ -96,7 +96,7 @@ pub const MONITOR_DEVICES_CHANGED_EVENT: &str = "monitor-devices-changed";
 // 构造用于向设备转发 Hook 状态/心跳的阻塞式 HTTP 客户端。中继监听与心跳
 // 发送两条独立后台线程共用同一套连接/请求超时配置，因此只在此处实现一次。
 fn build_hook_forward_client() -> reqwest::Result<reqwest::blocking::Client> {
-    super::harden_blocking_client(
+    super::net::harden_blocking_client(
         reqwest::blocking::Client::builder()
             .connect_timeout(HOOK_FORWARD_CLIENT_TIMEOUT)
             .timeout(HOOK_FORWARD_CLIENT_TIMEOUT),
@@ -107,7 +107,7 @@ fn build_hook_forward_client() -> reqwest::Result<reqwest::blocking::Client> {
 // 构造监控设备业务使用的异步 HTTP 客户端。调用方仍可按具体操作设置请求级
 // timeout，但所有设备请求统一禁用隐藏重试、重定向和系统代理。
 fn build_monitor_client() -> Result<Client, String> {
-    super::harden_async_client(Client::builder())
+    super::net::harden_async_client(Client::builder())
         .build()
         .map_err(|error| format!("无法创建监控设备 HTTP 客户端：{error}"))
 }
