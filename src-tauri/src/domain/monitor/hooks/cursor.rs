@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::{Map, Value, json};
 
 use super::{
@@ -9,8 +11,10 @@ pub(super) static CURSOR: CursorProtocol = CursorProtocol;
 
 pub(super) struct CursorProtocol;
 
+const RELEASE_SETTLE_DELAY: Duration = Duration::from_millis(250);
+
 const EVENTS: &[HookEvent] = &[
-    HookEvent::new("workspaceOpen", HookEventKind::SessionStart),
+    HookEvent::new("workspaceOpen", HookEventKind::WorkspaceStart),
     HookEvent::new("sessionStart", HookEventKind::SessionStart),
     HookEvent::new("beforeSubmitPrompt", HookEventKind::WorkStart),
     HookEvent::new(
@@ -43,16 +47,13 @@ const EVENTS: &[HookEvent] = &[
     ),
     HookEvent::new(
         "postToolUseFailure",
-        HookEventKind::State(HookBehavior::Error),
+        HookEventKind::WorkProgress(HookBehavior::Error),
     ),
     HookEvent::new(
         "subagentStart",
-        HookEventKind::WorkProgress(HookBehavior::Running),
+        HookEventKind::UnscopedWorkStart(HookBehavior::Running),
     ),
-    HookEvent::new(
-        "subagentStop",
-        HookEventKind::WorkCompletion(HookBehavior::Running),
-    ),
+    HookEvent::new("subagentStop", HookEventKind::UnscopedWorkCompletion),
     HookEvent::new(
         "preCompact",
         HookEventKind::WorkProgress(HookBehavior::Running),
@@ -89,13 +90,23 @@ impl HookProtocol for CursorProtocol {
         EVENTS
     }
 
-    // Cursor 的 `stop` 事件通过 `status == "error"` 区分正常完成与异常结束，
-    // 而不是像其他工具那样用独立的事件名表达错误。
+    // Cursor 的 generation stop 是终止信号；工具失败只是当前 generation 内的
+    // 可恢复错误。子代理事件携带的 generation 与父轮次无关，因此不能用其
+    // status 或 generation 改写父轮次。
     fn event_kind(&self, event: &HookEvent, status: Option<&str>) -> HookEventKind {
-        if event.name == "stop" && status == Some("error") {
-            return HookEventKind::State(HookBehavior::Error);
+        let failed = status.is_some_and(|value| value.eq_ignore_ascii_case("error"));
+        if event.name == "stop" && failed {
+            return HookEventKind::TerminalState(HookBehavior::Error);
         }
         event.kind
+    }
+
+    fn release_settle_delay(&self) -> Duration {
+        RELEASE_SETTLE_DELAY
+    }
+
+    fn session_start_revives_tombstone(&self) -> bool {
+        false
     }
 
     // Cursor 的条目本身就是 `{ command }`，不像其他工具需要额外套一层

@@ -221,22 +221,35 @@ Hook 成功/失败统计，也不阻塞其他设备或状态投递。
 - 命令型 Hook 的轻量 relay 在 HTTP 之前解析工具写入 stdin 的原生 JSON，只保留
   `hook_event_name`、`session_id`、`turn_id`、`status`；同时兼容从原生输入读取
   Cursor 的 `conversation_id`/`generation_id` 与 WorkBuddy 的 camelCase
-  `sessionId`/`turnId`，但在线路上统一使用规范字段。
+  `sessionId`/`turnId`，但在线路上统一使用规范字段。候选上下文字段会去除首尾
+  空白并跳过空值，避免空的规范字段遮蔽后续有效别名。
   prompt、transcript、tool input/output 等无关或敏感大字段不会进入 listener。
   listener 正文上限为 4 KiB，并以 `deny_unknown_fields` 严格拒绝契约外字段；
   `X-AIMonitor-Hook-Type` 必须存在且必须与正文事件一致。
   事件到状态的归一化、重复事件消除、迟到完成事件抑制和会话释放全部由
-  `domain/monitor/hook_state_machine` 的状态机决定。事件先后与迟到判断不依赖时间窗口：状态机按
-  `session_id` 隔离任务、按 `turn_id` 拒绝旧轮次事件，再聚合为工具的唯一展示
-  状态，因此一个任务的 Stop/退出不会覆盖另一个仍在工作的任务。时间只用于
+  `domain/monitor/hook_state_machine` 的状态机决定。除 Cursor 无轮次 ID 的反向
+  End/Start 使用 250ms 交接消歧外，事件先后与迟到判断不依赖时间窗口：状态机按
+  `session_id` 隔离任务，每个会话保留当前轮次及最多 256 个已终止或被明确新
+  起点替换的 `turn_id`，据此拒绝旧轮次事件。活跃轮次期间抢先到达的不同 ID
+  进度只进入有界隔离区：普通进度不能据此取代当前轮次，明确 WorkStart 可立即
+  接管；当前轮次终止后隔离随之清除，同一候选再次到达时可按 Goal 续跑规则建立
+  隐式新轮次。状态机再聚合为工具的唯一展示状态，因此一个任务的
+  Stop/退出不会覆盖另一个仍在工作的任务。时间只用于
   有界回收：调用方注入单调时间，连续 30 分钟没有事件的会话或终止 tombstone
   会被批量清理；超时只回收内部记录，不释放设备槽位，最后的非空闲状态会回落
   到空闲展示，而已处于空闲的面板内容保持不变。每个工具同时最多跟踪 256 个会话，
   洪峰超过上限时优先淘汰最旧 tombstone 和非活跃会话。`SessionStart` 建立空闲展示，
   `UserPromptSubmit`
   等真实工作起点进入运行，`Stop`（包括用户中断后的轮次停止）回到空闲；
-  `SessionEnd` 清空会话内容并留下有时限的终止 tombstone，重算剩余会话后仅在
-  确实没有其他任务时释放展示位。Stop/End 后的 `PostToolUse`、`SubagentStop`、
+  `SessionEnd` 清空会话内容并留下有时限、保留轮次历史的终止 tombstone。支持
+  resume 的协议可由显式 `SessionStart` 覆盖墓碑；Cursor 会拒绝迟到的同 ID
+  `SessionStart`，但带未退休 generation 的明确 WorkStart 可建立新 epoch。同一
+  会话已有活跃轮次时，携带不同轮次 ID 的迟到 End 只退休 incoming ID，不结束
+  当前工作；无轮次 ID 的 End 若在明确 WorkStart 后 250ms 内反向到达也会忽略，
+  超过该交接期则仍按真实会话结束处理。重算剩余会话后仅在确实没有其他任务时
+  释放展示位。Cursor 的
+  `workspaceOpen` 只在尚无真实会话或墓碑时建立默认空闲占位，任一被接纳的真实
+  会话事件都会移除该占位。Stop/End 后的 `PostToolUse`、`SubagentStop`、
   `PostCompact` 不会重新激活状态，直到出现新的明确工作起点。桌面端晚于 AI
   会话启动时，真实工作起点、进度、询问、异常或停止事件可以建立隐式会话并立即
   更新展示；单独到达的完成类事件没有足够信息证明仍在运行，直接忽略且不留记录。
@@ -254,7 +267,11 @@ Hook 成功/失败统计，也不阻塞其他设备或状态投递。
   原生 handler/config 结构、stdout 约定和托管条目清理；公共生成、合并和状态机
   不得按工具硬编码事件字符串。Cursor 的 `conversation_id`/`generation_id` 在轻量
   relay 边界归一化为 session/turn 上下文；GitHub Copilot CLI 的 `sessionId` 归一化
-  为 session 上下文。`stop.status=error` 归一化为异常展示。
+  为 session 上下文。Cursor 的 `postToolUseFailure` 是当前 generation 内可恢复的
+  Error，只有 `stop.status=error` 会以 Error 终止 generation。Cursor 当前的
+  `subagentStart`/`subagentStop` 不提供可关联的父 generation：状态机只允许前者在
+  尚无已知父轮次时作为无作用域的冷启动工作信号，后者（包括 error）不改写父轮次
+  ID、活跃性或展示优先级。
   OpenCode 使用官方自动发现的全局插件文件订阅公开事件流，独立文件只允许覆盖
   带 AIMonitor 标识的内容；WorkBuddy 使用其内置 CodeBuddy Agent 引擎自 v2.48
   起独立的 `~/.workbuddy/settings.json`，不与 CodeBuddy CLI 配置混用；其 command
@@ -287,7 +304,11 @@ Hook 成功/失败统计，也不阻塞其他设备或状态投递。
   每个目标设备每次转换只转发一次，失败后不重试。Codex、Claude Code、Cursor、
   OpenCode、Qwen Code、Kimi Code、Qoder、Gemini CLI、GitHub Copilot CLI 在每个目标
   队列内使用 latest-wins；其他工具在每个目标队列内使用逐事件 FIFO，不覆盖任何
-  尚未发送的事件。
+  尚未发送的事件。Cursor 的 destructive Release 在目标 worker 内额外等待 250ms
+  的交接缓冲；同一设备、同一工具在此期间出现新的展示状态时，尚未发送的 Release
+  被 latest-wins 抑制，从而覆盖独立 Hook 进程造成的 End/Start 短暂乱序。同一
+  250ms 也供状态机消歧刚刚明确开启轮次后反向到达的无 ID End；已经开始发送的
+  请求仍不可撤回。
 - Rust 在启动后立即执行一次在线设备发现，之后按设置页以“分钟”为单位配置的
   间隔（默认一分钟）持续刷新在线设备快照；后台循环以 1 秒粒度醒来并重新读取当前
   间隔，因此在设置页修改间隔后无需重启即可立即生效。设备发现同时执行

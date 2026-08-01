@@ -3,6 +3,8 @@
 //! 公共流程只依赖 [`HookProtocol`]；事件名、配置 JSON 结构、命令输出约定和
 //! 托管条目布局由各工具的独立实现负责。
 
+use std::time::Duration;
+
 mod claude_code;
 mod code_buddy;
 mod codex;
@@ -35,11 +37,15 @@ pub(super) const MANAGED_HOOK_PREFIX: &str = "AIMonitor";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HookEventKind {
+    WorkspaceStart,
     SessionStart,
     WorkStart,
+    UnscopedWorkStart(HookBehavior),
+    UnscopedWorkCompletion,
     WorkProgress(HookBehavior),
     WorkCompletion(HookBehavior),
     Stop,
+    TerminalState(HookBehavior),
     State(HookBehavior),
     SessionEnd,
 }
@@ -48,10 +54,16 @@ impl HookEventKind {
     pub(super) const fn transition(self) -> HookTransition {
         match self {
             Self::SessionEnd => HookTransition::Release,
-            Self::SessionStart | Self::Stop => HookTransition::Display(HookBehavior::Idle),
-            Self::WorkStart => HookTransition::Display(HookBehavior::Running),
-            Self::WorkProgress(behavior)
+            Self::WorkspaceStart | Self::SessionStart | Self::Stop => {
+                HookTransition::Display(HookBehavior::Idle)
+            }
+            Self::WorkStart | Self::UnscopedWorkCompletion => {
+                HookTransition::Display(HookBehavior::Running)
+            }
+            Self::UnscopedWorkStart(behavior)
+            | Self::WorkProgress(behavior)
             | Self::WorkCompletion(behavior)
+            | Self::TerminalState(behavior)
             | Self::State(behavior) => HookTransition::Display(behavior),
         }
     }
@@ -138,6 +150,16 @@ pub(super) trait HookProtocol: Sync {
 
     fn event_kind(&self, event: &HookEvent, _status: Option<&str>) -> HookEventKind {
         event.kind
+    }
+
+    /// 生命周期交接缓冲；用于消歧无 ID End，也用于延后物理 Release。
+    fn release_settle_delay(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    /// 是否允许显式 `SessionStart` 覆盖同 ID 墓碑；新的 `WorkStart` 始终可建新 epoch。
+    fn session_start_revives_tombstone(&self) -> bool {
+        true
     }
 
     /// 默认返回 `Null`：走 `standalone_config` 独立文件路线的工具无需实现。
@@ -260,10 +282,7 @@ pub(super) fn hook_restart_required(tool: AiTool) -> bool {
     protocol(tool).changed_write_outcome().restart_required()
 }
 
-/// 判断配置内容中是否已经包含当前工具的 `AIMonitor` 管理标识。
-///
-/// 自动补写只用这条规则判断“已有”：一旦存在受管标识便保持文件原样；
-/// 显式手动写入仍会经过完整合并，以便用户主动更新 relay 路径或协议结构。
+/// 判断配置内容中是否已包含当前工具的 `AIMonitor` 管理标识。
 pub fn hook_config_has_managed_marker(content: &str, tool: AiTool) -> bool {
     contains_managed_marker(content, tool)
 }
@@ -275,7 +294,6 @@ pub fn tool_from_slug(slug: &str) -> Option<AiTool> {
         .find(|tool| protocol(*tool).slug() == slug)
 }
 
-// 返回该工具随主配置一同写入的辅助文件（如插件清单），未实现的工具返回空列表。
 pub fn generate_hook_auxiliary_configs(tool: AiTool) -> Vec<HookConfigPreview> {
     protocol(tool).auxiliary_configs()
 }
@@ -291,6 +309,14 @@ pub(super) fn event_definition(tool: AiTool, event: &str) -> Option<HookEvent> {
 pub(super) fn event_kind(tool: AiTool, event: &str, status: Option<&str>) -> Option<HookEventKind> {
     let protocol = protocol(tool);
     event_definition(tool, event).map(|definition| protocol.event_kind(&definition, status))
+}
+
+pub(crate) fn release_settle_delay(tool: AiTool) -> Duration {
+    protocol(tool).release_settle_delay()
+}
+
+pub(crate) fn session_start_revives_tombstone(tool: AiTool) -> bool {
+    protocol(tool).session_start_revives_tombstone()
 }
 
 #[cfg(test)]
@@ -346,8 +372,7 @@ pub(crate) fn forwards_every_event(tool: AiTool) -> bool {
     )
 }
 
-// 判断一条 hooks 配置条目是否携带该工具的 AIMonitor 管理标识，
-// 供 `remove_managed_entries` 默认实现筛选出可安全移除的条目。
+// 判断 hooks 配置条目是否携带该工具的 AIMonitor 管理标识。
 fn entry_is_managed<P: HookProtocol + ?Sized>(entry: &Value, protocol: &P) -> bool {
     ["command", "commandWindows"]
         .into_iter()
@@ -355,8 +380,7 @@ fn entry_is_managed<P: HookProtocol + ?Sized>(entry: &Value, protocol: &P) -> bo
         .any(|command| contains_command_marker(command, protocol.tool()))
 }
 
-// 生成写入配置命令中的 `--managed-by` 标识：relay 子进程与 `entry_is_managed`
-// 都据此判断一条 hooks 记录是否由本应用生成/管理。
+// 生成 relay 与配置清理共同识别的 `--managed-by` 标识。
 pub(crate) fn managed_hook_marker(tool: AiTool) -> String {
     format!("{MANAGED_HOOK_PREFIX}:tool={}", protocol(tool).slug())
 }
@@ -369,7 +393,6 @@ fn contains_command_marker(command: &str, tool: AiTool) -> bool {
     command_has_marker(command, &managed_hook_marker(tool))
 }
 
-// 按 POSIX shell 单引号规则转义一个参数，供拼接进生成的托管命令字符串。
 pub(super) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

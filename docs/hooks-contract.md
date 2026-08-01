@@ -85,8 +85,8 @@ application 层只在内容未变化时统一返回 `unchanged`。当前稳定�
 ```
 
 正文上限为 4 KiB，并拒绝未知字段。command relay 可从各工具当前原生输入中提取
-等价的会话/轮次字段，但 prompt、transcript、tool input/output 等内容不得进入
-listener。
+等价的会话/轮次字段；候选字段会 trim 并跳过空值，空的规范字段不能遮蔽有效
+别名。prompt、transcript、tool input/output 等内容不得进入 listener。
 
 ## 状态与投递
 
@@ -98,6 +98,20 @@ listener。
 - Codex Goal 模式在暂停、恢复或自动续跑后可能沿用 `session_id` 并切换
   `turn_id`，且不再产生 `UserPromptSubmit`。已停止会话收到不同轮次的进度、
   询问或异常事件时建立新的隐式轮次；同一已停止轮次的迟到事件继续抑制。
+- 状态机会为每个会话保留最多 256 个已终止或被明确新起点替换的轮次 ID；明确工作
+  起点切换轮次时，被替换轮次也进入该集合。活跃轮次期间出现的不同 ID 进度只被
+  有界隔离，不能仅凭不透明 ID 推断其新旧；明确 WorkStart 可立即接管，当前轮次
+  终止后隔离清除，同一候选再次到达时可按 Goal 续跑规则建立隐式新轮次。
+- `SessionEnd` 墓碑保留轮次历史。支持 resume 的协议可由显式 `SessionStart`
+  覆盖墓碑；Cursor 的迟到同 ID `SessionStart` 不能覆盖，但带未退休 generation
+  的明确 WorkStart 可以建立新 epoch。活跃会话收到携带不同轮次 ID 的 End 时只
+  退休 incoming ID，不结束当前轮次；无轮次 ID 的 End 若在明确 WorkStart 后
+  250ms 内反向到达也会忽略，超过交接期则正常结束会话。
+- Cursor 的 `workspaceOpen` 只在没有真实会话或墓碑时建立默认 Idle 占位；真实
+  会话事件会接管该占位。`postToolUseFailure` 映射为当前 generation 内可恢复
+  Error，`stop.status=error` 映射为终止轮次的 Error。`subagentStart` 只可在尚无
+  已知父轮次时作为无作用域冷启动信号；`subagentStop`（包括 error）不改写父
+  generation、活跃性或展示优先级。
 - 一次状态转换的候选目标必须同时满足：设备存在已保存路由、该工具存在 Profile、
   设备 ID 位于当前在线快照。
 - Qwen Code 使用 Claude-style 生命周期与权限事件，包含生命周期与授权信号。
@@ -116,6 +130,9 @@ listener。
   已记录但不在线、或排队期间离线的设备直接跳过，不使用历史地址尝试转发，也不
   计为网络失败。
 - 在线目标始终使用发现快照中的最新名称与地址。单台在线设备失败不阻止其他设备。
+- Cursor 的 Release 在设备目标 worker 内有 250ms 交接缓冲；期间同目标的新展示
+  状态按 latest-wins 取代尚未发送的 DELETE。该时长也用于上述无 ID End 的状态机
+  消歧，但不能撤回已经开始发送的 DELETE。
 
 ## 变更门禁
 

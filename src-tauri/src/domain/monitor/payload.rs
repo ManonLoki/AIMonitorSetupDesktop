@@ -94,12 +94,18 @@ fn decode_utf16(bytes: &[u8], decode_unit: fn([u8; 2]) -> u16) -> Result<String,
         .map_err(|error| format!("AI Hook 原始 JSON 不是有效 UTF-16：{error}"))
 }
 
-// 按候选字段名列表依次查找第一个存在的字符串值；不同工具对同一概念
-// （如 turn_id/turnId/generation_id）命名不一致，因此需要多个候选名。
+// 按候选字段名列表依次查找第一个非空白字符串值；不同工具对同一概念
+// （如 turn_id/turnId/generation_id）命名不一致，因此需要多个候选名。空白值不能
+// 遮蔽后续有效别名，返回值也在 relay 边界统一去除首尾空白。
 fn string_field(source: &Map<String, Value>, names: &[&str]) -> Option<String> {
-    names
-        .iter()
-        .find_map(|name| source.get(*name).and_then(Value::as_str).map(str::to_owned))
+    names.iter().find_map(|name| {
+        source
+            .get(*name)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 // 读取一个字段并转成字符串，兼容字符串/布尔/数字三种 JSON 标量类型
@@ -159,6 +165,23 @@ mod tests {
 
         assert_eq!(payload.session_id.as_deref(), Some("workbuddy-session-1"));
         assert_eq!(payload.turn_id.as_deref(), Some("workbuddy-turn-2"));
+    }
+
+    #[test]
+    fn blank_primary_context_fields_fall_back_to_trimmed_cursor_aliases() {
+        let native = serde_json::json!({
+            "hook_event_name": "stop",
+            "session_id": " \t ",
+            "conversation_id": " conversation-1 ",
+            "turn_id": "\n",
+            "generation_id": " generation-2 ",
+        });
+
+        let payload =
+            minimize_native_hook_payload(&serde_json::to_vec(&native).unwrap(), "stop").unwrap();
+
+        assert_eq!(payload.session_id.as_deref(), Some("conversation-1"));
+        assert_eq!(payload.turn_id.as_deref(), Some("generation-2"));
     }
 
     #[test]

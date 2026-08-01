@@ -2,19 +2,28 @@
 use std::{collections::HashMap, time::Duration};
 
 use super::device::{AiTool, HookBehavior};
-use super::hooks::{HookEventKind, event_kind, forwards_every_event};
-
-mod session;
-
-use session::{
-    HookPhase, HookSessionState, StoppedTurnDecision, session_eviction_priority,
-    stopped_turn_decision, turn_is_stale,
+use super::hooks::{
+    HookEventKind, event_kind, forwards_every_event, release_settle_delay,
+    session_start_revives_tombstone,
 };
+
+mod lifecycle;
+mod session;
+mod turn;
+
+use lifecycle::DEFAULT_SESSION_KEY;
+use session::{HookPhase, HookSessionState, session_eviction_priority};
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_cursor_reentry;
+#[cfg(test)]
+mod tests_cursor_timing;
+#[cfg(test)]
 mod tests_lifecycle;
+#[cfg(test)]
+mod tests_session_resume;
 
 // 一个 Hook 事件触发后，展示屏应执行的动作：切换到某个行为展示，或者释放（退出）该展示位。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,192 +101,45 @@ impl HookStateMachine {
         let Some(event_kind) = event_kind(tool, event, status) else {
             return HookEventDecision::Unsupported;
         };
-        let transition = event_kind.transition();
         if forwards_every_event(tool) {
-            return HookEventDecision::Forward(transition);
+            return HookEventDecision::Forward(event_kind.transition());
         }
         let previous = self.aggregate_phase();
-        let session_key = session_id.unwrap_or("__default__").to_owned();
+
+        if event_kind == HookEventKind::WorkspaceStart {
+            return self.apply_workspace_start(observed_at, previous);
+        }
+
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_KEY).to_owned();
 
         if event_kind == HookEventKind::SessionEnd {
-            return self.apply_session_end(session_key, observed_at, previous);
+            return self.apply_session_end(
+                session_key,
+                turn_id,
+                release_settle_delay(tool),
+                observed_at,
+                previous,
+            );
         }
 
         if event_kind == HookEventKind::SessionStart {
             return self.apply_session_start(
                 session_key,
                 session_id.is_some(),
+                session_start_revives_tombstone(tool),
                 observed_at,
                 previous,
             );
         }
 
-        // 结束墓碑只允许显式 SessionStart 覆盖；任何迟到事件（包括重复 Stop
-        // 和新的工作事件）均不刷新墓碑时间，也不能隐式复活会话。
-        if self
-            .sessions
-            .get(&session_key)
-            .is_some_and(|session| session.ended)
-        {
-            return HookEventDecision::Ignore;
-        }
-
-        // 完成类事件不是可靠的工作起点。Monitor 若中途启动、没有见过对应
-        // 会话或工作开始，则直接忽略且不留下幽灵记录。
-        if matches!(event_kind, HookEventKind::WorkCompletion(_))
-            && !self.sessions.contains_key(&session_key)
-        {
-            return HookEventDecision::Ignore;
-        }
-
-        self.ensure_capacity_for(&session_key);
-        let session = self
-            .sessions
-            .entry(session_key)
-            .or_insert_with(|| HookSessionState {
-                last_seen_at: observed_at,
-                ..HookSessionState::default()
-            });
-
-        if event_kind == HookEventKind::WorkStart {
-            session.turn_active = true;
-            session.turn_id = turn_id.map(str::to_owned);
-            session.phase = HookPhase::Running;
-            session.last_seen_at = observed_at;
-            return phase_decision(previous, self.aggregate_phase());
-        }
-
-        if event_kind == HookEventKind::Stop {
-            if turn_is_stale(session, turn_id) {
-                return HookEventDecision::Ignore;
-            }
-            session.turn_active = false;
-            session.phase = HookPhase::Idle;
-            session.last_seen_at = observed_at;
-            return phase_decision(previous, self.aggregate_phase());
-        }
-
-        if matches!(event_kind, HookEventKind::WorkCompletion(_))
-            && (!session.turn_active || turn_is_stale(session, turn_id))
-        {
-            return HookEventDecision::Ignore;
-        }
-
-        // Goal 模式暂停/恢复或自动续跑时，Codex 会在同一会话内创建新 turn，
-        // 但不会再次产生 UserPromptSubmit。已停止会话收到不同 turn 的明确进度、
-        // 询问或异常时，应把它视为新的隐式工作起点；同一 turn 的迟到事件仍需
-        // 抑制，避免 Stop 后被旧 PreToolUse 等进度事件重新激活。
-        let starts_new_implicit_turn = match stopped_turn_decision(session, event_kind, turn_id) {
-            StoppedTurnDecision::SuppressLateEvent => return HookEventDecision::Ignore,
-            StoppedTurnDecision::StartNewTurn => true,
-            StoppedTurnDecision::NotApplicable => false,
-        };
-
-        if turn_is_stale(session, turn_id) && !starts_new_implicit_turn {
-            return HookEventDecision::Ignore;
-        }
-        if starts_new_implicit_turn {
-            session.turn_id = turn_id.map(str::to_owned);
-        }
-        let next = match transition {
-            HookTransition::Release => HookPhase::Released,
-            HookTransition::Display(HookBehavior::Idle) => HookPhase::Idle,
-            HookTransition::Display(HookBehavior::Running) => {
-                session.turn_active = true;
-                if let Some(turn_id) = turn_id {
-                    session.turn_id = Some(turn_id.to_owned());
-                }
-                HookPhase::Running
-            }
-            HookTransition::Display(HookBehavior::Asking) => {
-                session.turn_active = true;
-                if let Some(turn_id) = turn_id {
-                    session.turn_id = Some(turn_id.to_owned());
-                }
-                HookPhase::Asking
-            }
-            HookTransition::Display(HookBehavior::Error) => {
-                session.turn_active = false;
-                HookPhase::Error
-            }
-        };
-        session.phase = next;
-        session.last_seen_at = observed_at;
-        phase_decision(previous, self.aggregate_phase())
-    }
-
-    // 把会话标记为已结束的空墓碑（保留记录但清空活跃状态），拒绝后续迟到事件
-    // 隐式复活它；重复的 SessionEnd 直接忽略，不重复触发释放动作。
-    fn apply_session_end(
-        &mut self,
-        session_key: String,
-        observed_at: Duration,
-        previous: HookPhase,
-    ) -> HookEventDecision {
-        if self
-            .sessions
-            .get(&session_key)
-            .is_some_and(|session| session.ended)
-        {
-            return HookEventDecision::Ignore;
-        }
-
-        self.ensure_capacity_for(&session_key);
-        self.sessions.insert(
+        self.apply_turn_event(
             session_key,
-            HookSessionState {
-                phase: HookPhase::Released,
-                turn_active: false,
-                turn_id: None,
-                ended: true,
-                last_seen_at: observed_at,
-            },
-        );
-        let next = self.aggregate_phase();
-        // 即使 Monitor 在会话开始后才启动，也要让首次结束事件向目标设备
-        // 幂等释放一次。墓碑保证同一结束事件重放时不会形成请求风暴。
-        if next == HookPhase::Released {
-            return HookEventDecision::Forward(HookTransition::Release);
-        }
-        phase_decision(previous, next)
-    }
-
-    // 建立/续存一个会话记录：已存在且未结束的同一会话只续期存活时间，
-    // 不会把正在展示的非空闲状态错误地拉回空闲。
-    fn apply_session_start(
-        &mut self,
-        session_key: String,
-        has_session_id: bool,
-        observed_at: Duration,
-        previous: HookPhase,
-    ) -> HookEventDecision {
-        // Cursor 的 workspaceOpen 不带 conversation_id，先以默认占位展示空闲；
-        // 真正的 sessionStart 到来后必须替换该占位，否则 SessionEnd 后会残留
-        // 一个永远无法释放的“工作区会话”。
-        if has_session_id {
-            self.sessions.remove("__default__");
-        }
-        // 同一会话的重复或迟到 SessionStart 只算作存活信号，不能把已经
-        // Running/Asking/Error 的状态倒退回 Idle；真正结束后的 tombstone
-        // 仍允许由显式 SessionStart 覆盖，支持会话 ID 被上游重新使用。
-        if let Some(existing) = self.sessions.get_mut(&session_key)
-            && !existing.ended
-        {
-            existing.last_seen_at = observed_at;
-            return phase_decision(previous, self.aggregate_phase());
-        }
-        self.ensure_capacity_for(&session_key);
-        self.sessions.insert(
-            session_key,
-            HookSessionState {
-                phase: HookPhase::Idle,
-                turn_active: false,
-                turn_id: None,
-                ended: false,
-                last_seen_at: observed_at,
-            },
-        );
-        phase_decision(previous, self.aggregate_phase())
+            session_id.is_some(),
+            event_kind,
+            turn_id,
+            observed_at,
+            previous,
+        )
     }
 
     /// 一次性清理所有到期记录，并只根据清理前后的最终聚合状态返回一个决定。

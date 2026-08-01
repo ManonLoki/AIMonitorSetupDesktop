@@ -37,7 +37,7 @@ React is limited to presentation, interaction, and typed Tauri command calls.
 ## Screenshots
 
 The following screenshots were captured from AIMonitor v2.2.4 on macOS; the
-depicted interface remains representative of v2.2.5.
+depicted interface remains representative of v2.2.6.
 
 ### Startup and device discovery
 

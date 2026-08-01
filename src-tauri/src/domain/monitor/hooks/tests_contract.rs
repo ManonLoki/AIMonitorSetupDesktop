@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use super::{
     ai_tool_descriptors, hook_changed_write_outcome, hook_config_write_result,
-    hook_requires_review, hook_restart_required, protocol,
+    hook_requires_review, hook_restart_required, protocol, release_settle_delay,
+    session_start_revives_tombstone,
 };
 use crate::domain::monitor::{
     AiTool, DEFAULT_DISCOVERY_INTERVAL_MINUTES, DEFAULT_PROFILE_SLOT, HookBehavior,
@@ -157,4 +160,27 @@ fn monitor_capabilities_serialize_ranges_and_behavior_order_from_domain_constant
         serialized["hookBehaviors"],
         serde_json::json!(["idle", "running", "asking", "error"])
     );
+}
+
+#[test]
+fn cursor_alone_declares_a_release_handoff_grace() {
+    assert_eq!(
+        release_settle_delay(AiTool::Cursor),
+        Duration::from_millis(250)
+    );
+    for tool in AiTool::ALL {
+        if tool != AiTool::Cursor {
+            assert_eq!(release_settle_delay(tool), Duration::ZERO, "{tool:?}");
+        }
+    }
+}
+
+#[test]
+fn cursor_alone_rejects_a_session_start_over_an_end_tombstone() {
+    assert!(!session_start_revives_tombstone(AiTool::Cursor));
+    for tool in AiTool::ALL {
+        if tool != AiTool::Cursor {
+            assert!(session_start_revives_tombstone(tool), "{tool:?}");
+        }
+    }
 }

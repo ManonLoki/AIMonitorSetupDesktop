@@ -36,7 +36,7 @@ fn orphan_completion_is_ignored_without_leaving_a_ghost_session() {
 }
 
 #[test]
-fn ended_tombstone_rejects_late_events_until_explicit_restart() {
+fn ended_tombstone_rejects_late_events_but_explicit_session_start_can_resume() {
     let mut machine = HookStateMachine::default();
     machine.apply_event_with_status_at(
         AiTool::Codex,
@@ -92,6 +92,10 @@ fn ended_tombstone_rejects_late_events_until_explicit_restart() {
         HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
     );
     assert!(!machine.sessions["s1"].ended);
+    assert_eq!(
+        machine.sessions["s1"].last_seen_at,
+        Duration::from_secs(101)
+    );
 }
 
 #[test]

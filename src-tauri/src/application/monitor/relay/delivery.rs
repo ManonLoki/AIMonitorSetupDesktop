@@ -8,6 +8,7 @@ use std::{
         mpsc,
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use super::{
@@ -22,6 +23,7 @@ use crate::{
     application::monitor::{HOOK_RELAY_WAKE_QUEUE_CAPACITY, HookRelayStatus},
     domain::monitor::{
         AiTool, DiscoveredMonitorDevice, HookTransition, SavedMonitorData, forwards_every_event,
+        release_settle_delay,
     },
 };
 
@@ -236,6 +238,7 @@ impl DeliveryScheduler {
             Arc::clone(&self.pending),
             Arc::clone(&self.data),
             Arc::clone(&self.online_devices),
+            release_settle_delay(key.tool),
         );
         self.wake_senders.insert(key.clone(), sender);
     }
@@ -262,12 +265,14 @@ impl DeliveryScheduler {
         if let Some(displaced) = displaced {
             displaced.tracker.suppressed();
         }
-        if should_wake
-            && self
-                .wake_senders
-                .get(key)
-                .is_none_or(|sender| sender.send(()).is_err())
-        {
+        let wake_failed = should_wake
+            && self.wake_senders.get(key).is_none_or(|sender| {
+                matches!(
+                    sender.try_send(()),
+                    Err(mpsc::TrySendError::Disconnected(()))
+                )
+            });
+        if wake_failed {
             let dropped = self
                 .pending
                 .lock()
@@ -290,21 +295,54 @@ fn spawn_target_worker(
     pending: PendingTargetRelays,
     data: Arc<RwLock<SavedMonitorData>>,
     online_devices: Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
+    settle_delay: Duration,
 ) {
     thread::spawn(move || {
-        while receiver.recv().is_ok() {
+        'worker: while receiver.recv().is_ok() {
             loop {
-                let relay = pending.lock().ok().and_then(|mut pending| {
-                    let queue = pending.get_mut(&key)?;
-                    let relay = queue.pop_front();
-                    if queue.is_empty() {
-                        pending.remove(&key);
+                let relay = match pending.lock() {
+                    Ok(mut pending) => {
+                        let Some(queue) = pending.get_mut(&key) else {
+                            break;
+                        };
+                        let relay = queue.pop_front();
+                        if queue.is_empty() {
+                            pending.remove(&key);
+                        }
+                        relay
                     }
-                    relay
-                });
+                    Err(poisoned) => {
+                        // 不能把锁损坏伪装成空队列：否则已经入队的 tracker
+                        // 永远不会完成，工作台的 pending 计数也会永久悬挂。
+                        // 恢复 guard 只为失败剩余任务并退出；后续调度走 Disconnected。
+                        let dropped = {
+                            let mut pending = poisoned.into_inner();
+                            pending.remove(&key).unwrap_or_default()
+                        };
+                        for dropped in dropped {
+                            dropped.tracker.failed_before_delivery(
+                                "Hook 目标队列不可用，目标投递 worker 已停止".to_owned(),
+                            );
+                        }
+                        break 'worker;
+                    }
+                };
                 let Some(relay) = relay else {
                     break;
                 };
+                if relay.transition == HookTransition::Release {
+                    match release_has_pending_successor(&receiver, &pending, &key, settle_delay) {
+                        Ok(true) => {
+                            relay.tracker.suppressed();
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            relay.tracker.failed_before_delivery(error);
+                            continue;
+                        }
+                    }
+                }
                 let result = forward_hook_to_target(
                     &client,
                     &data,
@@ -319,5 +357,44 @@ fn spawn_target_worker(
     });
 }
 
+// Cursor 等声明了交接缓冲的协议，在真正发送 destructive DELETE 前等待同一
+// “设备 + 工具”的继任展示。唤醒令牌可能是 worker 忙于上一请求时留下的旧令牌，
+// 因此必须以 pending 队列为准，并持续排空旧令牌直到 deadline。
+fn release_has_pending_successor(
+    receiver: &mpsc::Receiver<()>,
+    pending: &PendingTargetRelays,
+    key: &DeliveryKey,
+    settle_delay: Duration,
+) -> Result<bool, String> {
+    if settle_delay.is_zero() {
+        return Ok(false);
+    }
+    let deadline = Instant::now() + settle_delay;
+    loop {
+        if pending_has_successor(pending, key)? {
+            return Ok(true);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                return pending_has_successor(pending, key);
+            }
+        }
+    }
+}
+
+fn pending_has_successor(pending: &PendingTargetRelays, key: &DeliveryKey) -> Result<bool, String> {
+    let pending = pending
+        .lock()
+        .map_err(|_| "Hook 目标队列不可用，已拒绝发送释放请求".to_owned())?;
+    Ok(pending.get(key).is_some_and(|queue| !queue.is_empty()))
+}
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_release_settle;

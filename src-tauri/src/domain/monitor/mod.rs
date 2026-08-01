@@ -33,7 +33,9 @@ pub use hooks::{
     generate_wsl_hook_config, hook_config_filename, hook_config_has_managed_marker,
     hook_supports_wsl, merge_hook_config, tool_from_slug,
 };
-pub(crate) use hooks::{forwards_every_event, hook_config_write_result, managed_hook_marker};
+pub(crate) use hooks::{
+    forwards_every_event, hook_config_write_result, managed_hook_marker, release_settle_delay,
+};
 pub use image_policy::ImageFormat;
 pub(crate) use image_policy::{is_supported_upload_image_mime, upload_image_format};
 pub use image_processing::process_image_upload;
