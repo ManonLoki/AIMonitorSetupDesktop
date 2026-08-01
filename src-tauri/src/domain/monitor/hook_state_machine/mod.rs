@@ -167,6 +167,14 @@ impl HookStateMachine {
         }
     }
 
+    /// 返回当前聚合展示状态，供新上线或地址发生变化的设备补齐它离线期间错过的
+    /// 状态。Released 不需要重放：新设备没有本控制端创建的槽位，发送 DELETE
+    /// 既无意义，也可能错误清理刚建立的继任展示。
+    pub(crate) fn current_display_transition(&self) -> Option<HookTransition> {
+        let phase = self.aggregate_phase();
+        (phase != HookPhase::Released).then(|| phase_transition(phase))
+    }
+
     /// 为新会话腾出一个位置：优先淘汰最旧墓碑，其次最旧非活跃会话，
     /// 最后才淘汰最旧活跃会话。相同时间以会话键排序，保证行为可复现。
     fn ensure_capacity_for(&mut self, session_key: &str) {
@@ -221,11 +229,15 @@ fn phase_decision(previous: HookPhase, next: HookPhase) -> HookEventDecision {
     if previous == next {
         return HookEventDecision::Ignore;
     }
-    HookEventDecision::Forward(match next {
+    HookEventDecision::Forward(phase_transition(next))
+}
+
+fn phase_transition(phase: HookPhase) -> HookTransition {
+    match phase {
         HookPhase::Released => HookTransition::Release,
         HookPhase::Idle => HookTransition::Display(HookBehavior::Idle),
         HookPhase::Running => HookTransition::Display(HookBehavior::Running),
         HookPhase::Asking => HookTransition::Display(HookBehavior::Asking),
         HookPhase::Error => HookTransition::Display(HookBehavior::Error),
-    })
+    }
 }

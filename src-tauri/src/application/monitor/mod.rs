@@ -10,7 +10,7 @@ use std::{
 
 use reqwest::Client;
 use serde::Serialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::domain::monitor::{
     AiTool, DEFAULT_HOOK_RELAY_PORT, DiscoveredMonitorDevice, HookBehavior, HookConfigDirectories,
@@ -149,6 +149,9 @@ pub struct MonitorService {
     device_snapshot_state: Arc<Mutex<DeviceSnapshotState>>,
     // Hook 配置文件写入互斥锁，避免并发写入导致文件损坏。
     hook_config_write_lock: Arc<Mutex<()>>,
+    // 在线设备快照修订通知。设备事实仍只保存在 online_devices；watch 只唤醒
+    // Hook worker，让它为新上线/重连目标补齐离线期间错过的聚合展示。
+    hook_device_snapshot_revision: watch::Sender<u64>,
     // Hook 中继监听/转发状态（供前端查询展示）。
     relay_status: Arc<RwLock<HookRelayStatus>>,
 }

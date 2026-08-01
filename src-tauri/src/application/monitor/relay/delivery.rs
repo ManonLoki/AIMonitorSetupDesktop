@@ -8,7 +8,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use super::{
@@ -26,6 +26,10 @@ use crate::{
         release_settle_delay,
     },
 };
+
+mod release_settle;
+
+use release_settle::release_has_pending_successor;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct DeliveryKey {
@@ -166,33 +170,19 @@ impl DeliveryScheduler {
     }
 
     pub(super) fn enqueue(&mut self, relay: &PendingHookRelay) {
-        let target_ids =
+        self.enqueue_inner(relay, None);
+    }
+
+    /// 只向本轮新上线、重连或地址变化的设备补发当前聚合展示，原本在线的目标
+    /// 不重复接收。显式目标仍会与最新在线快照和 Profile 配置求交集。
+    pub(super) fn enqueue_to_devices(&mut self, relay: &PendingHookRelay, device_ids: &[String]) {
+        self.enqueue_inner(relay, Some(device_ids));
+    }
+
+    fn enqueue_inner(&mut self, relay: &PendingHookRelay, device_ids: Option<&[String]>) {
+        let (configured_count, mut target_ids) =
             match configured_online_target_ids(&self.data, &self.online_devices, relay.tool) {
-                Ok((_, target_ids)) if !target_ids.is_empty() => target_ids,
-                Ok((0, _)) => {
-                    record_hook_results_with_accounting(
-                        &self.status,
-                        relay.tool,
-                        &relay.hook_type,
-                        None,
-                        0,
-                        &["尚未配置该 AI 的转发位置".to_owned()],
-                        relay.counts_as_hook,
-                    );
-                    return;
-                }
-                Ok((_, _)) => {
-                    record_hook_results_with_accounting(
-                        &self.status,
-                        relay.tool,
-                        &relay.hook_type,
-                        Some(relay.transition),
-                        0,
-                        &[],
-                        relay.counts_as_hook,
-                    );
-                    return;
-                }
+                Ok(targets) => targets,
                 Err(error) => {
                     if relay.counts_as_hook {
                         record_hook_results(
@@ -209,6 +199,36 @@ impl DeliveryScheduler {
                     return;
                 }
             };
+        if let Some(device_ids) = device_ids {
+            target_ids.retain(|device_id| device_ids.contains(device_id));
+            if target_ids.is_empty() {
+                return;
+            }
+        }
+        if target_ids.is_empty() {
+            if configured_count == 0 {
+                record_hook_results_with_accounting(
+                    &self.status,
+                    relay.tool,
+                    &relay.hook_type,
+                    None,
+                    0,
+                    &["尚未配置该 AI 的转发位置".to_owned()],
+                    relay.counts_as_hook,
+                );
+            } else {
+                record_hook_results_with_accounting(
+                    &self.status,
+                    relay.tool,
+                    &relay.hook_type,
+                    Some(relay.transition),
+                    0,
+                    &[],
+                    relay.counts_as_hook,
+                );
+            }
+            return;
+        }
         let tracker = DeliveryTracker::new(Arc::clone(&self.status), relay, target_ids.len());
         for device_id in target_ids {
             let key = DeliveryKey {
@@ -357,44 +377,9 @@ fn spawn_target_worker(
     });
 }
 
-// Cursor 等声明了交接缓冲的协议，在真正发送 destructive DELETE 前等待同一
-// “设备 + 工具”的继任展示。唤醒令牌可能是 worker 忙于上一请求时留下的旧令牌，
-// 因此必须以 pending 队列为准，并持续排空旧令牌直到 deadline。
-fn release_has_pending_successor(
-    receiver: &mpsc::Receiver<()>,
-    pending: &PendingTargetRelays,
-    key: &DeliveryKey,
-    settle_delay: Duration,
-) -> Result<bool, String> {
-    if settle_delay.is_zero() {
-        return Ok(false);
-    }
-    let deadline = Instant::now() + settle_delay;
-    loop {
-        if pending_has_successor(pending, key)? {
-            return Ok(true);
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Ok(false);
-        }
-        match receiver.recv_timeout(remaining) {
-            Ok(()) => {}
-            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
-                return pending_has_successor(pending, key);
-            }
-        }
-    }
-}
-
-fn pending_has_successor(pending: &PendingTargetRelays, key: &DeliveryKey) -> Result<bool, String> {
-    let pending = pending
-        .lock()
-        .map_err(|_| "Hook 目标队列不可用，已拒绝发送释放请求".to_owned())?;
-    Ok(pending.get(key).is_some_and(|queue| !queue.is_empty()))
-}
-
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_release_settle;
+#[cfg(test)]
+mod tests_replay;

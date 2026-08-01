@@ -134,6 +134,11 @@ worker 已停止时立即返回 `503 Service Unavailable`、回滚待处理计�
   已记录但不在线、或排队期间离线的设备直接跳过，不使用历史地址尝试转发，也不
   计为网络失败。
 - 在线目标始终使用发现快照中的最新名称与地址。单台在线设备失败不阻止其他设备。
+- 设备快照 revision 变化时，状态机 worker 必须比较设备 ID、基地址和 API 路径，
+  仅向新上线、重新上线或地址变化且有对应 Profile 的设备补发当前聚合 Display，
+  内部 Hook 类型固定为 `DeviceOnlineReplay`。不向未变化的在线设备重复投递，不补发
+  Release，也不补发逐事件直通工具。该内部补偿不增加 received、pending 或
+  suppressed；实际投递成功/失败仍进入 forwarded/failed 与最近事件/错误统计。
 - Cursor 的 Release 在设备目标 worker 内有 250ms 交接缓冲；期间同目标的新展示
   状态按 latest-wins 取代尚未发送的 DELETE。该时长也用于上述无 ID End 的状态机
   消歧，但不能撤回已经开始发送的 DELETE。

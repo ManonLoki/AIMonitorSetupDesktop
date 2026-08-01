@@ -55,7 +55,7 @@ impl MonitorService {
         let devices_changed = self.replace_online_devices_locked(&devices)?;
         let changed = selection_changed || devices_changed;
         if changed {
-            state.revision = state.revision.saturating_add(1);
+            self.advance_device_snapshot_revision_locked(&mut state);
         }
         let snapshot = MonitorDeviceSnapshot::from_parts(state.revision, self.settings()?, devices);
         Ok((snapshot, changed))
@@ -101,7 +101,7 @@ impl MonitorService {
         let mut state = self.lock_device_snapshot_transaction()?;
         let (settings, changed) = self.select_device_locked(device)?;
         if changed {
-            state.revision = state.revision.saturating_add(1);
+            self.advance_device_snapshot_revision_locked(&mut state);
         }
         Ok(settings)
     }
@@ -126,7 +126,7 @@ impl MonitorService {
             .ok_or_else(|| "目标 AIMonitor 设备已离线，请刷新设备列表".to_owned())?;
         let (settings, changed) = self.select_device_locked(&online_device)?;
         if changed {
-            state.revision = state.revision.saturating_add(1);
+            self.advance_device_snapshot_revision_locked(&mut state);
         }
         Ok(MonitorDeviceSnapshot::from_parts(
             state.revision,
@@ -149,6 +149,12 @@ impl MonitorService {
             self.settings()?,
             devices,
         ))
+    }
+
+    fn advance_device_snapshot_revision_locked(&self, state: &mut DeviceSnapshotState) {
+        state.revision = state.revision.saturating_add(1);
+        self.hook_device_snapshot_revision
+            .send_replace(state.revision);
     }
 
     /// 调用方必须已持有设备快照事务锁。设备选择和已保存路由都未变时

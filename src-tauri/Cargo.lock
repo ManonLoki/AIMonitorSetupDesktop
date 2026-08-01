@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-monitor-setup"
-version = "2.2.6"
+version = "2.2.7"
 dependencies = [
  "axum",
  "base64 0.22.1",

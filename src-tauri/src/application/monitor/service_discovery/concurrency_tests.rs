@@ -111,6 +111,33 @@ fn manual_selection_rejects_offline_devices_and_uses_the_online_route() {
 }
 
 #[test]
+fn manual_selection_advances_snapshot_revision_and_notifies_hook_replay_watchers() {
+    let (service, root) = loaded_service("selection-replay-watch");
+    let mut revisions = service.hook_device_snapshot_revision.subscribe();
+    assert_eq!(*revisions.borrow_and_update(), 0);
+
+    service
+        .select_device(&device("screen-1", "Desk", 10))
+        .unwrap();
+    assert!(revisions.has_changed().unwrap());
+    assert_eq!(*revisions.borrow_and_update(), 1);
+
+    *service.online_devices.write().unwrap() = vec![
+        device("screen-1", "Desk", 10),
+        device("screen-2", "Studio", 20),
+    ];
+    let snapshot = service
+        .select_device_snapshot(&device("screen-2", "Forged", 99))
+        .unwrap();
+    assert_eq!(snapshot.revision, 2);
+    assert!(revisions.has_changed().unwrap());
+    assert_eq!(*revisions.borrow_and_update(), 2);
+
+    drop(service);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn concurrent_refresh_commit_and_manual_selection_are_linearized() {
     let (service, root) = loaded_service("snapshot-linearization");
     let desk = device("screen-1", "Desk", 10);

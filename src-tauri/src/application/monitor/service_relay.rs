@@ -19,6 +19,7 @@ impl MonitorService {
         let data = Arc::clone(&self.data);
         let online_devices = Arc::clone(&self.online_devices);
         let status = Arc::clone(&self.relay_status);
+        let device_snapshot_changes = self.hook_device_snapshot_revision.subscribe();
 
         // 构造用于向设备转发请求的阻塞式 HTTP 客户端。
         let client = match build_hook_forward_client() {
@@ -35,6 +36,7 @@ impl MonitorService {
         spawn_hook_worker(
             &client,
             receiver,
+            device_snapshot_changes,
             &data,
             &online_devices,
             Arc::clone(&status),

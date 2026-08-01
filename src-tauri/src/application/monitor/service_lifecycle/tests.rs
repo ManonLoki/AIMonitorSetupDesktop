@@ -102,6 +102,7 @@ fn profile_save_does_not_write_hooks_when_data_persistence_fails() {
         discovery_missed_scans: Arc::new(Mutex::new(HashMap::new())),
         device_snapshot_state: Arc::new(Mutex::new(DeviceSnapshotState::default())),
         hook_config_write_lock: Arc::new(Mutex::new(())),
+        hook_device_snapshot_revision: tokio::sync::watch::channel(0).0,
         relay_status: Arc::new(RwLock::new(HookRelayStatus::default())),
     };
 

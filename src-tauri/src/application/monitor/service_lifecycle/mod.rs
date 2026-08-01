@@ -56,6 +56,7 @@ impl MonitorService {
             // 只在首次生成时写回，避免每次启动都重新生成/持久化同一个稳定身份。
             persist_to(&data_path, &data)?;
         }
+        let (hook_device_snapshot_revision, _) = tokio::sync::watch::channel(0);
         Ok(Self {
             client: build_monitor_client()?,
             data_path,
@@ -65,6 +66,7 @@ impl MonitorService {
             discovery_missed_scans: Arc::new(Mutex::new(HashMap::new())),
             device_snapshot_state: Arc::new(Mutex::new(DeviceSnapshotState::default())),
             hook_config_write_lock: Arc::new(Mutex::new(())),
+            hook_device_snapshot_revision,
             // 中继状态初始值：尚未开始监听，绑定地址/端口先填好，其余字段用 Default。
             relay_status: Arc::new(RwLock::new(HookRelayStatus {
                 bind_address: HOOK_BIND_ADDRESS.to_owned(),

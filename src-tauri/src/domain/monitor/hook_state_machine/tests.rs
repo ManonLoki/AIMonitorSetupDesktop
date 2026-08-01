@@ -333,3 +333,34 @@ fn codex_goal_mode_resumes_with_a_new_turn_without_another_user_prompt() {
         HookEventDecision::Forward(HookTransition::Display(HookBehavior::Idle))
     );
 }
+
+#[test]
+fn current_display_transition_exposes_state_without_replaying_release() {
+    let mut machine = HookStateMachine::default();
+    assert_eq!(machine.current_display_transition(), None);
+
+    assert_eq!(
+        machine.apply_event(
+            AiTool::Codex,
+            "UserPromptSubmit",
+            Some("replay-session"),
+            Some("turn-1"),
+        ),
+        HookEventDecision::Forward(HookTransition::Display(HookBehavior::Running))
+    );
+    assert_eq!(
+        machine.current_display_transition(),
+        Some(HookTransition::Display(HookBehavior::Running))
+    );
+
+    assert_eq!(
+        machine.apply_event(
+            AiTool::Codex,
+            "SessionEnd",
+            Some("replay-session"),
+            Some("turn-1"),
+        ),
+        HookEventDecision::Forward(HookTransition::Release)
+    );
+    assert_eq!(machine.current_display_transition(), None);
+}

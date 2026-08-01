@@ -29,7 +29,7 @@ Qoder、Gemini CLI 和 GitHub Copilot CLI 的事件后转发到已配置设备�
 
 ## 实机界面
 
-以下截图来自 macOS 上运行的 AIMonitor v2.2.4，所展示的界面仍适用于 v2.2.6。
+以下截图来自 macOS 上运行的 AIMonitor v2.2.4，所展示的界面仍适用于 v2.2.7。
 
 ### 启动与设备扫描
 
