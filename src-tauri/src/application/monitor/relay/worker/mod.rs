@@ -5,10 +5,7 @@ use std::{
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
-use tokio::{
-    sync::{mpsc, watch},
-    time::{MissedTickBehavior, interval_at},
-};
+use tokio::sync::{mpsc, watch};
 
 use super::{
     delivery::DeliveryScheduler,
@@ -33,6 +30,11 @@ mod tests;
 const DEVICE_ONLINE_REPLAY_HOOK_TYPE: &str = "DeviceOnlineReplay";
 
 type OnlineDeviceRoutes = HashMap<String, (String, String)>;
+
+enum HookWorkerWake {
+    Event(Option<IncomingHookEvent>),
+    DeviceSnapshot(Result<(), watch::error::RecvError>),
+}
 
 pub(super) struct PendingHookRelay {
     pub(super) tool: AiTool,
@@ -66,20 +68,29 @@ pub(crate) fn spawn_hook_worker(
                 record_relay_failure(&status, error);
                 OnlineDeviceRoutes::new()
             });
-        let first_sweep = tokio::time::Instant::now() + HOOK_SESSION_SWEEP_INTERVAL;
-        let mut sweep = interval_at(first_sweep, HOOK_SESSION_SWEEP_INTERVAL);
-        // 若 runtime 曾被暂停，不在恢复时连续补跑多个无意义清扫周期。
-        sweep.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
-            tokio::select! {
-                event = receiver.recv() => {
-                    let Some(event) = event else {
-                        break;
-                    };
+            let wake = if device_snapshot_channel_open {
+                tokio::time::timeout(HOOK_SESSION_SWEEP_INTERVAL, async {
+                    tokio::select! {
+                        event = receiver.recv() => HookWorkerWake::Event(event),
+                        changed = device_snapshot_changes.changed() => {
+                            HookWorkerWake::DeviceSnapshot(changed)
+                        }
+                    }
+                })
+                .await
+            } else {
+                tokio::time::timeout(HOOK_SESSION_SWEEP_INTERVAL, async {
+                    HookWorkerWake::Event(receiver.recv().await)
+                })
+                .await
+            };
+            match wake {
+                Ok(HookWorkerWake::Event(Some(event))) => {
                     let observed_at = clock_started_at.elapsed();
-                    // 持续有流量时仍在事件边界检查清扫间隔，避免 ready ingress
-                    // 在极端洪峰下长期压过 timer 分支。
+                    // 持续有流量时超时分支不会触发，所以仍需按固定粒度主动
+                    // 清扫，确保洪峰本身不能阻止会话过期。
                     if last_sweep_at.elapsed() >= HOOK_SESSION_SWEEP_INTERVAL {
                         expire_inactive_hook_sessions(
                             &mut state_machines,
@@ -87,7 +98,6 @@ pub(crate) fn spawn_hook_worker(
                             &mut delivery,
                         );
                         last_sweep_at = Instant::now();
-                        sweep.reset();
                     }
 
                     process_hook_event(
@@ -98,19 +108,20 @@ pub(crate) fn spawn_hook_worker(
                         &status,
                     );
                 }
-                snapshot_change = device_snapshot_changes.changed(), if device_snapshot_channel_open => {
-                    match snapshot_change {
-                        Ok(()) => replay_current_states_for_online_changes(
-                            &state_machines,
-                            &online_devices,
-                            &mut known_online_routes,
-                            &mut delivery,
-                            &status,
-                        ),
-                        Err(_closed) => device_snapshot_channel_open = false,
-                    }
+                Ok(HookWorkerWake::Event(None)) => break,
+                Ok(HookWorkerWake::DeviceSnapshot(Ok(()))) => {
+                    replay_current_states_for_online_changes(
+                        &state_machines,
+                        &online_devices,
+                        &mut known_online_routes,
+                        &mut delivery,
+                        &status,
+                    );
                 }
-                _ = sweep.tick() => {
+                Ok(HookWorkerWake::DeviceSnapshot(Err(_closed))) => {
+                    device_snapshot_channel_open = false;
+                }
+                Err(_elapsed) => {
                     expire_inactive_hook_sessions(
                         &mut state_machines,
                         clock_started_at.elapsed(),

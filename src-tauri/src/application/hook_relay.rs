@@ -122,18 +122,13 @@ fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> Result<(), String>
         .map_err(|error| format!("无法读取 AI Hook 原始输入：{error}"))?;
     let payload = minimize_native_hook_payload(&native_json, event)?;
     let endpoint = format!("http://127.0.0.1:{DEFAULT_HOOK_RELAY_PORT}/api/hooks/{tool_slug}");
-    let client = Client::builder()
-        // 本机中继有一套显式的“仅连接失败重试”契约，关闭 reqwest 的协议级
-        // 隐式重试，避免一次 Hook 在调用方不知情时被重复提交。
-        .retry(reqwest::retry::never())
-        // 环回 listener 地址固定，不允许重定向把最小信封带离本机。
-        .redirect(reqwest::redirect::Policy::none())
-        // 环回流量不应受系统 HTTP(S)_PROXY 环境变量影响。
-        .no_proxy()
-        .connect_timeout(LOCAL_RELAY_CONNECT_TIMEOUT)
-        .timeout(LOCAL_RELAY_REQUEST_TIMEOUT)
-        .build()
-        .map_err(|error| format!("无法创建 Hook relay 客户端：{error}"))?;
+    let client = super::harden_blocking_client(
+        Client::builder()
+            .connect_timeout(LOCAL_RELAY_CONNECT_TIMEOUT)
+            .timeout(LOCAL_RELAY_REQUEST_TIMEOUT),
+    )
+    .build()
+    .map_err(|error| format!("无法创建 Hook relay 客户端：{error}"))?;
     post_minimal_payload(&client, &endpoint, event, &payload)?;
     // Cursor、Qwen Code 与 Gemini CLI 都要求 command Hook 的 stdout 是合法 JSON；
     // 其他工具成功时保持空输出，避免干扰各自的默认 Hook 决策。

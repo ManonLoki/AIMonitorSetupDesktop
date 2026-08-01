@@ -9,7 +9,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use http::Uri;
 use if_addrs::{IfAddr, IfOperStatus};
 use mdns_sd::ScopedIp;
 use serde::Deserialize;
@@ -74,17 +73,19 @@ pub(super) fn discovery_base_url(address: &ScopedIp, port: u16) -> Option<String
 /// IPv4/主机名优先于普通 IPv6；无法解析、非 HTTP(S) 或当前传输层无法
 /// 表示的链路本地 IPv6 候选排在最后。
 pub(super) fn candidate_url_priority(base_url: &str) -> u8 {
+    // `normalize_base_url` 已经完成了全部校验（协议、主机、链路本地 IPv6
+    // 拒绝），返回值固定是 `{scheme}://{authority}` 形式；scheme 只会是
+    // http/https 两种字面量，据此直接判断 authority 是否以 `[` 开头
+    // （IPv6 字面量地址），无需再重新解析一次 URI。
     let Ok(normalized) = normalize_base_url(base_url) else {
         return 2;
     };
-    let Ok(uri) = normalized.parse::<Uri>() else {
-        return 2;
-    };
-    let Some(host) = uri.host().filter(|host| !host.is_empty()) else {
-        return 2;
-    };
+    let is_ipv6_literal = normalized
+        .strip_prefix("http://")
+        .or_else(|| normalized.strip_prefix("https://"))
+        .is_some_and(|authority| authority.starts_with('['));
 
-    u8::from(host.starts_with('['))
+    u8::from(is_ipv6_literal)
 }
 
 // 通过 UDP 广播方式发现设备：先枚举本机所有可用网卡的广播目标，再逐个发送探测报文。

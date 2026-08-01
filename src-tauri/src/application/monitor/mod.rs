@@ -96,25 +96,18 @@ pub const MONITOR_DEVICES_CHANGED_EVENT: &str = "monitor-devices-changed";
 // 构造用于向设备转发 Hook 状态/心跳的阻塞式 HTTP 客户端。中继监听与心跳
 // 发送两条独立后台线程共用同一套连接/请求超时配置，因此只在此处实现一次。
 fn build_hook_forward_client() -> reqwest::Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .connect_timeout(HOOK_FORWARD_CLIENT_TIMEOUT)
-        .timeout(HOOK_FORWARD_CLIENT_TIMEOUT)
-        // 状态投递必须严格保持“一次转换只发送一次”，不继承 reqwest 的协议级重试。
-        .retry(reqwest::retry::never())
-        // 在线目标不能通过 3xx 把状态请求转移到发现快照之外的地址。
-        .redirect(reqwest::redirect::Policy::none())
-        // 环回与局域网设备通信不经过系统代理。
-        .no_proxy()
-        .build()
+    super::harden_blocking_client(
+        reqwest::blocking::Client::builder()
+            .connect_timeout(HOOK_FORWARD_CLIENT_TIMEOUT)
+            .timeout(HOOK_FORWARD_CLIENT_TIMEOUT),
+    )
+    .build()
 }
 
 // 构造监控设备业务使用的异步 HTTP 客户端。调用方仍可按具体操作设置请求级
 // timeout，但所有设备请求统一禁用隐藏重试、重定向和系统代理。
 fn build_monitor_client() -> Result<Client, String> {
-    Client::builder()
-        .retry(reqwest::retry::never())
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
+    super::harden_async_client(Client::builder())
         .build()
         .map_err(|error| format!("无法创建监控设备 HTTP 客户端：{error}"))
 }
@@ -149,7 +142,7 @@ pub struct MonitorService {
     device_snapshot_state: Arc<Mutex<DeviceSnapshotState>>,
     // Hook 配置文件写入互斥锁，避免并发写入导致文件损坏。
     hook_config_write_lock: Arc<Mutex<()>>,
-    // 在线设备快照修订通知。设备事实仍只保存在 online_devices；watch 只唤醒
+    // 设备快照修订通知。设备事实仍只保存在 data/online_devices；watch 只唤醒
     // Hook worker，让它为新上线/重连目标补齐离线期间错过的聚合展示。
     hook_device_snapshot_revision: watch::Sender<u64>,
     // Hook 中继监听/转发状态（供前端查询展示）。

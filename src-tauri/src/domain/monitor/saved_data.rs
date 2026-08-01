@@ -168,8 +168,9 @@ pub fn normalize_base_url(value: &str) -> Result<String, String> {
     if host.contains('%') || is_link_local_ipv6 {
         return Err("基地址暂不支持链路本地 IPv6 地址".to_owned());
     }
-    // `http::Uri` 会保留无法解析为 u16 的端口文本；根据 host 后缀判断
-    // 是否显式写了端口，并严格拒绝空、非数字、越界或 0 端口。
+    // `http::Uri` 会保留无法解析为 u16 的端口文本，但对空端口段（如
+    // "example.com:"）连 `authority.port()` 也视为没写端口；根据 host 后缀
+    // 直接判断是否显式写了端口，才能严格拒绝空、非数字、越界或 0 端口。
     let port_suffix = &authority.as_str()[authority.host().len()..];
     if !port_suffix.is_empty() && authority.port_u16().is_none_or(|port| port == 0) {
         return Err("基地址包含无效端口".to_owned());
