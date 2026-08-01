@@ -3,14 +3,14 @@ import type { Dispatch, SetStateAction } from "react";
 import { useState } from "react";
 import {
   uploadRemoteImages,
-  type AiProfile,
+  type AiProfileDraft,
   type AiTool,
   type HookBehavior,
-  type MonitorSettings,
+  type MonitorDeviceSnapshot,
 } from "../api/monitor";
 import { monitorKeys } from "../queries/monitor";
 
-type ProfileDrafts = Record<AiTool, AiProfile>;
+type ProfileDrafts = Partial<Record<AiTool, AiProfileDraft>>;
 
 interface DirectImageUpload {
   file: File;
@@ -38,7 +38,8 @@ export function useDirectImageUpload({
 
   const upload = useMutation({
     // 复用批量上传 API，但图片选择器始终只传一个文件。
-    mutationFn: ({ file }: DirectImageUpload) => uploadRemoteImages([file]),
+    mutationFn: ({ file, deviceId }: DirectImageUpload) =>
+      uploadRemoteImages([file], deviceId),
     onMutate: () => setUploadedSelection(null),
     onSuccess: async (filenames, variables) => {
       await queryClient.invalidateQueries({ queryKey: monitorKeys.images() });
@@ -46,15 +47,16 @@ export function useDirectImageUpload({
       if (!filename) return;
 
       // 上传期间若切换了设备，不把旧设备图片名写进新设备的草稿。
-      const currentSettings = queryClient.getQueryData<MonitorSettings>(
-        monitorKeys.settings(),
+      const currentSnapshot = queryClient.getQueryData<MonitorDeviceSnapshot>(
+        monitorKeys.devices(),
       );
-      if (currentSettings?.deviceId !== variables.deviceId) return;
+      if (currentSnapshot?.selectedDeviceId !== variables.deviceId) return;
 
       // 必须使用设备返回的最终文件名；BMP/WebP 可能已由 Rust 转为 PNG/GIF。
       onDraftChange();
       setDrafts((current) => {
         const toolDraft = current[variables.tool];
+        if (!toolDraft) return current;
         return {
           ...current,
           [variables.tool]: {

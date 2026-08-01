@@ -6,7 +6,8 @@ use super::*;
 use crate::{
     application::monitor::test_support::test_profile,
     domain::monitor::{
-        AiTool, DiscoveredMonitorDevice, DiscoverySource, HookConfigDirectories, MonitorSettings,
+        AiProfileDraft, AiTool, DEFAULT_PROFILE_SLOT, DiscoveredMonitorDevice, DiscoverySource,
+        HookConfigDirectories, HookWriteOutcome, MonitorSettings,
     },
 };
 
@@ -99,6 +100,7 @@ fn profile_save_does_not_write_hooks_when_data_persistence_fails() {
         })),
         online_devices: Arc::new(RwLock::new(Vec::new())),
         discovery_missed_scans: Arc::new(Mutex::new(HashMap::new())),
+        device_snapshot_state: Arc::new(Mutex::new(DeviceSnapshotState::default())),
         hook_config_write_lock: Arc::new(Mutex::new(())),
         relay_status: Arc::new(RwLock::new(HookRelayStatus::default())),
     };
@@ -162,7 +164,8 @@ fn custom_hook_directory_is_persisted_and_used_for_hook_writes() {
     // Hooks 不依赖设备展示 Profile；首次配置时可以先完成写入。
     assert!(service.profiles().unwrap().is_empty());
     assert!(!custom_directory.join("hooks.json").exists());
-    service.write_hook_config(AiTool::Codex).unwrap();
+    let write_result = service.write_hook_config(AiTool::Codex).unwrap();
+    assert_eq!(write_result.outcome, HookWriteOutcome::CodexReviewRequired);
     // 写入后应出现在自定义目录，而不是默认目录。
     assert!(custom_directory.join("hooks.json").exists());
     assert!(!config_home.join(".codex/hooks.json").exists());
@@ -232,6 +235,7 @@ fn open_claw_plugin_files_are_validated_as_one_managed_set() {
 
     fs::remove_file(&package_path).unwrap();
     let result = service.write_hook_config(AiTool::OpenClaw).unwrap();
+    assert_eq!(result.outcome, HookWriteOutcome::OpenClawEnableRequired);
     assert!(result.config_changed);
     assert!(result.requires_review);
     assert!(result.restart_required);
@@ -266,6 +270,7 @@ fn hermes_plugin_is_written_as_one_managed_set() {
         .unwrap();
 
     let result = service.write_hook_config(AiTool::Hermes).unwrap();
+    assert_eq!(result.outcome, HookWriteOutcome::HermesEnableRequired);
     assert!(result.config_changed);
     assert!(result.requires_review);
     assert!(result.restart_required);
@@ -277,6 +282,7 @@ fn hermes_plugin_is_written_as_one_managed_set() {
     assert!(manifest.contains("name: aimonitor"));
 
     let unchanged = service.write_hook_config(AiTool::Hermes).unwrap();
+    assert_eq!(unchanged.outcome, HookWriteOutcome::Unchanged);
     assert!(!unchanged.config_changed);
     assert!(!unchanged.requires_review);
     assert!(!unchanged.restart_required);
@@ -301,17 +307,94 @@ fn hook_directory_rejects_relative_and_file_paths() {
     let file_path = root.join("not-a-directory");
     fs::write(&file_path, "content").unwrap();
 
-    // 相对路径应被拒绝。
     assert!(
         service
             .save_hook_config_directory(AiTool::Cursor, "relative/path")
             .is_err()
     );
-    // 指向一个已存在的普通文件（非目录）也应被拒绝。
     assert!(
         service
             .save_hook_config_directory(AiTool::ClaudeCode, &file_path.to_string_lossy())
             .is_err()
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn profile_drafts_use_defaults_and_reject_a_stale_device_token() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "ai-monitor-profile-drafts-{}-{unique}",
+        std::process::id()
+    ));
+    let service = MonitorService::load(&root.join("app-data"), &root.join("home")).unwrap();
+
+    let defaults = service.profile_drafts().unwrap();
+    let default_tools = defaults
+        .drafts
+        .iter()
+        .map(|draft| draft.tool)
+        .collect::<Vec<_>>();
+    assert_eq!(default_tools, AiTool::ALL);
+    assert!(
+        defaults
+            .drafts
+            .iter()
+            .all(|draft| draft.slot == DEFAULT_PROFILE_SLOT)
+    );
+
+    let current_device = DiscoveredMonitorDevice {
+        id: "current-screen".to_owned(),
+        name: "Desk".to_owned(),
+        api_version: "1".to_owned(),
+        base_url: "http://127.0.0.1:8080".to_owned(),
+        path: "/api/device".to_owned(),
+        discovery_source: DiscoverySource::Mdns,
+    };
+    service.select_device(&current_device).unwrap();
+    let mut codex = AiProfileDraft::from(test_profile());
+    codex.slot = 9;
+    codex.hooks[0].content = "  resting  ".to_owned();
+    codex.hooks[0].image = "  idle.png  ".to_owned();
+    let expected_device_id = service.profile_drafts().unwrap().expected_device_id;
+    let saved = service
+        .save_profile_draft(&expected_device_id, codex)
+        .unwrap();
+    assert_eq!(saved.slot, 9);
+    assert_eq!(saved.hooks[0].content, "resting");
+    assert_eq!(saved.hooks[0].image, "idle.png");
+
+    let stored = service.data.read().unwrap();
+    assert_eq!(stored.profiles[0].device_id, "current-screen");
+    drop(stored);
+    let drafts = service.profile_drafts().unwrap();
+    assert_eq!(drafts.drafts[0], saved);
+    assert_eq!(drafts.drafts[1].tool, AiTool::ClaudeCode);
+    assert_eq!(drafts.drafts[1].slot, DEFAULT_PROFILE_SLOT);
+
+    let invalid = AiProfileDraft::default_for(AiTool::Cursor);
+    assert!(
+        service
+            .save_profile_draft(&expected_device_id, invalid)
+            .is_err()
+    );
+    assert_eq!(service.profiles().unwrap().len(), 1);
+    let stale = service.profile_drafts().unwrap();
+    let mut next_device = current_device;
+    next_device.id = "next-screen".to_owned();
+    next_device.base_url = "http://127.0.0.1:8081".to_owned();
+    service.select_device(&next_device).unwrap();
+    assert!(
+        service
+            .save_profile_draft(
+                &stale.expected_device_id,
+                AiProfileDraft::from(test_profile())
+            )
+            .is_err()
+    );
+    assert!(service.profiles().unwrap().is_empty());
     fs::remove_dir_all(root).unwrap();
 }

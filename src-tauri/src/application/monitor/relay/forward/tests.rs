@@ -7,7 +7,7 @@ use std::{
 use super::*;
 use crate::{
     application::monitor::{
-        DEFAULT_DEVICE_API_PATH,
+        DEFAULT_DEVICE_API_PATH, HookRelayLastEvent,
         test_support::{read_test_http_request, slow_test_server, test_profile},
     },
     domain::monitor::{
@@ -150,7 +150,14 @@ fn relay_computes_state_and_uses_a_configured_device_route() {
     // 断言中继状态被正确更新：收到 1 次，转发成功 1 次，最近行为为 Running，无错误。
     assert_eq!(status.received_count, 1);
     assert_eq!(status.forwarded_count, 1);
-    assert_eq!(status.last_behavior, Some(HookBehavior::Running));
+    assert_eq!(
+        status.last_event,
+        Some(HookRelayLastEvent::Display {
+            tool: AiTool::Codex,
+            hook_type: "UserPromptSubmit".to_owned(),
+            behavior: HookBehavior::Running,
+        })
+    );
     assert!(status.last_error.is_empty());
 }
 

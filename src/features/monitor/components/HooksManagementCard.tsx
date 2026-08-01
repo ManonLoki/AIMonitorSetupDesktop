@@ -18,7 +18,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 // 引入通用图标组件
 import { LineIcon } from "../../../shared/ui/LineIcon";
 // 引入本 feature 的类型定义
-import type { AiTool, HookConfigLocation } from "../api/monitor";
+import type { AiTool, AiToolDescriptor } from "../api/monitor";
 // 引入本 feature 对接 Rust 命令的类型化 API 函数
 import {
   chooseHookConfigDirectory,
@@ -33,23 +33,18 @@ import {
   monitorKeys,
 } from "../queries/monitor";
 // 引入全部受支持 AI 工具的取值/展示名映射与可见性过滤函数
-import { AI_TOOLS, enabledAiTools } from "./aiTools";
-import { hookActivationGuidance } from "./hookActivationGuidance";
+import { enabledAiTools } from "./aiTools";
+import { hookActivationPresentation } from "./hookActivationGuidance";
 import { useI18n } from "../../../shared/i18n";
-
-// 按 AI_TOOLS 固定顺序为全部工具生成空白目录草稿，避免逐个手写全部取值
-function initialDirectoryDrafts(): Record<AiTool, string> {
-  return Object.fromEntries(
-    AI_TOOLS.map(({ value }) => [value, ""]),
-  ) as Record<AiTool, string>;
-}
 
 interface HooksManagementCardProps {
   enabledTools: readonly AiTool[];
+  aiTools: readonly AiToolDescriptor[];
 }
 
 export function HooksManagementCard({
   enabledTools,
+  aiTools,
 }: HooksManagementCardProps) {
   const { t } = useI18n();
   // 获取 QueryClient 实例，用于在 mutation 成功后手动写入缓存
@@ -58,15 +53,17 @@ export function HooksManagementCard({
   const locations = useQuery(hookConfigLocationsQuery);
   // 按固定顺序过滤出当前可见的工具，仅在勾选集合变化时重新计算
   const visibleTools = useMemo(
-    () => enabledAiTools(enabledTools),
-    [enabledTools],
+    () => enabledAiTools(aiTools, enabledTools),
+    [aiTools, enabledTools],
   );
   // 当前选中的 AI 工具 Tab；已选工具被取消勾选后自动回退到第一个可见工具
   const [activeTool, setActiveTool] = useActiveVisibleTool(visibleTools);
   // 标记目录草稿是否已经用后端数据初始化过一次，避免用户编辑后被远端数据覆盖
   const initialized = useRef(false);
   // 各工具的 hook 配置目录草稿（未保存前的编辑态数据）
-  const [directoryDrafts, setDirectoryDrafts] = useState(initialDirectoryDrafts);
+  const [directoryDrafts, setDirectoryDrafts] = useState<
+    Partial<Record<AiTool, string>>
+  >({});
   // 记录当前正在通过系统对话框选择目录的工具（用于按钮 loading 状态）
   const [selectingDirectory, setSelectingDirectory] =
     useState<AiTool | null>(null);
@@ -93,15 +90,10 @@ export function HooksManagementCard({
     mutationFn: ({ tool, directory }: { tool: AiTool; directory: string }) =>
       saveHookConfigDirectory(tool, directory),
     onSuccess: (savedLocation) => {
-      queryClient.setQueryData<HookConfigLocation[]>(
-        monitorKeys.hookConfigLocations(),
-        (current = []) => [
-          ...current.filter(
-            (location) => location.tool !== savedLocation.tool,
-          ),
-          savedLocation,
-        ],
-      );
+      // 让 Rust 重新返回按 AiTool::ALL 排序的完整目录，前端不再重做唯一替换。
+      void queryClient.invalidateQueries({
+        queryKey: monitorKeys.hookConfigLocations(),
+      });
       setDirectoryDrafts((current) => ({
         ...current,
         [savedLocation.tool]: savedLocation.directory,
@@ -158,7 +150,7 @@ export function HooksManagementCard({
               const location = locations.data?.find(
                 (item) => item.tool === tool.value,
               );
-              const directoryDraft = directoryDrafts[tool.value];
+              const directoryDraft = directoryDrafts[tool.value] ?? "";
               const pathDirty =
                 Boolean(location) &&
                 directoryDraft.trim() !== location?.directory;
@@ -166,12 +158,11 @@ export function HooksManagementCard({
                 write.isSuccess && write.data?.tool === tool.value
                   ? write.data
                   : undefined;
-              const guidance = writeResult
-                ? hookActivationGuidance(
-                    tool.value,
+              const activation = writeResult
+                ? hookActivationPresentation(
+                    writeResult.outcome,
                     tool.label,
                     writeResult.filename,
-                    writeResult.configChanged,
                     t,
                   )
                 : null;
@@ -276,11 +267,7 @@ export function HooksManagementCard({
                       <Group gap="sm">
                         {writeResult && (
                           <Badge variant="light" color="teal">
-                            {writeResult.requiresReview
-                              ? t("hooks.writtenReview")
-                              : writeResult.configChanged
-                                ? t("hooks.written")
-                                : t("hooks.unchanged")}
+                            {activation?.badge}
                           </Badge>
                         )}
                         <Button
@@ -305,23 +292,9 @@ export function HooksManagementCard({
                       </Alert>
                     )}
 
-                    {guidance && writeResult && (
-                      <Alert
-                        color={
-                          writeResult.requiresReview ||
-                          writeResult.restartRequired
-                            ? "yellow"
-                            : "blue"
-                        }
-                        title={
-                          writeResult.requiresReview
-                            ? t("hooks.trustTitle", { tool: tool.label })
-                            : writeResult.restartRequired
-                              ? t("hooks.reloadTitle", { tool: tool.label })
-                              : t("hooks.unchangedTitle", { tool: tool.label })
-                        }
-                      >
-                        {guidance}
+                    {activation?.guidance && (
+                      <Alert color={activation.color} title={activation.title}>
+                        {activation.guidance}
                       </Alert>
                     )}
                   </Stack>

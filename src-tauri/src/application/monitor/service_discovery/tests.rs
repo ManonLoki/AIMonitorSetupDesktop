@@ -90,10 +90,10 @@ fn switching_current_device_loads_that_devices_profiles() {
     fs::remove_dir_all(root).unwrap();
 }
 
-// 验证当前选中设备不在在线列表中时会自动切换到第一台在线设备，
-// 并且这次自动切换会被持久化（重新加载服务后仍是新设备）。
+// 验证当前选中设备不在在线列表中时会自动切换到第一台在线设备；
+// 业务更新一次返回完整的原子 DTO，且新选择已持久化。
 #[test]
-fn unavailable_current_device_switches_to_first_online_device_and_persists() {
+fn online_snapshot_atomically_reflects_auto_selected_device_and_persists() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -123,21 +123,41 @@ fn unavailable_current_device_switches_to_first_online_device_and_persists() {
         discovery_source: DiscoverySource::Mdns,
     };
     service.select_device(&current).unwrap();
-
-    // 在线列表为空：不应触发切换，仍然选中原设备。
-    assert!(
-        !service
-            .select_first_available_device_if_needed(&[])
-            .unwrap()
-    );
     assert_eq!(service.settings().unwrap().device_id, "screen-1");
-    // 在线列表只包含另一台设备（不含当前选中设备）：应触发切换。
-    assert!(
-        service
-            .select_first_available_device_if_needed(std::slice::from_ref(&next))
-            .unwrap()
-    );
+    assert_eq!(service.device_snapshot_state.lock().unwrap().revision, 1);
+
+    // 发现到的稳定列表不包含旧选择：列表替换与自动切换作为一次
+    // 事务只推进一个 revision。
+    let generation = service.begin_online_device_refresh().unwrap();
+    let (snapshot, changed) = service
+        .update_online_devices(generation, vec![next.clone()])
+        .unwrap();
+    assert!(changed);
+    assert_eq!(snapshot.revision, 2);
     assert_eq!(service.settings().unwrap().device_id, "screen-2");
+    assert_eq!(snapshot.devices, vec![next.clone()]);
+    assert_eq!(snapshot.current_device, Some(next.clone()));
+    assert!(snapshot.other_devices.is_empty());
+    assert_eq!(snapshot.selected_device_id, "screen-2");
+    assert_eq!(
+        snapshot.saved_device.as_ref().map(|device| (
+            device.id.as_str(),
+            device.name.as_str(),
+            device.base_url.as_str(),
+        )),
+        Some(("screen-2", "Studio", "http://192.168.50.99:8080"))
+    );
+    assert!(snapshot.has_configured_device);
+    assert!(snapshot.has_available_device);
+
+    // 相同设备重复发现与重复选择都不是业务状态变化，revision 保持不变。
+    let generation = service.begin_online_device_refresh().unwrap();
+    let (unchanged, changed) = service
+        .update_online_devices(generation, vec![next.clone()])
+        .unwrap();
+    assert!(!changed);
+    assert_eq!(unchanged.revision, 2);
+    assert_eq!(service.select_device_snapshot(&next).unwrap().revision, 2);
 
     // 重新加载服务（模拟应用重启），验证切换结果已被持久化。
     drop(service);

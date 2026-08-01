@@ -21,8 +21,7 @@ use super::{
 use crate::{
     application::monitor::{HOOK_RELAY_WAKE_QUEUE_CAPACITY, HookRelayStatus},
     domain::monitor::{
-        AiTool, DiscoveredMonitorDevice, HookBehavior, HookTransition, SavedMonitorData,
-        forwards_every_event,
+        AiTool, DiscoveredMonitorDevice, HookTransition, SavedMonitorData, forwards_every_event,
     },
 };
 
@@ -45,10 +44,11 @@ struct DeliveryTracker {
     status: Arc<RwLock<HookRelayStatus>>,
     tool: AiTool,
     hook_type: String,
-    behavior: Option<HookBehavior>,
+    transition: HookTransition,
     counts_as_hook: bool,
     target_count: usize,
     remaining: AtomicUsize,
+    delivery_outcomes: AtomicUsize,
     forwarded: AtomicU64,
     suppressed: AtomicUsize,
     errors: Mutex<Vec<String>>,
@@ -64,13 +64,11 @@ impl DeliveryTracker {
             status,
             tool: relay.tool,
             hook_type: relay.hook_type.clone(),
-            behavior: match relay.transition {
-                HookTransition::Display(behavior) => Some(behavior),
-                HookTransition::Release => None,
-            },
+            transition: relay.transition,
             counts_as_hook: relay.counts_as_hook,
             target_count,
             remaining: AtomicUsize::new(target_count),
+            delivery_outcomes: AtomicUsize::new(0),
             forwarded: AtomicU64::new(0),
             suppressed: AtomicUsize::new(0),
             errors: Mutex::new(Vec::new()),
@@ -78,18 +76,28 @@ impl DeliveryTracker {
     }
 
     fn delivered(&self, result: Result<bool, String>) {
+        self.delivery_outcomes.fetch_add(1, Ordering::Relaxed);
         match result {
             Ok(true) => {
                 self.forwarded.fetch_add(1, Ordering::Relaxed);
             }
             Ok(false) => {}
-            Err(error) => {
-                if let Ok(mut errors) = self.errors.lock() {
-                    errors.push(error);
-                }
-            }
+            Err(error) => self.push_error(error),
         }
         self.finish_target();
+    }
+
+    // 队列或 worker 调度在目标真正处理 transition 前失败。这类失败
+    // 仍需记账，但不能把 Release 写成最近业务事件。
+    fn failed_before_delivery(&self, error: String) {
+        self.push_error(error);
+        self.finish_target();
+    }
+
+    fn push_error(&self, error: String) {
+        if let Ok(mut errors) = self.errors.lock() {
+            errors.push(error);
+        }
     }
 
     fn suppressed(&self) {
@@ -112,11 +120,13 @@ impl DeliveryTracker {
             |_| vec!["Hook 投递结果锁已损坏".to_owned()],
             |errors| errors.clone(),
         );
+        let transition =
+            (self.delivery_outcomes.load(Ordering::Acquire) > 0).then_some(self.transition);
         record_hook_results_with_accounting(
             &self.status,
             self.tool,
             &self.hook_type,
-            self.behavior,
+            transition,
             self.forwarded.load(Ordering::Acquire),
             &errors,
             self.counts_as_hook,
@@ -174,10 +184,7 @@ impl DeliveryScheduler {
                         &self.status,
                         relay.tool,
                         &relay.hook_type,
-                        match relay.transition {
-                            HookTransition::Display(behavior) => Some(behavior),
-                            HookTransition::Release => None,
-                        },
+                        Some(relay.transition),
                         0,
                         &[],
                         relay.counts_as_hook,
@@ -249,7 +256,7 @@ impl DeliveryScheduler {
         } else {
             relay
                 .tracker
-                .delivered(Err("Hook 目标队列不可用".to_owned()));
+                .failed_before_delivery("Hook 目标队列不可用".to_owned());
             return;
         };
         if let Some(displaced) = displaced {
@@ -270,7 +277,7 @@ impl DeliveryScheduler {
             for dropped in dropped {
                 dropped
                     .tracker
-                    .delivered(Err("Hook 目标投递 worker 未启动".to_owned()));
+                    .failed_before_delivery("Hook 目标投递 worker 未启动".to_owned());
             }
         }
     }

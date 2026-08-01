@@ -79,6 +79,7 @@ export const zhCNMessages = {
   "workbench.latestEvent": "最近事件：",
   "workbench.currentBehavior": "当前记录行为：{{behavior}}",
   "workbench.released": "当前记录行为：释放位置",
+  "workbench.eventSuppressed": "事件已按生命周期时序抑制",
   "workbench.latestFailure": "最近一次转发存在失败",
   "settings.aiClients": "AI 客户端",
   "settings.aiClientsDescription": "选择需要管理的客户端；保存后会同步调整监控管理和 Hooks 管理中的选项卡，并自动补写缺失的 AIMonitor Hooks（已有管理项会跳过）。",

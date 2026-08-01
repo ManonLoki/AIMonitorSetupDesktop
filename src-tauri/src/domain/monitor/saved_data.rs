@@ -10,6 +10,7 @@ use super::device::{AiProfile, DiscoveredMonitorDevice, HookBehavior, MonitorDev
 use super::hook_config_types::HookConfigDirectories;
 use super::hooks::ai_tool_name;
 use super::settings::{MonitorSettings, validate_discovery_interval_minutes};
+use super::{MAX_PROFILE_SLOT, MIN_PROFILE_SLOT};
 
 // 需要持久化到磁盘的全部监控数据：设置、设备路由、AI 配置、Hooks 目录。
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -190,12 +191,14 @@ pub fn validate_profile(mut profile: AiProfile) -> Result<AiProfile, String> {
     // 先去除设备 ID 首尾空白，回写到 profile 上。
     let device_id = profile.device_id.trim().to_owned();
     profile.device_id = device_id;
-    // 展示位置必须落在 1-25 之间。
-    if !(1..=25).contains(&profile.slot) {
-        return Err("显示位置必须在 1 到 25 之间".to_owned());
+    // 展示位置必须落在领域层声明的闭区间内。
+    if !(MIN_PROFILE_SLOT..=MAX_PROFILE_SLOT).contains(&profile.slot) {
+        return Err(format!(
+            "显示位置必须在 {MIN_PROFILE_SLOT} 到 {MAX_PROFILE_SLOT} 之间"
+        ));
     }
-    // 必须正好四条 hook（对应四种行为），多了少了都不合法。
-    if profile.hooks.len() != 4 {
+    // 必须为领域层声明的每种展示行为各提供一条配置，多了少了都不合法。
+    if profile.hooks.len() != HookBehavior::DISPLAY_BEHAVIORS.len() {
         return Err("必须配置空闲、运行中、询问和异常四种行为".to_owned());
     }
 

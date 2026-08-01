@@ -13,7 +13,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { checkMonitorConnection } from "../api/monitor";
 import type { DiscoveredMonitorDevice } from "../api/monitor";
-import { monitorDevicesQuery, monitorSettingsQuery } from "../queries/monitor";
+import { monitorDevicesQuery } from "../queries/monitor";
 import { useConnectDevice } from "../hooks/useConnectDevice";
 import { LineIcon } from "../../../shared/ui/LineIcon";
 import { useI18n } from "../../../shared/i18n";
@@ -38,37 +38,29 @@ function deviceStatus(device: DiscoveredMonitorDevice | undefined, t: ReturnType
 
 export function DeviceConnectPanel() {
   const { t } = useI18n();
-  // 拉取已保存的设备设置
-  const settings = useQuery(monitorSettingsQuery);
-  // 拉取当前发现到的设备列表
-  const devices = useQuery(monitorDevicesQuery);
+  // 拉取 Rust 同一次状态读取生成的设备快照。
+  const snapshot = useQuery(monitorDevicesQuery);
   // 当前在下拉框中选中的设备 id
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(
     null,
   );
 
-  // 设备列表加载完成且尚未手动选择时，自动匹配已保存设备或默认选中第一台
+  const backendSelectedDeviceId = snapshot.data?.selectedDeviceId;
+  // 初次加载或 Rust 发生自动/手动切换时，同步其明确选择；普通刷新不会
+  // 覆盖用户尚未提交的下拉框选择。
   useEffect(() => {
-    if (selectedDeviceId || !devices.data?.length) return;
-    const matchingDevice = settings.data
-      ? devices.data.find((device) => device.baseUrl === settings.data.baseUrl)
-      : undefined;
-    setSelectedDeviceId((matchingDevice ?? devices.data[0]).id);
-  }, [devices.data, selectedDeviceId, settings.data]);
+    setSelectedDeviceId(backendSelectedDeviceId || null);
+  }, [backendSelectedDeviceId]);
 
   // 当前可选设备列表（未加载完成时为空数组）
-  const availableDevices = devices.data ?? [];
+  const availableDevices = snapshot.data?.devices ?? [];
   // 根据选中 id 在可用设备中查找完整设备对象
   const selectedDevice = availableDevices.find(
     (device) => device.id === selectedDeviceId,
   );
-  const savedSettings = settings.data;
-  // 判断当前选中的正是已保存设备，但该设备已不在可用列表中（即离线/不可达）
-  const savedDeviceUnavailable = Boolean(
-    savedSettings?.deviceId &&
-      savedSettings.deviceId === selectedDeviceId &&
-      !selectedDevice,
-  );
+  const savedDevice = snapshot.data?.savedDevice;
+  const selectedSavedDevice =
+    savedDevice?.id === selectedDeviceId ? savedDevice : undefined;
   // 组装下拉框选项：先列出所有可用设备，UDP 广播来源的设备名附加标记；
   // 若已保存设备当前不可用，则额外追加一项供用户看到但标注"当前不可用"
   const deviceOptions = [
@@ -79,11 +71,11 @@ export function DeviceConnectPanel() {
           ? `${device.name} (${t("device.udp")})`
           : device.name,
     })),
-    ...(savedSettings && savedDeviceUnavailable
+    ...(savedDevice && !snapshot.data?.currentDevice
       ? [
           {
-            value: savedSettings.deviceId,
-            label: `${savedSettings.deviceName} (${t("device.notFoundBadge")})`,
+            value: savedDevice.id,
+            label: `${savedDevice.name} (${t("device.notFoundBadge")})`,
           },
         ]
       : []),
@@ -102,14 +94,16 @@ export function DeviceConnectPanel() {
   return (
     <Stack gap="lg">
       {/* 设置或设备列表尚在加载时展示骨架屏，加载完成后展示设备选择下拉框 */}
-      {settings.isPending || devices.isPending ? (
+      {snapshot.isPending ? (
         <Skeleton height={72} radius="md" />
       ) : (
         <Select
           label={t("device.selectorLabel")}
           description={t("device.selectorDescription")}
           placeholder={
-            devices.data?.length ? t("device.selectorPlaceholder") : t("device.noneFound")
+            availableDevices.length
+              ? t("device.selectorPlaceholder")
+              : t("device.noneFound")
           }
           data={deviceOptions}
           value={selectedDeviceId}
@@ -143,16 +137,16 @@ export function DeviceConnectPanel() {
               </Group>
             );
           }}
-          rightSection={devices.isFetching ? <Loader size={16} /> : undefined}
+          rightSection={snapshot.isFetching ? <Loader size={16} /> : undefined}
           searchable
           allowDeselect={false}
           size="md"
-          error={devices.error?.message ?? settings.error?.message}
+          error={snapshot.error?.message}
         />
       )}
 
       {/* 加载完成但没有发现任何设备时，提示用户检查设备联网状态 */}
-      {!devices.isPending && devices.data?.length === 0 && (
+      {!snapshot.isPending && availableDevices.length === 0 && (
         <Alert color="yellow" variant="light">
           {t("device.noneFoundDescription")}
         </Alert>
@@ -166,10 +160,12 @@ export function DeviceConnectPanel() {
               {status.sectionLabel}
             </Text>
             <Text size="sm" fw={600} mt={4}>
-              {selectedDevice?.name ?? settings.data?.deviceName ?? t("device.notSelected")}
+              {selectedDevice?.name ??
+                selectedSavedDevice?.name ??
+                t("device.notSelected")}
             </Text>
             <Text size="xs" ff="monospace" c="dimmed" mt={3}>
-              {selectedDevice?.baseUrl ?? settings.data?.baseUrl ?? "—"}
+              {selectedDevice?.baseUrl ?? selectedSavedDevice?.baseUrl ?? "—"}
             </Text>
           </div>
           <Stack gap={6} align="flex-end">
@@ -177,7 +173,7 @@ export function DeviceConnectPanel() {
               {status.badgeLabel}
             </Badge>
             <Text size="xs" c="dimmed">
-              {t("device.foundCount", { count: devices.data?.length ?? 0 })}
+              {t("device.foundCount", { count: availableDevices.length })}
             </Text>
           </Stack>
         </Group>
@@ -199,8 +195,8 @@ export function DeviceConnectPanel() {
         <Button
           variant="default"
           leftSection={<LineIcon name="refresh" size={17} />}
-          onClick={() => devices.refetch()}
-          loading={devices.isFetching}
+          onClick={() => snapshot.refetch()}
+          loading={snapshot.isFetching}
         >
           {t("device.rescan")}
         </Button>

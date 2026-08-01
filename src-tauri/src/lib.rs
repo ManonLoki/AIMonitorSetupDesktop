@@ -103,6 +103,8 @@ pub fn run() {
             commands::system::get_system_overview,
             // 监控模块：获取当前监控设置
             commands::monitor::get_monitor_settings,
+            // 监控模块：获取 Rust 领域层声明的静态能力
+            commands::monitor::get_monitor_capabilities,
             // 监控模块：选择监控设备
             commands::monitor::select_monitor_device,
             // 监控模块：保存监控用户名

@@ -10,7 +10,7 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { useId, useRef, useState } from "react";
-import type { RemoteImage } from "../api/monitor";
+import type { RemoteImage, RemoteImageCounts } from "../api/monitor";
 import { useImageCategoryFilter } from "../hooks/useImageCategoryFilter";
 import { LineIcon } from "../../../shared/ui/LineIcon";
 import { useI18n } from "../../../shared/i18n";
@@ -18,6 +18,8 @@ import { useI18n } from "../../../shared/i18n";
 // images 为可选图片列表，value 为当前已选图片的文件名，onChange 在选择/清除时回调
 interface ImagePickerProps {
   images: RemoteImage[];
+  counts?: RemoteImageCounts;
+  uploadAccept: string;
   value: string;
   disabled?: boolean;
   uploading?: boolean;
@@ -27,6 +29,8 @@ interface ImagePickerProps {
 
 export function ImagePicker({
   images,
+  counts,
+  uploadAccept,
   value,
   disabled,
   uploading,
@@ -38,8 +42,8 @@ export function ImagePicker({
   const [opened, setOpened] = useState(false);
   // 单图上传入口使用隐藏 input；与图片管理页的批量上传相互独立。
   const uploadInputRef = useRef<HTMLInputElement>(null);
-  // 图片分类筛选 hook：提供当前分类、切换分类方法、按分类过滤后的图片、各分类数量
-  const { category, setCategory, filteredImages, counts } =
+  // 分类选择与过滤留在 UI；数量由 Rust 图库快照提供。
+  const { category, setCategory, filteredImages } =
     useImageCategoryFilter(images);
   // 生成唯一 id，用于关联标签文本与触发按钮的无障碍属性
   const labelId = useId();
@@ -135,7 +139,7 @@ export function ImagePicker({
                 ref={uploadInputRef}
                 hidden
                 type="file"
-                accept=".bmp,.jpg,.jpeg,.gif,.png,.webp,image/bmp,image/jpeg,image/gif,image/png,image/webp"
+                accept={uploadAccept}
                 disabled={disabled}
                 onChange={(event) => {
                   const file = event.currentTarget.files?.[0];
@@ -165,9 +169,9 @@ export function ImagePicker({
             }
             data={[
               { value: "all", label: t("common.allCount", { count: images.length }) },
-              { value: "jpeg", label: `JPEG ${counts.jpeg}` },
-              { value: "png", label: `PNG ${counts.png}` },
-              { value: "gif", label: `GIF ${counts.gif}` },
+              { value: "jpeg", label: `JPEG ${counts?.jpeg ?? 0}` },
+              { value: "png", label: `PNG ${counts?.png ?? 0}` },
+              { value: "gif", label: `GIF ${counts?.gif ?? 0}` },
             ]}
           />
 

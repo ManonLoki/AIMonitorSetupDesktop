@@ -11,6 +11,8 @@ use super::{
     delivery::DeliveryScheduler,
     status::{record_hook_results, record_suppressed_hook},
 };
+#[cfg(test)]
+use crate::application::monitor::HookRelayLastEvent;
 use crate::{
     application::monitor::{
         HOOK_SESSION_INACTIVITY_TIMEOUT, HOOK_SESSION_SWEEP_INTERVAL, HookRelayStatus,

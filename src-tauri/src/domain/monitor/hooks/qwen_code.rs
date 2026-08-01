@@ -3,7 +3,7 @@ use serde_json::Value;
 use super::{
     HookEvent, HookEventKind, HookProtocol, ManagedCommands, command_group, platform_command,
 };
-use crate::domain::monitor::{AiTool, HookBehavior};
+use crate::domain::monitor::{AiTool, HookBehavior, HookWriteOutcome};
 
 pub(super) static QWEN_CODE: QwenCodeProtocol = QwenCodeProtocol;
 
@@ -88,7 +88,7 @@ impl HookProtocol for QwenCodeProtocol {
     }
 
     // 新会话重新读取用户级设置，避免当前会话仍使用写入前的 Hook 快照。
-    fn restart_required(&self) -> bool {
-        true
+    fn changed_write_outcome(&self) -> HookWriteOutcome {
+        HookWriteOutcome::RestartRequired
     }
 }

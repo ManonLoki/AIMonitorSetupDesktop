@@ -3,57 +3,64 @@
 use std::sync::{Arc, RwLock};
 
 use crate::{
-    application::monitor::HookRelayStatus,
-    domain::monitor::{AiTool, HookBehavior},
+    application::monitor::{HookRelayLastEvent, HookRelayStatus},
+    domain::monitor::{AiTool, HookTransition},
 };
 
 /// 记录一次 Hook 事件已处理完成的公共字段，成功/抑制两条路径在此基础上
 /// 各自补充结果专属字段，避免重复维护同一份计数逻辑。
-fn begin_hook_completion(current: &mut HookRelayStatus, tool: AiTool, hook_type: &str) {
+fn begin_hook_completion(current: &mut HookRelayStatus) {
     // 收到总数加一。
     current.received_count += 1;
     // 待处理计数减一（不会低于 0）。
     current.pending_count = current.pending_count.saturating_sub(1);
-    // 记录最近一次涉及的工具和事件类型。
-    current.last_tool = Some(tool);
-    hook_type.clone_into(&mut current.last_hook_type);
 }
 
-// 记录一次真实转发（非抑制）的处理结果：成功次数、失败次数、最近行为与错误信息。
+// 记录一次真实转发（非抑制）的处理结果。`transition` 为 None
+// 表示失败发生在业务转换之前，此时保留已有 last_event，不猜测为 Release。
 pub(super) fn record_hook_results(
     status: &Arc<RwLock<HookRelayStatus>>,
     tool: AiTool,
     hook_type: &str,
-    behavior: Option<HookBehavior>,
+    transition: Option<HookTransition>,
     forwarded: u64,
     errors: &[String],
 ) {
-    record_hook_results_with_accounting(status, tool, hook_type, behavior, forwarded, errors, true);
+    record_hook_results_with_accounting(
+        status, tool, hook_type, transition, forwarded, errors, true,
+    );
 }
 
 // `record_hook_results` 的通用实现：`counts_as_hook` 为 false 时（内部超时
-// 释放）跳过收到数/待处理数的记账，只更新最近工具/类型/转发结果。
+// 释放）跳过收到数/待处理数记账，仍记录显式 transition 及投递结果。
 pub(super) fn record_hook_results_with_accounting(
     status: &Arc<RwLock<HookRelayStatus>>,
     tool: AiTool,
     hook_type: &str,
-    behavior: Option<HookBehavior>,
+    transition: Option<HookTransition>,
     forwarded: u64,
     errors: &[String],
     counts_as_hook: bool,
 ) {
     if let Ok(mut current) = status.write() {
         if counts_as_hook {
-            begin_hook_completion(&mut current, tool, hook_type);
-        } else {
-            // 超时清扫产生的是内部状态转换，不凭空增加收到数，也不消耗一个
-            // pending；仍更新最近工具/类型，让自动释放在工作台中可解释。
-            current.last_tool = Some(tool);
-            hook_type.clone_into(&mut current.last_hook_type);
+            begin_hook_completion(&mut current);
         }
         current.forwarded_count += forwarded;
         current.failed_count += errors.len() as u64;
-        current.last_behavior = behavior;
+        if let Some(transition) = transition {
+            current.last_event = Some(match transition {
+                HookTransition::Display(behavior) => HookRelayLastEvent::Display {
+                    tool,
+                    hook_type: hook_type.to_owned(),
+                    behavior,
+                },
+                HookTransition::Release => HookRelayLastEvent::Release {
+                    tool,
+                    hook_type: hook_type.to_owned(),
+                },
+            });
+        }
         // 多个设备的错误信息用中文顿号拼接展示。
         current.last_error = errors.join("；");
     }
@@ -66,9 +73,12 @@ pub(super) fn record_suppressed_hook(
     hook_type: &str,
 ) {
     if let Ok(mut current) = status.write() {
-        begin_hook_completion(&mut current, tool, hook_type);
+        begin_hook_completion(&mut current);
         current.suppressed_count += 1;
-        // 忽略事件不会改变已经转发到设备的最后行为。
+        current.last_event = Some(HookRelayLastEvent::Suppressed {
+            tool,
+            hook_type: hook_type.to_owned(),
+        });
         current.last_error.clear();
     }
 }
@@ -86,5 +96,62 @@ pub(crate) fn record_relay_failure(status: &Arc<RwLock<HookRelayStatus>>, error:
     if let Ok(mut current) = status.write() {
         current.failed_count += 1;
         current.last_error = error;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_transition_failure_preserves_last_event_and_records_the_error() {
+        let last_event = HookRelayLastEvent::Display {
+            tool: AiTool::Codex,
+            hook_type: "UserPromptSubmit".to_owned(),
+            behavior: crate::domain::monitor::HookBehavior::Running,
+        };
+        let status = Arc::new(RwLock::new(HookRelayStatus {
+            pending_count: 1,
+            last_event: Some(last_event.clone()),
+            ..HookRelayStatus::default()
+        }));
+
+        record_hook_results(
+            &status,
+            AiTool::Codex,
+            "UnknownHook",
+            None,
+            0,
+            &["处理 Hook 前失败".to_owned()],
+        );
+
+        let status = status.read().unwrap();
+        assert_eq!(status.received_count, 1);
+        assert_eq!(status.pending_count, 0);
+        assert_eq!(status.failed_count, 1);
+        assert_eq!(status.last_event, Some(last_event));
+        assert_eq!(status.last_error, "处理 Hook 前失败");
+    }
+
+    #[test]
+    fn suppressed_event_is_explicit_and_serializes_with_a_stable_kind() {
+        let status = Arc::new(RwLock::new(HookRelayStatus {
+            pending_count: 1,
+            ..HookRelayStatus::default()
+        }));
+
+        record_suppressed_hook(&status, AiTool::Codex, "PostToolUse");
+
+        let status = status.read().unwrap();
+        assert_eq!(
+            status.last_event,
+            Some(HookRelayLastEvent::Suppressed {
+                tool: AiTool::Codex,
+                hook_type: "PostToolUse".to_owned(),
+            })
+        );
+        let json = serde_json::to_value(status.last_event.as_ref().unwrap()).unwrap();
+        assert_eq!(json["kind"], "suppressed");
+        assert_eq!(json["hookType"], "PostToolUse");
     }
 }

@@ -18,12 +18,18 @@ mod qoder;
 mod qwen_code;
 mod work_buddy;
 
+#[cfg(test)]
+mod tests_contract;
+
 use serde_json::{Map, Value, json};
 
 use generation::command_has_marker;
 pub use generation::{generate_hook_config, generate_wsl_hook_config, merge_hook_config};
 
-use super::{AiTool, HookBehavior, HookConfigPreview, HookTransition};
+use super::{
+    AiTool, AiToolDescriptor, HookBehavior, HookConfigPreview, HookConfigWriteResult,
+    HookTransition, HookWriteOutcome,
+};
 
 pub(super) const MANAGED_HOOK_PREFIX: &str = "AIMonitor";
 
@@ -168,14 +174,10 @@ pub(super) trait HookProtocol: Sync {
         });
     }
 
-    /// 写入后是否需要用户在工具自身 UI/CLI 中审核或显式信任新增 Hook/插件。
-    fn requires_review(&self) -> bool {
-        false
-    }
-
-    /// 写入后是否需要重启工具进程/守护进程才能重新加载配置。
-    fn restart_required(&self) -> bool {
-        false
+    /// 配置实际变化后需要执行的激活流程。工具专属流程必须在协议内唯一声明，
+    /// application 与前端不得再根据 `AiTool` 组合布尔值或推断指引。
+    fn changed_write_outcome(&self) -> HookWriteOutcome {
+        HookWriteOutcome::Active
     }
 }
 
@@ -214,14 +216,48 @@ pub fn ai_tool_name(tool: AiTool) -> &'static str {
     protocol(tool).name()
 }
 
-/// 写入配置后该工具是否需要用户审核/信任新增 Hook，供 application 层构造写入结果。
-pub fn hook_requires_review(tool: AiTool) -> bool {
-    protocol(tool).requires_review()
+/// 返回全部 AI 工具的稳定展示目录；顺序与 `AiTool::ALL` 保持一致，展示名称
+/// 直接来自每个工具的 `HookProtocol`。
+pub fn ai_tool_descriptors() -> Vec<AiToolDescriptor> {
+    AiTool::ALL
+        .into_iter()
+        .map(|tool| AiToolDescriptor {
+            tool,
+            name: protocol(tool).name().to_owned(),
+        })
+        .collect()
 }
 
-/// 写入配置后该工具是否需要重启才能加载，供 application 层构造写入结果。
-pub fn hook_restart_required(tool: AiTool) -> bool {
-    protocol(tool).restart_required()
+/// 配置发生变化时，返回该工具协议唯一声明的写入结果。
+#[cfg(test)]
+pub(super) fn hook_changed_write_outcome(tool: AiTool) -> HookWriteOutcome {
+    protocol(tool).changed_write_outcome()
+}
+
+/// 根据实际内容变化构造写入结果；未变化时统一返回 `Unchanged`。
+pub(crate) fn hook_config_write_result(
+    tool: AiTool,
+    filename: String,
+    config_changed: bool,
+) -> HookConfigWriteResult {
+    HookConfigWriteResult::from_changed_outcome(
+        tool,
+        filename,
+        config_changed,
+        protocol(tool).changed_write_outcome(),
+    )
+}
+
+/// 兼容旧调用方：配置变化后该工具是否需要用户审核/信任。
+#[cfg(test)]
+pub(super) fn hook_requires_review(tool: AiTool) -> bool {
+    protocol(tool).changed_write_outcome().requires_review()
+}
+
+/// 兼容旧调用方：配置变化后该工具是否需要重启才能加载。
+#[cfg(test)]
+pub(super) fn hook_restart_required(tool: AiTool) -> bool {
+    protocol(tool).changed_write_outcome().restart_required()
 }
 
 /// 判断配置内容中是否已经包含当前工具的 `AIMonitor` 管理标识。

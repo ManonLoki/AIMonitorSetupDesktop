@@ -28,12 +28,14 @@ impl MonitorService {
     }
 
     fn send_heartbeats_once(&self, client: &reqwest::blocking::Client) {
-        // 计算完目标后立即让读锁在此块结束时释放，发 HTTP 请求前不占着任何锁。
+        // 两份快照分别克隆后立即释放读锁，避免与转发路径形成 data/online
+        // 的嵌套锁序反转；发 HTTP 请求前也不占着任何共享锁。
         let (client_id, targets) = {
-            let Ok(data) = self.data.read() else {
+            let Ok(data) = self.data.read().map(|data| data.clone()) else {
                 return;
             };
-            let Ok(online_devices) = self.online_devices.read() else {
+            let Ok(online_devices) = self.online_devices.read().map(|devices| devices.clone())
+            else {
                 return;
             };
             heartbeat_targets(&data, &online_devices)

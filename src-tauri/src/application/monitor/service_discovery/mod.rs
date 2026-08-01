@@ -14,14 +14,20 @@ use super::{
     MONITOR_DEVICES_CHANGED_EVENT, MonitorService,
     discovery::{
         DiscoveryCandidate, candidate_url_priority, discover_udp_candidates, discovery_base_url,
-        merge_discovery_candidates, stabilize_discovered_devices,
+        merge_discovery_candidates,
     },
 };
 use crate::domain::monitor::{
-    DiscoveredMonitorDevice, DiscoverySource, MonitorSettings, validate_device_route,
-    validate_discovery_interval_minutes,
+    DiscoveredMonitorDevice, DiscoverySource, validate_discovery_interval_minutes,
 };
 
+mod snapshot;
+mod snapshot_state;
+
+pub use snapshot::MonitorDeviceSnapshot;
+
+#[cfg(test)]
+mod concurrency_tests;
 #[cfg(test)]
 mod tests;
 
@@ -38,14 +44,9 @@ impl MonitorService {
             loop {
                 // 到达计划执行时间才真正跑一次发现，否则只是短暂休眠等待。
                 if Instant::now() >= next_run {
-                    // 先做设备发现（mDNS+UDP），再对候选逐个做连接测试确定最终在线列表。
-                    let result = Self::discover_device_candidates().and_then(|candidates| {
-                        tauri::async_runtime::block_on(service.finish_device_discovery(candidates))
-                    });
-                    if let Ok(devices) = result {
-                        // 发布最新在线设备快照，变化时会向前端发事件。
-                        let _ = service.publish_online_devices(&app, devices);
-                    }
+                    // 后台轮询与前端强制刷新共用同一编排，避免两条路径产生
+                    // 不同的探测、自动切换或事件负载语义。
+                    let _ = tauri::async_runtime::block_on(service.refresh_online_devices(&app));
                     // 按当前配置的检查间隔计算下一次执行时间。
                     next_run = Instant::now() + service.discovery_interval();
                 }
@@ -67,96 +68,34 @@ impl MonitorService {
         Duration::from_secs(minutes * 60)
     }
 
-    // 将一批设备发现结果发布为最新在线快照：先做去抖稳定处理，
-    // 再在必要时自动选中第一台可用设备，最后仅在快照真正变化时才广播事件。
-    pub fn publish_online_devices(
+    /// 强制执行一次完整在线设备刷新。阻塞的 mDNS/UDP 候选收集交给
+    /// Tauri 阻塞线程池，然后完成可达性探测、稳定化、自动切换与快照发布。
+    /// command 只需调用本方法，不再复制业务编排。
+    pub async fn refresh_online_devices(
         &self,
         app: &AppHandle,
+    ) -> Result<MonitorDeviceSnapshot, String> {
+        let refresh_generation = self.begin_online_device_refresh()?;
+        let candidates = tauri::async_runtime::spawn_blocking(Self::discover_device_candidates)
+            .await
+            .map_err(|error| format!("设备发现任务失败：{error}"))??;
+        let devices = self.finish_device_discovery(candidates).await?;
+        self.publish_online_devices(app, refresh_generation, devices)
+    }
+
+    // 将一批设备发现结果发布为最新在线快照：先做去抖稳定处理，
+    // 再在必要时自动选中第一台可用设备，最后仅在快照真正变化时才广播事件。
+    fn publish_online_devices(
+        &self,
+        app: &AppHandle,
+        refresh_generation: u64,
         devices: Vec<DiscoveredMonitorDevice>,
-    ) -> Result<Vec<DiscoveredMonitorDevice>, String> {
-        let devices = if let Ok(mut missed_scans) = self.discovery_missed_scans.lock() {
-            // 取出上一轮在线快照作为对比基准。
-            let previous = self
-                .online_devices
-                .read()
-                .map_or_else(|_| Vec::new(), |current| current.clone());
-            // 结合缺席计数做去抖，得到本轮稳定后的设备列表。
-            stabilize_discovered_devices(&previous, devices, &mut missed_scans)
-        } else {
-            devices
-        };
-        // 若当前选中设备已不在线，自动切换到列表中第一台可用设备。
-        self.select_first_available_device_if_needed(&devices)?;
-        // 只有快照真正发生变化时才替换并向前端广播事件，避免无意义重绘。
-        if self.replace_online_devices(&devices) {
-            let _ = app.emit(MONITOR_DEVICES_CHANGED_EVENT, devices.clone());
+    ) -> Result<MonitorDeviceSnapshot, String> {
+        let (snapshot, changed) = self.update_online_devices(refresh_generation, devices)?;
+        if changed {
+            let _ = app.emit(MONITOR_DEVICES_CHANGED_EVENT, snapshot.clone());
         }
-        Ok(devices)
-    }
-
-    /// 保证当前选择始终指向在线快照中的设备。当前设备离线时按发现结果
-    /// 的稳定顺序选择第一台在线设备，并通过 `select_device` 同步持久化路由。
-    fn select_first_available_device_if_needed(
-        &self,
-        devices: &[DiscoveredMonitorDevice],
-    ) -> Result<bool, String> {
-        // 没有任何在线设备则无需处理。
-        let Some(next) = devices.first() else {
-            return Ok(false);
-        };
-        let settings = self.settings()?;
-        // 当前配置的设备 id 仍在在线列表中，无需切换。
-        if devices.iter().any(|device| device.id == settings.device_id) {
-            return Ok(false);
-        }
-        // 否则切换到列表中的第一台设备。
-        self.select_device(next)?;
-        Ok(true)
-    }
-
-    // 用新的在线设备列表替换内存快照；内容完全相同则不替换，返回是否发生了替换。
-    fn replace_online_devices(&self, devices: &[DiscoveredMonitorDevice]) -> bool {
-        let Ok(mut current) = self.online_devices.write() else {
-            return false;
-        };
-        if current.as_slice() == devices {
-            return false;
-        }
-        *current = devices.to_vec();
-        true
-    }
-
-    // 选中某台设备作为当前使用的监控设备：校验路由信息合法后写入设置，
-    // 同时把该设备的路由信息记录/更新进历史设备列表并按 id 排序。
-    pub fn select_device(
-        &self,
-        device: &DiscoveredMonitorDevice,
-    ) -> Result<MonitorSettings, String> {
-        let route = validate_device_route(device)?;
-        let mut data = self
-            .data
-            .write()
-            .map_err(|_| "配置写入锁已损坏".to_owned())?;
-        let mut next_data = data.clone();
-        // 更新当前生效的 base_url / device_id / device_name。
-        next_data.settings.base_url.clone_from(&route.base_url);
-        next_data.settings.device_id.clone_from(&route.device_id);
-        next_data
-            .settings
-            .device_name
-            .clone_from(&route.device_name);
-        // 从历史设备列表中移除同 id 的旧记录，再插入本次最新的路由信息。
-        next_data
-            .devices
-            .retain(|existing| existing.device_id != route.device_id);
-        next_data.devices.push(route);
-        // 按设备 id 排序，保持列表顺序稳定。
-        next_data
-            .devices
-            .sort_by(|left, right| left.device_id.cmp(&right.device_id));
-        self.persist(&next_data)?;
-        *data = next_data;
-        Ok(data.settings.clone())
+        Ok(snapshot)
     }
 
     /// 设备发现的主入口：mDNS 和 UDP 广播总是都跑一遍并按设备 id 合并结果，

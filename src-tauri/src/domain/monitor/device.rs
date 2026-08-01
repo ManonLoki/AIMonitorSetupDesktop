@@ -74,6 +74,44 @@ impl AiTool {
     ];
 }
 
+/// 前端展示 AI 工具选择项所需的稳定目录条目。
+///
+/// `name` 由对应的 Hook 协议提供，调用方不再维护另一份工具到展示名的映射。
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiToolDescriptor {
+    pub tool: AiTool,
+    pub name: String,
+}
+
+/// 前端控件可直接消费的闭区间业务约束。
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorCapabilityRange<T> {
+    pub default: T,
+    pub min: T,
+    pub max: T,
+}
+
+/// 前端文件选择器消费的权威上传格式策略。
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageUploadAccept {
+    pub mime_types: Vec<String>,
+    pub extensions: Vec<String>,
+}
+
+/// Rust 领域层统一暴露的监控静态能力，避免前端复制工具、范围和行为常量。
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorCapabilities {
+    pub ai_tools: Vec<AiToolDescriptor>,
+    pub discovery_interval: MonitorCapabilityRange<u64>,
+    pub profile_slot: MonitorCapabilityRange<u8>,
+    pub hook_behaviors: Vec<HookBehavior>,
+    pub image_upload_accept: ImageUploadAccept,
+}
+
 /// 按应用固定顺序规范化用户选择，并消除重复项。
 pub fn normalize_enabled_ai_tools(selected: &[AiTool]) -> Vec<AiTool> {
     AiTool::ALL

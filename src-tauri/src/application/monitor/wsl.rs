@@ -204,6 +204,7 @@ impl WslFile {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn wsl_test_reports_missing(status_code: Option<i32>) -> bool {
     status_code == Some(1)
 }

@@ -1,5 +1,7 @@
 use super::{HookEvent, HookEventKind, HookProtocol, managed_hook_marker};
-use crate::domain::monitor::{AiTool, DEFAULT_HOOK_RELAY_PORT, HookBehavior, HookConfigPreview};
+use crate::domain::monitor::{
+    AiTool, DEFAULT_HOOK_RELAY_PORT, HookBehavior, HookConfigPreview, HookWriteOutcome,
+};
 
 pub(super) static HERMES: HermesProtocol = HermesProtocol;
 
@@ -61,14 +63,9 @@ impl HookProtocol for HermesProtocol {
         EVENTS
     }
 
-    // 用户插件默认不加载；写入后必须通过 Hermes CLI 明确信任并启用。
-    fn requires_review(&self) -> bool {
-        true
-    }
-
-    // 已运行的 Hermes 进程不会重新扫描新插件，需要新会话或重启进程。
-    fn restart_required(&self) -> bool {
-        true
+    // 用户插件默认不加载；必须通过 Hermes CLI 启用，并新建会话或重启进程。
+    fn changed_write_outcome(&self) -> HookWriteOutcome {
+        HookWriteOutcome::HermesEnableRequired
     }
 
     fn standalone_config(&self) -> Option<String> {

@@ -4,15 +4,54 @@ use reqwest::{Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
 use super::{MAX_REMOTE_IMAGE_BYTES, MonitorService, device_response::ensure_success};
-use crate::domain::monitor::{encode_base64, process_image_upload};
+use crate::domain::monitor::{
+    ImageFormat, encode_base64, is_supported_upload_image_mime, process_image_upload,
+};
 
 // 从设备下载的远程图片，image 字段为 base64 编码内容。
-#[derive(Serialize)]
+#[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteImage {
     pub filename: String,
-    pub mime_type: String,
+    pub format: ImageFormat,
     pub image: String,
+}
+
+/// 远端图库按稳定格式汇总后的数量。字段固定存在，数量为零时也会序列化。
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteImageCounts {
+    pub jpeg: usize,
+    pub png: usize,
+    pub gif: usize,
+}
+
+impl RemoteImageCounts {
+    fn record(&mut self, format: ImageFormat) {
+        match format {
+            ImageFormat::Jpeg => self.jpeg += 1,
+            ImageFormat::Png => self.png += 1,
+            ImageFormat::Gif => self.gif += 1,
+        }
+    }
+}
+
+/// 一次图片列表请求返回的原子图库快照；格式聚合在 Rust 完成。
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteImageGallery {
+    pub images: Vec<RemoteImage>,
+    pub counts: RemoteImageCounts,
+}
+
+impl RemoteImageGallery {
+    fn from_images(images: Vec<RemoteImage>) -> Self {
+        let mut counts = RemoteImageCounts::default();
+        for image in &images {
+            counts.record(image.format);
+        }
+        Self { images, counts }
+    }
 }
 
 // 设备端图片列表接口的响应体。
@@ -63,19 +102,6 @@ fn remote_image_url(base_url: &str, filename: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-// 判断设备端返回的 MIME 类型是否属于其原生支持的图片格式。
-fn is_supported_image_mime(mime_type: &str) -> bool {
-    matches!(mime_type, "image/jpeg" | "image/png" | "image/gif")
-}
-
-// 判断桌面端可以接收并在上传前处理的图片 MIME 类型。
-fn is_supported_upload_image_mime(mime_type: &str) -> bool {
-    matches!(
-        mime_type,
-        "image/bmp" | "image/x-ms-bmp" | "image/jpeg" | "image/png" | "image/gif" | "image/webp"
-    )
-}
-
 // 校验图片字节长度不超过最大限制。
 fn ensure_image_size(len: u64, filename: &str) -> Result<(), String> {
     if len > MAX_REMOTE_IMAGE_BYTES as u64 {
@@ -109,8 +135,9 @@ fn validate_image_uploads(images: &[ImageUpload]) -> Result<(), String> {
 
 impl MonitorService {
     // 获取设备端保存的所有图片：先拉取图片列表元数据，再逐张下载图片内容。
-    pub async fn images(&self) -> Result<Vec<RemoteImage>, String> {
-        let base_url = self.settings()?.base_url;
+    pub async fn images(&self, expected_device_id: &str) -> Result<RemoteImageGallery, String> {
+        // 设备可能换了 DHCP 地址；始终使用在线发现快照中的最新路由。
+        let base_url = self.current_device_base_url_for(expected_device_id)?;
         let response = self
             .client
             .get(format!("{base_url}/api/images"))
@@ -133,7 +160,7 @@ impl MonitorService {
             images.push(self.remote_image(&base_url, item).await?);
         }
 
-        Ok(images)
+        Ok(RemoteImageGallery::from_images(images))
     }
 
     // 下载单张远端图片并转换为 base64 data url，同时做 MIME 类型和大小校验。
@@ -165,12 +192,11 @@ impl MonitorService {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next())
             .map(str::trim);
-        let mime_type = [header_mime, Some(metadata.mime_type.trim())]
+        let format = [header_mime, Some(metadata.mime_type.trim())]
             .into_iter()
             .flatten()
-            .find(|value| is_supported_image_mime(value))
-            .ok_or_else(|| format!("{filename} 返回了不支持的图片类型"))?
-            .to_owned();
+            .find_map(ImageFormat::from_mime_type)
+            .ok_or_else(|| format!("{filename} 返回了不支持的图片类型"))?;
 
         // 读取响应体全部字节。
         let bytes = response
@@ -181,18 +207,26 @@ impl MonitorService {
         ensure_image_size(bytes.len() as u64, filename)?;
 
         // 编码为 base64 data url，方便前端直接用作 img src。
-        let image = format!("data:{mime_type};base64,{}", encode_base64(&bytes));
+        let image = format!(
+            "data:{};base64,{}",
+            format.mime_type(),
+            encode_base64(&bytes)
+        );
         Ok(RemoteImage {
             filename: filename.to_owned(),
-            mime_type,
+            format,
             image,
         })
     }
 
     // 批量上传图片到设备：先做业务校验，再逐张压缩后以 multipart 表单上传。
-    pub async fn upload_images(&self, images: Vec<ImageUpload>) -> Result<Vec<String>, String> {
+    pub async fn upload_images(
+        &self,
+        expected_device_id: &str,
+        images: Vec<ImageUpload>,
+    ) -> Result<Vec<String>, String> {
         validate_image_uploads(&images)?;
-        let base_url = self.settings()?.base_url;
+        let base_url = self.current_device_base_url_for(expected_device_id)?;
         let mut uploaded = Vec::with_capacity(images.len());
 
         for image in images {
@@ -226,11 +260,18 @@ impl MonitorService {
     }
 
     // 删除设备端的一张图片。
-    pub async fn delete_image(&self, filename: &str) -> Result<(), String> {
-        let base_url = self.settings()?.base_url;
+    pub async fn delete_image(
+        &self,
+        expected_device_id: &str,
+        filename: &str,
+    ) -> Result<(), String> {
+        let base_url = self.current_device_base_url_for(expected_device_id)?;
+        // 复用下载时的单路径段校验与 URL 编码，禁止路径穿越，
+        // 也避免中文、空格、# 和 ? 等文件名改变请求路径语义。
+        let url = remote_image_url(&base_url, filename)?;
         let response = self
             .client
-            .delete(format!("{base_url}/api/images/{filename}"))
+            .delete(url)
             .send()
             .await
             .map_err(|error| format!("删除图片失败：{error}"))?;
@@ -240,71 +281,4 @@ impl MonitorService {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // 验证批量图片上传校验会检查列表中的每一个文件，而不是遇到第一个合法文件就通过；
-    // 列表里混入一个不支持的 TIFF 格式应导致整体校验失败。
-    #[test]
-    fn batch_image_validation_checks_every_file_before_upload() {
-        let images = vec![
-            ImageUpload {
-                filename: "valid.png".to_owned(),
-                mime_type: "image/png".to_owned(),
-                bytes: vec![1],
-            },
-            ImageUpload {
-                filename: "invalid.tiff".to_owned(),
-                mime_type: "image/tiff".to_owned(),
-                bytes: vec![1],
-            },
-        ];
-
-        // 即使第一个文件合法，只要列表中有一个不支持的类型，整体也应报错。
-        assert_eq!(
-            validate_image_uploads(&images),
-            Err("invalid.tiff 不是支持的 BMP、JPEG、GIF、PNG 或 WebP 图片".to_owned())
-        );
-    }
-
-    #[test]
-    fn batch_image_validation_accepts_all_supported_upload_types() {
-        let images = [
-            ("legacy.bmp", "image/bmp"),
-            ("photo.jpg", "image/jpeg"),
-            ("photo.jpeg", "image/jpeg"),
-            ("moving.gif", "image/gif"),
-            ("graphic.png", "image/png"),
-            ("modern.webp", "image/webp"),
-        ]
-        .map(|(filename, mime_type)| ImageUpload {
-            filename: filename.to_owned(),
-            mime_type: mime_type.to_owned(),
-            bytes: vec![1],
-        });
-
-        assert!(validate_image_uploads(&images).is_ok());
-    }
-
-    // 验证空的图片选择会被拒绝，提示用户先选择图片。
-    #[test]
-    fn batch_image_validation_rejects_an_empty_selection() {
-        assert_eq!(
-            validate_image_uploads(&[]),
-            Err("请选择要上传的图片".to_owned())
-        );
-    }
-
-    // 验证 remote_image_url 会对文件名做正确的 URL 编码（含中文、空格、# 等特殊字符），
-    // 同时验证包含路径穿越（"../secret"）的文件名会被拒绝。
-    #[test]
-    fn remote_image_url_encodes_one_filename_path_segment() {
-        let url = remote_image_url("http://192.168.50.20:8080", "状态 图片 #1.gif").unwrap();
-
-        assert_eq!(
-            url.as_str(),
-            "http://192.168.50.20:8080/api/images/%E7%8A%B6%E6%80%81%20%E5%9B%BE%E7%89%87%20%231.gif"
-        );
-        assert!(remote_image_url("http://192.168.50.20:8080", "../secret").is_err());
-    }
-}
+mod tests;

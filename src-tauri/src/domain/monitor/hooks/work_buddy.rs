@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands, command_group};
-use crate::domain::monitor::{AiTool, HookBehavior};
+use crate::domain::monitor::{AiTool, HookBehavior, HookWriteOutcome};
 
 pub(super) static WORK_BUDDY: WorkBuddyProtocol = WorkBuddyProtocol;
 
@@ -77,13 +77,8 @@ impl HookProtocol for WorkBuddyProtocol {
         command_group(&commands.posix, event.matcher)
     }
 
-    // WorkBuddy 需要在 Hooks 配置面板中审核并信任新增规则。
-    fn requires_review(&self) -> bool {
-        true
-    }
-
-    // WorkBuddy 会在会话启动时快照用户 Hooks，写入后需重启或新建会话。
-    fn restart_required(&self) -> bool {
-        true
+    // WorkBuddy 需要在 Hooks 面板审核，并重启或新建会话加载新规则。
+    fn changed_write_outcome(&self) -> HookWriteOutcome {
+        HookWriteOutcome::WorkBuddyReviewRequired
     }
 }

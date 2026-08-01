@@ -77,6 +77,7 @@ export const enMessages = {
   "workbench.latestEvent": "Latest event:",
   "workbench.currentBehavior": "Current behavior: {{behavior}}",
   "workbench.released": "Current behavior: slot released",
+  "workbench.eventSuppressed": "Event suppressed by lifecycle ordering",
   "workbench.latestFailure": "The latest forward failed",
   "settings.aiClients": "AI clients",
   "settings.aiClientsDescription": "Select the clients to manage. Saving also updates the tabs in Monitor management and Hooks management, and automatically writes any missing AIMonitor Hooks while skipping existing managed entries.",

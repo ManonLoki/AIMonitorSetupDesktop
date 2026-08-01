@@ -1,6 +1,9 @@
 // 把一个已通过去抖判定的 Hook 事件实际转发给设备：转换成展示/释放行为，
 // 并发 POST/DELETE 到每台当前在线且配置了该 AI 工具的设备。
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::HashSet,
+    sync::{Arc, RwLock},
+};
 
 #[cfg(test)]
 use std::thread;
@@ -47,25 +50,28 @@ pub(super) fn configured_online_target_ids(
     online_devices: &Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
     tool: AiTool,
 ) -> Result<(usize, Vec<String>), String> {
-    let online_devices = online_devices
+    // 分别提取两份快照后立即释放锁，不与心跳等 data -> online
+    // 路径形成反向的嵌套持锁。
+    let online_device_ids = online_devices
         .read()
-        .map_err(|_| "在线设备读取锁已损坏".to_owned())?;
-    let data = data.read().map_err(|_| "转发配置读取锁已损坏".to_owned())?;
-    let configured = data
+        .map_err(|_| "在线设备读取锁已损坏".to_owned())?
+        .iter()
+        .map(|device| device.id.clone())
+        .collect::<HashSet<_>>();
+    let configured_device_ids = data
+        .read()
+        .map_err(|_| "转发配置读取锁已损坏".to_owned())?
         .profiles
         .iter()
         .filter(|profile| profile.tool == tool)
-        .collect::<Vec<_>>();
-    let online_target_ids = configured
-        .iter()
-        .filter(|profile| {
-            online_devices
-                .iter()
-                .any(|device| device.id == profile.device_id)
-        })
         .map(|profile| profile.device_id.clone())
+        .collect::<Vec<_>>();
+    let configured_count = configured_device_ids.len();
+    let online_target_ids = configured_device_ids
+        .into_iter()
+        .filter(|device_id| online_device_ids.contains(device_id))
         .collect();
-    Ok((configured.len(), online_target_ids))
+    Ok((configured_count, online_target_ids))
 }
 
 // 只向一台目标设备投递状态。设备路由和 Profile 在真正发送前读取最新快照，
@@ -210,10 +216,7 @@ fn relay_hook_with_accounting(
             status,
             tool,
             hook_type,
-            match transition {
-                HookTransition::Display(behavior) => Some(behavior),
-                HookTransition::Release => None,
-            },
+            Some(transition),
             0,
             &[],
             counts_as_hook,
@@ -221,11 +224,6 @@ fn relay_hook_with_accounting(
         return;
     }
 
-    // Display 转换携带具体行为类型；Release（释放/清空展示）没有行为类型。
-    let behavior = match transition {
-        HookTransition::Display(behavior) => Some(behavior),
-        HookTransition::Release => None,
-    };
     // 并发转发给所有目标设备，汇总成功次数与错误信息列表。
     let identity = RequestIdentity {
         username: &snapshot.settings.username,
@@ -244,7 +242,7 @@ fn relay_hook_with_accounting(
         status,
         tool,
         hook_type,
-        behavior,
+        Some(transition),
         forwarded,
         &errors,
         counts_as_hook,

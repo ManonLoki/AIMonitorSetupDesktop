@@ -11,15 +11,16 @@ use reqwest::Client;
 use uuid::Uuid;
 
 use super::{
-    HOOK_BIND_ADDRESS, HOOK_LISTENER_PORT, HookRelayStatus, MonitorService, STORE_FILENAME,
+    DeviceSnapshotState, HOOK_BIND_ADDRESS, HOOK_LISTENER_PORT, HookRelayStatus, MonitorService,
+    STORE_FILENAME,
     config_io::{read_optional_config, write_atomic_file, write_config},
     hook_config::{detect_hook_config_directories, detect_system_username},
     wsl::WslDirectory,
 };
 use crate::domain::monitor::{
-    AiProfile, AiTool, HookConfigLocation, HookConfigWriteResult, MonitorSettings,
-    SavedMonitorData, generate_hook_auxiliary_configs, generate_hook_config,
-    generate_wsl_hook_config, hook_config_filename, hook_requires_review, hook_restart_required,
+    AiProfile, AiProfileDraft, AiProfileDraftSet, AiTool, HookConfigLocation,
+    HookConfigWriteResult, MonitorSettings, SavedMonitorData, generate_hook_auxiliary_configs,
+    generate_hook_config, generate_wsl_hook_config, hook_config_filename, hook_config_write_result,
     hook_supports_wsl, merge_hook_config, normalize_enabled_ai_tools,
     validate_discovery_interval_minutes, validate_profile, validate_saved_monitor_data,
     validate_username,
@@ -63,6 +64,7 @@ impl MonitorService {
             data: Arc::new(RwLock::new(data)),
             online_devices: Arc::new(RwLock::new(Vec::new())),
             discovery_missed_scans: Arc::new(Mutex::new(HashMap::new())),
+            device_snapshot_state: Arc::new(Mutex::new(DeviceSnapshotState::default())),
             hook_config_write_lock: Arc::new(Mutex::new(())),
             // 中继状态初始值：尚未开始监听，绑定地址/端口先填好，其余字段用 Default。
             relay_status: Arc::new(RwLock::new(HookRelayStatus {
@@ -130,7 +132,7 @@ impl MonitorService {
         Ok(settings)
     }
 
-    // 返回当前选中设备对应的所有 AI Profile（按 device_id 过滤）。
+    #[cfg(test)]
     pub fn profiles(&self) -> Result<Vec<AiProfile>, String> {
         self.data
             .read()
@@ -144,7 +146,27 @@ impl MonitorService {
             .map_err(|_| "AI 配置读取锁已损坏".to_owned())
     }
 
-    // 返回所有支持的 AI 工具各自的 Hook 配置文件位置信息。
+    pub fn profile_drafts(&self) -> Result<AiProfileDraftSet, String> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| "AI 配置读取锁已损坏".to_owned())?;
+        let expected_device_id = data.settings.device_id.clone();
+        let drafts = AiTool::ALL
+            .into_iter()
+            .map(|tool| {
+                data.profiles
+                    .iter()
+                    .find(|profile| profile.device_id == expected_device_id && profile.tool == tool)
+                    .map_or_else(|| AiProfileDraft::default_for(tool), AiProfileDraft::from)
+            })
+            .collect();
+        Ok(AiProfileDraftSet {
+            expected_device_id,
+            drafts,
+        })
+    }
+
     pub fn hook_config_locations(&self) -> Result<Vec<HookConfigLocation>, String> {
         let data = self
             .data
@@ -156,7 +178,6 @@ impl MonitorService {
             .collect())
     }
 
-    // 保存用户自定义的 Hook 配置目录（可为空字符串表示恢复使用默认目录）。
     pub fn save_hook_config_directory(
         &self,
         tool: AiTool,
@@ -165,11 +186,9 @@ impl MonitorService {
         let directory = directory.trim();
         if !directory.is_empty() {
             let path = Path::new(directory);
-            // 非空目录必须是绝对路径，防止相对路径产生歧义。
             if !path.is_absolute() {
                 return Err("Hooks 配置目录必须使用绝对路径".to_owned());
             }
-            // 若路径已存在，必须是文件夹而非普通文件。
             if path.exists() && !path.is_dir() {
                 return Err(format!("Hooks 配置目录不是文件夹：{}", path.display()));
             }
@@ -189,28 +208,47 @@ impl MonitorService {
         Ok(location)
     }
 
-    // 保存某个 AI 工具的展示 Profile：强制绑定当前选中设备的 device_id，
-    // 校验通过后按 (device_id, tool) 去重替换，再按 (device_id, slot) 排序持久化。
+    #[cfg(test)]
     pub fn save_profile(&self, profile: AiProfile) -> Result<AiProfile, String> {
         let mut data = self
             .data
             .write()
             .map_err(|_| "AI 配置写入锁已损坏".to_owned())?;
-        // 未选择设备时不允许保存 Profile。
+        self.save_profile_for_current_device(&mut data, profile)
+    }
+
+    pub fn save_profile_draft(
+        &self,
+        expected_device_id: &str,
+        draft: AiProfileDraft,
+    ) -> Result<AiProfileDraft, String> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| "AI 配置写入锁已损坏".to_owned())?;
+        if data.settings.device_id != expected_device_id {
+            return Err("当前设备已切换，请重新加载 AI 配置后再保存".to_owned());
+        }
+        let profile = draft.bind_to_device(expected_device_id);
+        self.save_profile_for_current_device(&mut data, profile)
+            .map(AiProfileDraft::from)
+    }
+
+    fn save_profile_for_current_device(
+        &self,
+        data: &mut SavedMonitorData,
+        mut profile: AiProfile,
+    ) -> Result<AiProfile, String> {
         if data.settings.device_id.is_empty() {
             return Err("请先选择 AIMonitor 设备".to_owned());
         }
-        let mut profile = profile;
-        // 强制使用当前设备 id，忽略调用方可能传入的其他值。
         profile.device_id.clone_from(&data.settings.device_id);
         let profile = validate_profile(profile)?;
         let mut next_data = data.clone();
-        // 移除同一设备同一工具的旧 Profile，保证每个 (device_id, tool) 只有一条记录。
         next_data.profiles.retain(|existing| {
             existing.device_id != profile.device_id || existing.tool != profile.tool
         });
         next_data.profiles.push(profile.clone());
-        // 按设备再按槽位排序，保证列表顺序稳定。
         next_data.profiles.sort_by(|left, right| {
             left.device_id
                 .cmp(&right.device_id)
@@ -277,13 +315,11 @@ impl MonitorService {
                     })?;
                 }
             }
-            return Ok(HookConfigWriteResult {
-                requires_review: hook_requires_review(tool) && config_changed,
-                restart_required: hook_restart_required(tool) && config_changed,
+            return Ok(hook_config_write_result(
                 tool,
-                filename: config_path.to_string_lossy().into_owned(),
+                config_path.to_string_lossy().into_owned(),
                 config_changed,
-            });
+            ));
         }
 
         let mut generated_files = vec![(config_path.clone(), generated)];
@@ -312,14 +348,11 @@ impl MonitorService {
                 write_config(path, &merged.content)?;
             }
         }
-        Ok(HookConfigWriteResult {
-            // 是否需要审核/重启由各工具的 HookProtocol 实现声明，避免在此处按工具硬编码特判。
-            requires_review: hook_requires_review(tool) && config_changed,
-            restart_required: hook_restart_required(tool) && config_changed,
+        Ok(hook_config_write_result(
             tool,
-            filename: config_path.to_string_lossy().into_owned(),
+            config_path.to_string_lossy().into_owned(),
             config_changed,
-        })
+        ))
     }
 
     // 计算某个工具的 Hook 配置目录与文件路径：优先用户自定义目录，否则使用探测到的默认目录。

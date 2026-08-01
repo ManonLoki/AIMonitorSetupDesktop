@@ -22,8 +22,10 @@ pub fn process_image_upload(
     bytes: &[u8],
     mime_type: &str,
 ) -> Result<ProcessedUploadImage, String> {
-    match mime_type {
-        "image/gif" => {
+    use super::image_policy::UploadImageFormat;
+
+    match super::upload_image_format(mime_type) {
+        Some(UploadImageFormat::Gif) => {
             image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
                 .map_err(|error| format!("图片解码失败：{error}"))?;
             Ok(ProcessedUploadImage {
@@ -32,21 +34,21 @@ pub fn process_image_upload(
                 bytes: bytes.to_vec(),
             })
         }
-        "image/webp" => process_webp_upload(filename, bytes),
-        "image/jpeg" => process_static_upload(
+        Some(UploadImageFormat::WebP) => process_webp_upload(filename, bytes),
+        Some(UploadImageFormat::Jpeg) => process_static_upload(
             filename,
             bytes,
             image::ImageFormat::Jpeg,
             "image/jpeg",
             false,
         ),
-        "image/png" => {
+        Some(UploadImageFormat::Png) => {
             process_static_upload(filename, bytes, image::ImageFormat::Png, "image/png", false)
         }
-        "image/bmp" | "image/x-ms-bmp" => {
+        Some(UploadImageFormat::Bmp) => {
             process_static_upload(filename, bytes, image::ImageFormat::Bmp, "image/png", true)
         }
-        _ => Err("不支持的图片类型".to_owned()),
+        None => Err("不支持的图片类型".to_owned()),
     }
 }
 

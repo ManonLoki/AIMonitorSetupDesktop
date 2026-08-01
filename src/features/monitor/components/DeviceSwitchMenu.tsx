@@ -11,9 +11,9 @@ interface DeviceSwitchMenuProps {
 
 export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
   const { t } = useI18n();
-  // 从统一的设备连接 hook 中取出设置、当前已连接设备、其他可切换设备等状态
+  // 从 Rust 原子快照中取出当前设备与其他可切换设备。
   const {
-    settings,
+    snapshot,
     connectedDevice,
     otherDevices,
     isPending,
@@ -21,16 +21,16 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
   } = useMonitorConnection();
   // 用于切换/连接设备的 mutation
   const connect = useConnectDevice();
-  const savedDevice = settings.data;
+  const savedDevice = snapshot.data?.savedDevice;
   // 优先展示当前已连接设备的信息，若未连接则回退展示已保存的设备信息
-  const currentName = connectedDevice?.name ?? savedDevice?.deviceName;
+  const currentName = connectedDevice?.name ?? savedDevice?.name;
   const currentBaseUrl = connectedDevice?.baseUrl ?? savedDevice?.baseUrl;
   const currentAvailable = Boolean(connectedDevice);
 
   // 设备状态尚在加载时，仅展示一个小的加载指示器
   if (isPending) return <Loader size={16} />;
   // 完全没有可用设备时，根据是否收起渲染禁用态的图标按钮或提示文案
-  if (!hasAvailableDevice) {
+  if (!hasAvailableDevice && !savedDevice) {
     return collapsed ? (
       <ActionIcon
         variant="subtle"

@@ -10,17 +10,91 @@ pub struct HookConfigPreview {
     pub content: String,
 }
 
+/// Hooks 配置发生变化后，用户在对应工具中还需完成的唯一激活流程。
+///
+/// 工具专属结果承载精确指引语义，避免 application 或前端再按 `AiTool` 推断。
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum HookWriteOutcome {
+    Unchanged,
+    Active,
+    RestartRequired,
+    CodexReviewRequired,
+    WorkBuddyReviewRequired,
+    CodeBuddyReviewRequired,
+    HermesEnableRequired,
+    OpenClawEnableRequired,
+}
+
+impl HookWriteOutcome {
+    /// 兼容旧 DTO 的 `configChanged` 字段；新调用方应优先读取 `outcome`。
+    pub const fn config_changed(self) -> bool {
+        !matches!(self, Self::Unchanged)
+    }
+
+    /// 兼容旧 DTO 的 `requiresReview` 字段。
+    pub const fn requires_review(self) -> bool {
+        matches!(
+            self,
+            Self::CodexReviewRequired
+                | Self::WorkBuddyReviewRequired
+                | Self::CodeBuddyReviewRequired
+                | Self::HermesEnableRequired
+                | Self::OpenClawEnableRequired
+        )
+    }
+
+    /// 兼容旧 DTO 的 `restartRequired` 字段。
+    pub const fn restart_required(self) -> bool {
+        matches!(
+            self,
+            Self::RestartRequired
+                | Self::CodexReviewRequired
+                | Self::WorkBuddyReviewRequired
+                | Self::CodeBuddyReviewRequired
+                | Self::HermesEnableRequired
+                | Self::OpenClawEnableRequired
+        )
+    }
+}
+
 // 一次写入 Hooks 配置到磁盘后的结果，返回给前端展示。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookConfigWriteResult {
     pub tool: AiTool,
     pub filename: String,
+    pub outcome: HookWriteOutcome,
+    /// 兼容字段；其值只由 `outcome` 派生。
     pub config_changed: bool,
-    /// 工具要求用户审核新 Hook 且配置发生变化时为真。
+    /// 兼容字段；其值只由 `outcome` 派生。
     pub requires_review: bool,
-    /// 工具需要重启当前会话或守护进程才能加载新配置时为真。
+    /// 兼容字段；其值只由 `outcome` 派生。
     pub restart_required: bool,
+}
+
+impl HookConfigWriteResult {
+    pub(crate) fn from_changed_outcome(
+        tool: AiTool,
+        filename: String,
+        config_changed: bool,
+        changed_outcome: HookWriteOutcome,
+    ) -> Self {
+        debug_assert_ne!(changed_outcome, HookWriteOutcome::Unchanged);
+        let outcome = if config_changed {
+            changed_outcome
+        } else {
+            HookWriteOutcome::Unchanged
+        };
+        Self {
+            tool,
+            filename,
+            outcome,
+            config_changed: outcome.config_changed(),
+            requires_review: outcome.requires_review(),
+            restart_required: outcome.restart_required(),
+        }
+    }
 }
 
 // 用户为各工具自定义的 Hooks 配置目录（为空表示使用默认目录）。
@@ -108,7 +182,7 @@ pub struct HookConfigLocation {
 // 仅在测试构建中编译的单元测试模块，覆盖本文件内的纯业务逻辑。
 #[cfg(test)]
 mod tests {
-    use super::{AiTool, HookConfigDirectories};
+    use super::{AiTool, HookConfigDirectories, HookConfigWriteResult, HookWriteOutcome};
 
     #[test]
     fn hook_config_uses_only_canonical_hermes_names() {
@@ -146,5 +220,75 @@ mod tests {
         assert_eq!(serialized["qoder"], "/qoder");
         assert_eq!(serialized["geminiCli"], "/gemini");
         assert_eq!(serialized["githubCopilot"], "/copilot");
+    }
+
+    #[test]
+    fn write_result_serializes_camel_case_outcome_and_derives_compatibility_flags() {
+        for (changed_outcome, expected, review, restart) in [
+            (HookWriteOutcome::Active, "active", false, false),
+            (
+                HookWriteOutcome::RestartRequired,
+                "restartRequired",
+                false,
+                true,
+            ),
+            (
+                HookWriteOutcome::CodexReviewRequired,
+                "codexReviewRequired",
+                true,
+                true,
+            ),
+            (
+                HookWriteOutcome::WorkBuddyReviewRequired,
+                "workBuddyReviewRequired",
+                true,
+                true,
+            ),
+            (
+                HookWriteOutcome::CodeBuddyReviewRequired,
+                "codeBuddyReviewRequired",
+                true,
+                true,
+            ),
+            (
+                HookWriteOutcome::HermesEnableRequired,
+                "hermesEnableRequired",
+                true,
+                true,
+            ),
+            (
+                HookWriteOutcome::OpenClawEnableRequired,
+                "openClawEnableRequired",
+                true,
+                true,
+            ),
+        ] {
+            let result = HookConfigWriteResult::from_changed_outcome(
+                AiTool::Codex,
+                "/hooks.json".to_owned(),
+                true,
+                changed_outcome,
+            );
+            let serialized = serde_json::to_value(result).unwrap();
+            assert_eq!(serialized["outcome"], expected);
+            assert_eq!(serialized["configChanged"], true);
+            assert_eq!(serialized["requiresReview"], review);
+            assert_eq!(serialized["restartRequired"], restart);
+        }
+
+        let unchanged = HookConfigWriteResult::from_changed_outcome(
+            AiTool::Codex,
+            "/hooks.json".to_owned(),
+            false,
+            HookWriteOutcome::CodexReviewRequired,
+        );
+        assert_eq!(unchanged.outcome, HookWriteOutcome::Unchanged);
+        assert!(!unchanged.config_changed);
+        assert!(!unchanged.requires_review);
+        assert!(!unchanged.restart_required);
+        assert_eq!(
+            serde_json::to_value(unchanged).unwrap()["outcome"],
+            "unchanged"
+        );
     }
 }

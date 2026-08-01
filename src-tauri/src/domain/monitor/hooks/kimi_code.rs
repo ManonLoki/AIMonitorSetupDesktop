@@ -3,7 +3,7 @@ use std::fmt::Write;
 use serde_json::{Map, Value, json};
 
 use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands, managed_hook_marker};
-use crate::domain::monitor::{AiTool, HookBehavior, HookConfigPreview};
+use crate::domain::monitor::{AiTool, HookBehavior, HookConfigPreview, HookWriteOutcome};
 
 pub(super) static KIMI_CODE: KimiCodeProtocol = KimiCodeProtocol;
 
@@ -142,8 +142,8 @@ impl HookProtocol for KimiCodeProtocol {
     }
 
     // Kimi Code 在新会话启动时读取 config.toml。
-    fn restart_required(&self) -> bool {
-        true
+    fn changed_write_outcome(&self) -> HookWriteOutcome {
+        HookWriteOutcome::RestartRequired
     }
 }
 

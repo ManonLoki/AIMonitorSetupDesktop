@@ -19,6 +19,33 @@ export interface MonitorSettings {
   enabledAiTools: AiTool[];
 }
 
+// Rust 领域层提供的 AI 工具目录项；成员、名称和顺序不再由前端维护。
+export interface AiToolDescriptor {
+  tool: AiTool;
+  name: string;
+}
+
+// 前端控件可直接消费的闭区间业务约束。
+export interface MonitorCapabilityRange {
+  default: number;
+  min: number;
+  max: number;
+}
+
+// Rust 统一返回的监控静态能力，对应真实校验和 HookProtocol 元数据。
+export interface MonitorCapabilities {
+  aiTools: AiToolDescriptor[];
+  discoveryInterval: MonitorCapabilityRange;
+  profileSlot: MonitorCapabilityRange;
+  hookBehaviors: HookBehavior[];
+  imageUploadAccept: ImageUploadAccept;
+}
+
+export interface ImageUploadAccept {
+  mimeTypes: string[];
+  extensions: string[];
+}
+
 // 局域网内被发现的一台 AiMonitor 设备，对应 Rust 侧 DiscoveredMonitorDevice DTO
 export interface DiscoveredMonitorDevice {
   // 设备唯一标识
@@ -35,6 +62,26 @@ export interface DiscoveredMonitorDevice {
   discoverySource: "mdns" | "udpBroadcast" | "savedAddress";
 }
 
+// 当前持久化选择的最小路由；设备离线时仍可用于展示。
+export interface SavedMonitorDevice {
+  id: string;
+  name: string;
+  baseUrl: string;
+}
+
+// Rust 在一次锁定状态中生成的设备业务快照。前端不再拼接 settings/devices。
+export interface MonitorDeviceSnapshot {
+  /** 后端设备状态的单调版本；较旧的异步结果不得覆盖较新的快照。 */
+  revision: number;
+  devices: DiscoveredMonitorDevice[];
+  currentDevice: DiscoveredMonitorDevice | null;
+  otherDevices: DiscoveredMonitorDevice[];
+  selectedDeviceId: string;
+  savedDevice: SavedMonitorDevice | null;
+  hasConfiguredDevice: boolean;
+  hasAvailableDevice: boolean;
+}
+
 // 设备连通性检查结果，对应 Rust 侧 ConnectionStatus DTO
 export interface ConnectionStatus {
   // 是否可达
@@ -49,10 +96,23 @@ export interface ConnectionStatus {
 export interface RemoteImage {
   // 文件名
   filename: string;
-  // MIME 类型，如 image/png
-  mimeType: string;
+  // Rust 已验证并归一化的远端格式。
+  format: ImageFormat;
   // 图片内容（通常为 base64 编码字符串）
   image: string;
+}
+
+export type ImageFormat = "jpeg" | "png" | "gif";
+
+export interface RemoteImageCounts {
+  jpeg: number;
+  png: number;
+  gif: number;
+}
+
+export interface RemoteImageGallery {
+  images: RemoteImage[];
+  counts: RemoteImageCounts;
 }
 
 // 支持接入的 AI 工具类型
@@ -84,10 +144,8 @@ export interface HookContent {
   image: string;
 }
 
-// 一个 AI 工具的 Profile 配置，对应 Rust 侧 AiProfile DTO
-export interface AiProfile {
-  /** Profile 所属设备，由 Rust 按当前设备写入。 */
-  deviceId: string;
+// 一个 AI 工具的可编辑 Profile 草稿；设备归属由 Rust 在保存时绑定。
+export interface AiProfileDraft {
   // 关联的 AI 工具类型
   tool: AiTool;
   /** 在展示屏上的显示位置，取值范围 1-25。 */
@@ -96,19 +154,31 @@ export interface AiProfile {
   hooks: HookContent[];
 }
 
+// 一次读取到的完整草稿集合及其设备并发令牌。
+export interface AiProfileDraftSet {
+  expectedDeviceId: string;
+  drafts: AiProfileDraft[];
+}
+
 // 写入 hook 配置文件后的结果，对应 Rust 侧 HookConfigWriteResult DTO
 export interface HookConfigWriteResult {
   // 写入目标工具
   tool: AiTool;
   // 写入的配置文件名
   filename: string;
-  // 本次写入是否实际改变了配置内容
-  configChanged: boolean;
-  /** 工具要求用户审核新 Hook 且配置发生变化时为真。 */
-  requiresReview: boolean;
-  /** 工具需要重启当前会话或守护进程才能加载新配置时为真。 */
-  restartRequired: boolean;
+  // 配置实际变化后仍需执行的唯一激活流程，由对应 Rust HookProtocol 决定。
+  outcome: HookWriteOutcome;
 }
+
+export type HookWriteOutcome =
+  | "unchanged"
+  | "active"
+  | "restartRequired"
+  | "codexReviewRequired"
+  | "workBuddyReviewRequired"
+  | "codeBuddyReviewRequired"
+  | "hermesEnableRequired"
+  | "openClawEnableRequired";
 
 // hook 配置文件所在位置的信息，对应 Rust 侧 HookConfigLocation DTO
 export interface HookConfigLocation {
@@ -140,15 +210,21 @@ export interface HookRelayStatus {
   suppressedCount: number;
   // 当前排队等待处理的事件数
   pendingCount: number;
-  // 最近一次事件来源的工具类型
-  lastTool: AiTool | null;
-  // 最近一次事件的 hook 类型
-  lastHookType: string;
-  // 最近一次事件对应的行为状态
-  lastBehavior: HookBehavior | null;
+  // 最近一次事件的显式处理结果；释放与抑制不再通过空 behavior 推断。
+  lastEvent: HookRelayLastEvent | null;
   // 最近一次错误信息
   lastError: string;
 }
+
+export type HookRelayLastEvent =
+  | {
+      kind: "display";
+      tool: AiTool;
+      hookType: string;
+      behavior: HookBehavior;
+    }
+  | { kind: "release"; tool: AiTool; hookType: string }
+  | { kind: "suppressed"; tool: AiTool; hookType: string };
 
 // 应用运行时概览信息，对应 Rust 侧 RuntimeOverview DTO
 export interface RuntimeOverview {
@@ -165,11 +241,16 @@ export function getMonitorSettings(): Promise<MonitorSettings> {
   return invokeCommand<MonitorSettings>("get_monitor_settings");
 }
 
+// 获取由 Rust 领域层声明的工具目录、范围和 Hook 行为顺序。
+export function getMonitorCapabilities(): Promise<MonitorCapabilities> {
+  return invokeCommand<MonitorCapabilities>("get_monitor_capabilities");
+}
+
 // 选中某台发现的设备作为当前连接目标，并持久化到设置中
 export function selectMonitorDevice(
   device: DiscoveredMonitorDevice,
-): Promise<MonitorSettings> {
-  return invokeCommand<MonitorSettings>("select_monitor_device", {
+): Promise<MonitorDeviceSnapshot> {
+  return invokeCommand<MonitorDeviceSnapshot>("select_monitor_device", {
     device,
   });
 }
@@ -193,9 +274,9 @@ export function saveEnabledAiTools(tools: AiTool[]): Promise<MonitorSettings> {
   return invokeCommand<MonitorSettings>("save_enabled_ai_tools", { tools });
 }
 
-// 触发一次局域网内 AiMonitor 设备发现，返回发现到的设备列表
-export function discoverMonitorDevices(): Promise<DiscoveredMonitorDevice[]> {
-  return invokeCommand<DiscoveredMonitorDevice[]>("discover_monitor_devices");
+// 触发一次局域网内 AiMonitor 设备发现，返回原子的设备选择与在线状态快照
+export function discoverMonitorDevices(): Promise<MonitorDeviceSnapshot> {
+  return invokeCommand<MonitorDeviceSnapshot>("discover_monitor_devices");
 }
 
 // 检查与设备（默认当前设备，或指定 baseUrl）的连通性
@@ -208,12 +289,19 @@ export function checkMonitorConnection(
 }
 
 // 拉取远程设备上已保存的图片列表
-export function listRemoteImages(): Promise<RemoteImage[]> {
-  return invokeCommand<RemoteImage[]>("list_remote_images");
+export function listRemoteImages(
+  expectedDeviceId: string,
+): Promise<RemoteImageGallery> {
+  return invokeCommand<RemoteImageGallery>("list_remote_images", {
+    expectedDeviceId,
+  });
 }
 
 // 批量上传图片文件到远程设备
-export async function uploadRemoteImages(files: File[]): Promise<string[]> {
+export async function uploadRemoteImages(
+  files: File[],
+  expectedDeviceId: string,
+): Promise<string[]> {
   // 并发地把每个 File 转成 { filename, mimeType, bytes } 结构，供 Rust 侧接收
   const images = await Promise.all(
     files.map(async (file) => ({
@@ -227,17 +315,26 @@ export async function uploadRemoteImages(files: File[]): Promise<string[]> {
   );
 
   // 调用后端命令完成上传，返回上传成功的文件名列表
-  return invokeCommand<string[]>("upload_remote_images", { images });
+  return invokeCommand<string[]>("upload_remote_images", {
+    images,
+    expectedDeviceId,
+  });
 }
 
 // 删除远程设备上的一张图片
-export function deleteRemoteImage(filename: string): Promise<void> {
-  return invokeCommand<void>("delete_remote_image", { filename });
+export function deleteRemoteImage(
+  filename: string,
+  expectedDeviceId: string,
+): Promise<void> {
+  return invokeCommand<void>("delete_remote_image", {
+    filename,
+    expectedDeviceId,
+  });
 }
 
 // 拉取当前设备下所有 AI 工具的 Profile 列表
-export function listAiProfiles(): Promise<AiProfile[]> {
-  return invokeCommand<AiProfile[]>("list_ai_profiles");
+export function listAiProfileDrafts(): Promise<AiProfileDraftSet> {
+  return invokeCommand<AiProfileDraftSet>("list_ai_profiles");
 }
 
 // 拉取各 AI 工具的 hook 配置文件位置信息
@@ -274,8 +371,14 @@ export async function chooseHookConfigDirectory(
 }
 
 // 保存（新增或更新）一个 AI 工具的 Profile
-export function saveAiProfile(profile: AiProfile): Promise<AiProfile> {
-  return invokeCommand<AiProfile>("save_ai_profile", { profile });
+export function saveAiProfileDraft(
+  profile: AiProfileDraft,
+  expectedDeviceId: string,
+): Promise<AiProfileDraft> {
+  return invokeCommand<AiProfileDraft>("save_ai_profile", {
+    profile,
+    expectedDeviceId,
+  });
 }
 
 // 将当前 Profile 写入指定工具的 hook 配置文件

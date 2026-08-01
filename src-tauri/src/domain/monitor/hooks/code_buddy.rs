@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands, command_group};
-use crate::domain::monitor::{AiTool, HookBehavior};
+use crate::domain::monitor::{AiTool, HookBehavior, HookWriteOutcome};
 
 pub(super) static CODE_BUDDY: CodeBuddyProtocol = CodeBuddyProtocol;
 
@@ -86,13 +86,8 @@ impl HookProtocol for CodeBuddyProtocol {
         command_group(&commands.posix, event.matcher)
     }
 
-    // CodeBuddy 需要运行 /hooks 审核并信任新增规则。
-    fn requires_review(&self) -> bool {
-        true
-    }
-
-    // CodeBuddy 启动时会快照 Hooks 配置，需重启或新建会话才能生效。
-    fn restart_required(&self) -> bool {
-        true
+    // CodeBuddy 需要运行 /hooks 审核，并重启或新建会话加载新规则。
+    fn changed_write_outcome(&self) -> HookWriteOutcome {
+        HookWriteOutcome::CodeBuddyReviewRequired
     }
 }

@@ -4,6 +4,13 @@ use std::{collections::HashMap, time::Duration};
 use super::device::{AiTool, HookBehavior};
 use super::hooks::{HookEventKind, event_kind, forwards_every_event};
 
+mod session;
+
+use session::{
+    HookPhase, HookSessionState, StoppedTurnDecision, session_eviction_priority,
+    stopped_turn_decision, turn_is_stale,
+};
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -35,34 +42,6 @@ pub(crate) const MAX_TRACKED_HOOK_SESSIONS: usize = 256;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HookStateMachine {
     sessions: HashMap<String, HookSessionState>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct HookSessionState {
-    phase: HookPhase,
-    turn_active: bool,
-    turn_id: Option<String>,
-    /// 已收到 `SessionEnd` 的会话保留为空墓碑，用于拒绝随后迟到的事件。
-    ended: bool,
-    /// 由应用层注入的进程内单调经过时间，领域层不直接读取系统时钟。
-    last_seen_at: Duration,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum HookPhase {
-    #[default]
-    Released,
-    Idle,
-    Running,
-    Asking,
-    Error,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StoppedTurnDecision {
-    NotApplicable,
-    SuppressLateEvent,
-    StartNewTurn,
 }
 
 impl HookStateMachine {
@@ -371,53 +350,6 @@ impl HookStateMachine {
     #[cfg(test)]
     fn tracked_session_count(&self) -> usize {
         self.sessions.len()
-    }
-}
-
-// 会话被 `ensure_capacity_for` 淘汰的优先级：墓碑最先被淘汰，其次是
-// 轮次已结束的非活跃会话，正在进行中的活跃会话最后才被淘汰。
-fn session_eviction_priority(session: &HookSessionState) -> u8 {
-    if session.ended {
-        0
-    } else if !session.turn_active {
-        1
-    } else {
-        2
-    }
-}
-
-// 判断收到的事件是否来自一个已经被更新轮次替换掉的旧轮次；没有轮次 id
-// 的事件（例如某些工具不携带 turn_id）永远不算过期。
-fn turn_is_stale(session: &HookSessionState, incoming_turn_id: Option<&str>) -> bool {
-    incoming_turn_id.is_some_and(|incoming| {
-        session
-            .turn_id
-            .as_deref()
-            .is_some_and(|current| current != incoming)
-    })
-}
-
-// 对已停止轮次收到的“可作为工作起点”的事件分类：同一 turn 只能是迟到事件，
-// 不同 turn 则是 Goal 模式恢复或自动续跑产生的新隐式轮次。
-fn stopped_turn_decision(
-    session: &HookSessionState,
-    event_kind: HookEventKind,
-    turn_id: Option<&str>,
-) -> StoppedTurnDecision {
-    if session.turn_active
-        || turn_id.is_none()
-        || session.turn_id.is_none()
-        || !matches!(
-            event_kind,
-            HookEventKind::WorkProgress(_) | HookEventKind::State(_)
-        )
-    {
-        return StoppedTurnDecision::NotApplicable;
-    }
-    if turn_is_stale(session, turn_id) {
-        StoppedTurnDecision::StartNewTurn
-    } else {
-        StoppedTurnDecision::SuppressLateEvent
     }
 }
 

@@ -36,6 +36,20 @@ Hermes 的工具名与目录字段只接受 `hermes`；不存在其他别名。O
 OpenClaw 的辅助 manifest/metadata 与主入口视为一组，任一现有文件不是当前
 AIMonitor 管理的文件时整组拒绝覆盖。
 
+## 写入结果契约
+
+每个 `HookProtocol` 必须声明自身配置实际变化后的唯一 `HookWriteOutcome`；
+application 层只在内容未变化时统一返回 `unchanged`。当前稳定结果码为：
+
+`unchanged`、`active`、`restartRequired`、`codexReviewRequired`、
+`workBuddyReviewRequired`、`codeBuddyReviewRequired`、
+`hermesEnableRequired`、`openClawEnableRequired`。
+
+`HookConfigWriteResult` 中兼容保留的 `configChanged`、`requiresReview` 与
+`restartRequired` 必须从该 outcome 派生，不能形成第二套判断。前端不得再按工具名
+推断审核、重启或插件启用步骤，只允许把 outcome 映射为本地化展示文案。新增工具
+或改变写入后要求时，必须同时更新协议实现、契约测试、上述结果码集合与本文。
+
 ## 管理标识与命令
 
 - 唯一管理标识为 `AIMonitor:tool={slug}`，大小写与 `:` 分隔符固定。

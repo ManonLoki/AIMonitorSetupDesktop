@@ -4,10 +4,13 @@ import { listen } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
 // 引入 React 的副作用 hook，用于在组件生命周期内订阅/取消订阅事件
 import { useEffect } from "react";
-// 引入被发现设备的类型定义
-import type { DiscoveredMonitorDevice } from "../api/monitor";
+// 引入 Rust 原子设备快照类型
+import type { MonitorDeviceSnapshot } from "../api/monitor";
 // 引入 monitor 相关的查询键定义
-import { monitorKeys } from "../queries/monitor";
+import {
+  monitorKeys,
+  preferLatestDeviceSnapshot,
+} from "../queries/monitor";
 
 // Rust 后端在设备发现结果变化时会发出的事件名
 const MONITOR_DEVICES_CHANGED_EVENT = "monitor-devices-changed";
@@ -26,15 +29,27 @@ export function useMonitorDeviceEvents() {
     // 保存取消监听的函数，卸载时调用
     let unlisten: (() => void) | undefined;
 
-    // 订阅设备变化事件；事件到达时用最新的设备列表覆盖查询缓存
-    void listen<DiscoveredMonitorDevice[]>(
+    // 订阅设备变化事件；事件到达时用同一版本的完整快照覆盖查询缓存
+    void listen<MonitorDeviceSnapshot>(
       MONITOR_DEVICES_CHANGED_EVENT,
       (event) => {
-        // 直接把事件负载写入设备列表的查询缓存，跳过重新请求
-        queryClient.setQueryData(monitorKeys.devices(), event.payload);
-        // Rust 会在当前设备离线时同步选择并持久化第一台在线设备。
-        // 设备事件到达后刷新设置，避免 UI 继续显示旧选择。
-        void queryClient.invalidateQueries({ queryKey: monitorKeys.settings() });
+        const previous = queryClient.getQueryData<MonitorDeviceSnapshot>(
+          monitorKeys.devices(),
+        );
+        const latest = preferLatestDeviceSnapshot(previous, event.payload);
+        if (latest !== event.payload) return;
+        queryClient.setQueryData(monitorKeys.devices(), latest);
+        // Rust 自动切换到另一台设备时，当前设备相关缓存必须重新读取。
+        if (
+          previous &&
+          previous.selectedDeviceId !== latest.selectedDeviceId
+        ) {
+          void Promise.all([
+            queryClient.resetQueries({ queryKey: monitorKeys.profiles() }),
+            queryClient.resetQueries({ queryKey: monitorKeys.images() }),
+            queryClient.invalidateQueries({ queryKey: monitorKeys.settings() }),
+          ]);
+        }
       },
     ).then((stopListening) => {
       if (disposed) {

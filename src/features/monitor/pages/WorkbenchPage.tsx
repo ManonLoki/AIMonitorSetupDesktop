@@ -18,7 +18,6 @@ import type { DiscoveredMonitorDevice } from "../api/monitor";
 // 引入查询键与预定义的查询配置
 import {
   monitorDevicesQuery,
-  monitorSettingsQuery,
   runtimeOverviewQuery,
 } from "../queries/monitor";
 // 引入通用图标组件
@@ -34,12 +33,11 @@ export function WorkbenchPage() {
   };
   // 查询运行时概览信息（含 hook 中继状态），对接 get_runtime_overview 命令，每 3 秒自动轮询一次
   const runtime = useQuery(runtimeOverviewQuery);
-  // 查询当前监控设置（用于判断哪个设备是“当前连接”），对接 get_monitor_settings 命令
-  const settings = useQuery(monitorSettingsQuery);
-  // 查询局域网内已发现的设备列表，对接 discover_monitor_devices 命令，10 秒内视为新鲜
-  const devices = useQuery(monitorDevicesQuery);
+  // 查询 Rust 原子设备快照；在线列表和当前选择来自同一次状态读取。
+  const deviceSnapshot = useQuery(monitorDevicesQuery);
   // 从运行时概览中取出 hook 中继状态，便于下方多处引用
   const relay = runtime.data?.hookRelay;
+  const lastEvent = relay?.lastEvent;
 
   return (
     <Stack gap="md">
@@ -61,27 +59,30 @@ export function WorkbenchPage() {
               variant="default"
               leftSection={<LineIcon name="refresh" size={17} />}
               // 手动触发一次设备发现，强制刷新在线设备列表
-              onClick={() => devices.refetch()}
-              loading={devices.isFetching}
+              onClick={() => deviceSnapshot.refetch()}
+              loading={deviceSnapshot.isFetching}
             >
               {t("workbench.forceCheck")}
             </Button>
           </Group>
 
           {/* 设备发现查询自身的错误提示 */}
-          {devices.error && <Alert color="red">{devices.error.message}</Alert>}
+          {deviceSnapshot.error && (
+            <Alert color="red">{deviceSnapshot.error.message}</Alert>
+          )}
 
           {/* 查询完成但未发现任何设备时的提示 */}
-          {!devices.isPending && devices.data?.length === 0 && (
+          {!deviceSnapshot.isPending &&
+            deviceSnapshot.data?.devices.length === 0 && (
             <Alert color="yellow" variant="light">
               {t("workbench.noOnline")}
             </Alert>
-          )}
+            )}
 
           {/* 已发现设备列表：逐个渲染设备名称（当前连接设备额外标注）、访问地址、API 版本与发现来源徽标 */}
-          {(devices.data?.length ?? 0) > 0 && (
+          {(deviceSnapshot.data?.devices.length ?? 0) > 0 && (
             <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm">
-              {devices.data?.map((device) => (
+              {deviceSnapshot.data?.devices.map((device) => (
                 <div className="endpoint-preview" key={device.id}>
                   <Group justify="space-between" wrap="nowrap">
                     <Group gap="sm" wrap="nowrap">
@@ -90,7 +91,8 @@ export function WorkbenchPage() {
                         <Text size="sm" fw={600} truncate>
                           {device.name}
                           {/* 当前已连接设备的额外标注 */}
-                          {device.id === settings.data?.deviceId && (
+                          {device.id ===
+                            deviceSnapshot.data.selectedDeviceId && (
                             <Text component="span" size="xs" c="dimmed">
                               {" "}
                               · {t("device.currentConnection")}
@@ -143,13 +145,15 @@ export function WorkbenchPage() {
           </SimpleGrid>
 
           {/* 最近一次事件的工具、hook 类型与对应行为（若无行为则说明是释放位置） */}
-          {relay?.lastHookType && (
+          {lastEvent && (
             <Text size="sm">
-              {t("workbench.latestEvent")} <Code>{relay.lastTool}</Code> /{" "}
-              <Code>{relay.lastHookType}</Code>
-              {relay.lastBehavior
-                ? ` · ${t("workbench.currentBehavior", { behavior: t(`behavior.${relay.lastBehavior}`) })}`
-                : ` · ${t("workbench.released")}`}
+              {t("workbench.latestEvent")} <Code>{lastEvent.tool}</Code> /{" "}
+              <Code>{lastEvent.hookType}</Code>
+              {lastEvent.kind === "display"
+                ? ` · ${t("workbench.currentBehavior", { behavior: t(`behavior.${lastEvent.behavior}`) })}`
+                : lastEvent.kind === "release"
+                  ? ` · ${t("workbench.released")}`
+                  : ` · ${t("workbench.eventSuppressed")}`}
             </Text>
           )}
 

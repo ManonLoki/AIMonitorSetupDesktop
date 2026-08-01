@@ -34,7 +34,8 @@ mod wsl;
 mod test_support;
 
 pub use connection::ConnectionStatus;
-pub use service_images::{ImageUpload, RemoteImage};
+pub use service_discovery::MonitorDeviceSnapshot;
+pub use service_images::{ImageUpload, RemoteImageGallery};
 
 // 本地持久化存储文件名（保存监控配置数据的 JSON 文件）。
 const STORE_FILENAME: &str = "monitor-data.json";
@@ -103,6 +104,14 @@ fn build_hook_forward_client() -> reqwest::Result<reqwest::blocking::Client> {
 // 应用核心服务：持有 HTTP 客户端、数据存储路径与内存态、在线设备快照、
 // 发现去抖计数、Hook 配置写入互斥锁、Hook 中继状态等所有共享状态。
 // Clone 只克隆 Arc/Client 句柄，底层状态仍然共享。
+#[derive(Default)]
+struct DeviceSnapshotState {
+    // 已提交设备快照的进程内单调修订号。
+    revision: u64,
+    // 最近发起的发现世代；较旧扫描晚完成时必须放弃提交。
+    latest_refresh_generation: u64,
+}
+
 #[derive(Clone)]
 pub struct MonitorService {
     // 复用的 reqwest HTTP 客户端。
@@ -117,6 +126,9 @@ pub struct MonitorService {
     online_devices: Arc<RwLock<Vec<DiscoveredMonitorDevice>>>,
     // 各设备连续未被发现命中的次数，用于去抖判定离线。
     discovery_missed_scans: Arc<Mutex<HashMap<String, u8>>>,
+    // 设备快照事务锁兼进程内单调 revision。发现提交与手动切换共用
+    // 这一个临界区，防止 settings/online_devices 被交错组合成撕裂快照。
+    device_snapshot_state: Arc<Mutex<DeviceSnapshotState>>,
     // Hook 配置文件写入互斥锁，避免并发写入导致文件损坏。
     hook_config_write_lock: Arc<Mutex<()>>,
     // Hook 中继监听/转发状态（供前端查询展示）。
@@ -143,14 +155,33 @@ pub struct HookRelayStatus {
     pub suppressed_count: u64,
     // 当前排队等待处理的数量。
     pub pending_count: u64,
-    // 最近一次处理涉及的 AI 工具。
-    pub last_tool: Option<AiTool>,
-    // 最近一次收到的 Hook 类型（原始事件名）。
-    pub last_hook_type: String,
-    // 最近一次转换出的行为类型。
-    pub last_behavior: Option<HookBehavior>,
+    // 最近一次事件的显式处理结果；前端无需从空 behavior 推断“释放”。
+    pub last_event: Option<HookRelayLastEvent>,
     // 最近一次的错误信息（无错误时为空字符串）。
     pub last_error: String,
+}
+
+/// 最近一次 Hook 的业务结果。`kind` 是稳定判别字段，展示行为、释放和时序
+/// 抑制互斥，避免跨字段组合产生歧义。
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum HookRelayLastEvent {
+    Display {
+        tool: AiTool,
+        #[serde(rename = "hookType")]
+        hook_type: String,
+        behavior: HookBehavior,
+    },
+    Release {
+        tool: AiTool,
+        #[serde(rename = "hookType")]
+        hook_type: String,
+    },
+    Suppressed {
+        tool: AiTool,
+        #[serde(rename = "hookType")]
+        hook_type: String,
+    },
 }
 
 // axum handler（`relay::listener`）解析出的一个 Hook 事件；由状态机 worker

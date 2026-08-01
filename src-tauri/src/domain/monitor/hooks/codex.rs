@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands, platform_command};
-use crate::domain::monitor::{AiTool, HookBehavior};
+use crate::domain::monitor::{AiTool, HookBehavior, HookWriteOutcome};
 
 pub(super) static CODEX: CodexProtocol = CodexProtocol;
 
@@ -81,13 +81,8 @@ impl HookProtocol for CodexProtocol {
         json!([{ "hooks": [command] }])
     }
 
-    // Codex 需要在 CLI 中运行 /hooks 审核并信任新增规则。
-    fn requires_review(&self) -> bool {
-        true
-    }
-
-    // Codex 启动时会快照 Hooks 配置，需重启 App 或新建任务才能生效。
-    fn restart_required(&self) -> bool {
-        true
+    // Codex 需要运行 /hooks 审核，并重启 App 或新建任务加载新规则。
+    fn changed_write_outcome(&self) -> HookWriteOutcome {
+        HookWriteOutcome::CodexReviewRequired
     }
 }

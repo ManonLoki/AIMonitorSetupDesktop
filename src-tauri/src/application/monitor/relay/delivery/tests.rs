@@ -8,11 +8,11 @@ use std::{
 use super::*;
 use crate::{
     application::monitor::{
-        DEFAULT_DEVICE_API_PATH,
+        DEFAULT_DEVICE_API_PATH, HookRelayLastEvent,
         test_support::{read_test_http_request, test_profile},
     },
     domain::monitor::{
-        DiscoverySource, HookConfigDirectories, MonitorDeviceRoute, MonitorSettings,
+        DiscoverySource, HookBehavior, HookConfigDirectories, MonitorDeviceRoute, MonitorSettings,
     },
 };
 
@@ -63,6 +63,97 @@ fn online_device(id: &str, name: &str, address: SocketAddr) -> DiscoveredMonitor
         path: DEFAULT_DEVICE_API_PATH.to_owned(),
         discovery_source: DiscoverySource::Mdns,
     }
+}
+
+#[test]
+fn missing_profile_failure_preserves_the_last_transition() {
+    let last_event = HookRelayLastEvent::Display {
+        tool: AiTool::Codex,
+        hook_type: "PermissionRequest".to_owned(),
+        behavior: HookBehavior::Asking,
+    };
+    let status = Arc::new(RwLock::new(HookRelayStatus {
+        pending_count: 1,
+        last_event: Some(last_event.clone()),
+        ..HookRelayStatus::default()
+    }));
+    let data = Arc::new(RwLock::new(SavedMonitorData::default()));
+    let online_devices = Arc::new(RwLock::new(Vec::new()));
+    let mut scheduler = DeliveryScheduler::new(
+        &reqwest::blocking::Client::new(),
+        &data,
+        &online_devices,
+        Arc::clone(&status),
+    );
+
+    scheduler.enqueue(&relay("UserPromptSubmit", HookBehavior::Running));
+
+    let status = status.read().unwrap();
+    assert_eq!(status.received_count, 1);
+    assert_eq!(status.pending_count, 0);
+    assert_eq!(status.failed_count, 1);
+    assert_eq!(status.forwarded_count, 0);
+    assert_eq!(status.last_event, Some(last_event));
+    assert_eq!(status.last_error, "尚未配置该 AI 的转发位置");
+}
+
+#[test]
+fn queue_failure_before_delivery_does_not_report_a_release() {
+    let pending: PendingTargetRelays = Arc::new(Mutex::new(HashMap::new()));
+    let pending_to_poison = Arc::clone(&pending);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = pending_to_poison.lock().unwrap();
+            panic!("poison the target queue for the test");
+        })
+        .join()
+        .is_err()
+    );
+
+    let last_event = HookRelayLastEvent::Display {
+        tool: AiTool::Codex,
+        hook_type: "Stop".to_owned(),
+        behavior: HookBehavior::Idle,
+    };
+    let status = Arc::new(RwLock::new(HookRelayStatus {
+        pending_count: 1,
+        last_event: Some(last_event.clone()),
+        ..HookRelayStatus::default()
+    }));
+    let relay = PendingHookRelay {
+        tool: AiTool::Codex,
+        hook_type: "SessionEnd".to_owned(),
+        transition: HookTransition::Release,
+        counts_as_hook: true,
+    };
+    let key = DeliveryKey {
+        tool: relay.tool,
+        device_id: "screen-1".to_owned(),
+    };
+    let tracker = DeliveryTracker::new(Arc::clone(&status), &relay, 1);
+    let scheduler = DeliveryScheduler {
+        client: reqwest::blocking::Client::new(),
+        data: Arc::new(RwLock::new(SavedMonitorData::default())),
+        online_devices: Arc::new(RwLock::new(Vec::new())),
+        status: Arc::clone(&status),
+        pending,
+        wake_senders: HashMap::new(),
+    };
+
+    scheduler.enqueue_target(
+        &key,
+        PendingTargetRelay {
+            transition: relay.transition,
+            tracker,
+        },
+    );
+
+    let status = status.read().unwrap();
+    assert_eq!(status.received_count, 1);
+    assert_eq!(status.pending_count, 0);
+    assert_eq!(status.failed_count, 1);
+    assert_eq!(status.last_event, Some(last_event));
+    assert_eq!(status.last_error, "Hook 目标队列不可用");
 }
 
 #[test]

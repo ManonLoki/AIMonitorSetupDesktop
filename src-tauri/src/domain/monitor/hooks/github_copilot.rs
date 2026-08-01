@@ -3,7 +3,7 @@ use serde_json::{Map, Value, json};
 use super::{
     HookEvent, HookEventKind, HookProtocol, ManagedCommands, entry_is_managed, platform_command,
 };
-use crate::domain::monitor::{AiTool, HookBehavior};
+use crate::domain::monitor::{AiTool, HookBehavior, HookWriteOutcome};
 
 pub(super) static GITHUB_COPILOT: GitHubCopilotProtocol = GitHubCopilotProtocol;
 
@@ -108,7 +108,7 @@ impl HookProtocol for GitHubCopilotProtocol {
     }
 
     // Copilot CLI 启动时加载用户级 Hook 文件，写入后需重启或新建会话。
-    fn restart_required(&self) -> bool {
-        true
+    fn changed_write_outcome(&self) -> HookWriteOutcome {
+        HookWriteOutcome::RestartRequired
     }
 }

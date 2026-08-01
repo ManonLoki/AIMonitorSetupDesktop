@@ -3,7 +3,7 @@ use serde_json::Value;
 use super::{
     HookEvent, HookEventKind, HookProtocol, ManagedCommands, command_group, platform_command,
 };
-use crate::domain::monitor::{AiTool, HookBehavior};
+use crate::domain::monitor::{AiTool, HookBehavior, HookWriteOutcome};
 
 pub(super) static GEMINI_CLI: GeminiCliProtocol = GeminiCliProtocol;
 
@@ -79,7 +79,7 @@ impl HookProtocol for GeminiCliProtocol {
     }
 
     // 新会话重新读取用户设置，确保当前进程中的 Hook 快照不会继续沿用旧配置。
-    fn restart_required(&self) -> bool {
-        true
+    fn changed_write_outcome(&self) -> HookWriteOutcome {
+        HookWriteOutcome::RestartRequired
     }
 }

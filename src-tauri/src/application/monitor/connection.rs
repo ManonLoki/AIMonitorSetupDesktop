@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use super::{DISCOVERY_PROBE_TIMEOUT, MonitorService};
-use crate::domain::monitor::normalize_base_url;
+use crate::domain::monitor::{DiscoveredMonitorDevice, normalize_base_url};
 
 // 用户主动触发的连接检测比批量发现探测更宽松：偶发触发、无需批量并发扫描，
 // 值得多等一会儿以减少误报“不可达”。
@@ -21,7 +21,54 @@ pub struct ConnectionStatus {
 }
 
 impl MonitorService {
-    // 检测某个 base_url（未指定时用当前保存设置）的设备是否可连接，返回带提示信息的连接状态。
+    /// 从当前在线快照中取出 UI 当前选中的设备。只按稳定的设备 ID
+    /// 匹配，因此返回的名称和地址都来自设备发现的最新快照，而不是可能
+    /// 已经过期的持久化路由。当前设备不在快照时直接拒绝设备业务请求。
+    pub(super) fn current_online_device(&self) -> Result<DiscoveredMonitorDevice, String> {
+        // 与发现提交/手动切换共用事务锁，避免在读取 device_id 后、
+        // 查找在线路由前被切换打断，从而让旧 expectedDeviceId 错误通过。
+        let _snapshot_transaction = self.lock_device_snapshot_transaction()?;
+        self.current_online_device_locked()
+    }
+
+    /// 调用方必须已持有设备快照事务锁。
+    fn current_online_device_locked(&self) -> Result<DiscoveredMonitorDevice, String> {
+        let device_id = self.settings()?.device_id;
+        if device_id.is_empty() {
+            return Err("请先选择 AIMonitor 设备".to_owned());
+        }
+
+        self.online_devices
+            .read()
+            .map_err(|_| "在线设备读取锁已损坏".to_owned())?
+            .iter()
+            .find(|device| device.id == device_id)
+            .cloned()
+            .ok_or_else(|| "当前 AIMonitor 设备不在线".to_owned())
+    }
+
+    /// 返回当前在线设备的最新基地址，供图片等设备业务统一复用。
+    pub(super) fn current_device_base_url(&self) -> Result<String, String> {
+        normalize_base_url(&self.current_online_device()?.base_url)
+    }
+
+    /// 用调用开始时取得的设备 ID 作为并发预条件。它不指定写入目标；实际目标
+    /// 仍由当前 Rust 状态决定，选择已变化时拒绝跨设备执行。
+    pub(super) fn current_device_base_url_for(
+        &self,
+        expected_device_id: &str,
+    ) -> Result<String, String> {
+        // expected ID 校验也必须位于同一事务内，不能在取出设备后先释放锁。
+        let _snapshot_transaction = self.lock_device_snapshot_transaction()?;
+        let device = self.current_online_device_locked()?;
+        if device.id != expected_device_id {
+            return Err("当前设备已切换，请重新执行操作".to_owned());
+        }
+        normalize_base_url(&device.base_url)
+    }
+
+    // 检测某个 base_url（未指定时用当前在线设备的最新地址）是否可连接，
+    // 返回带提示信息的连接状态。
     pub async fn check_connection(
         &self,
         base_url: Option<&str>,
@@ -29,8 +76,8 @@ impl MonitorService {
         let base_url = match base_url {
             // 显式传入 url 时先做归一化校验。
             Some(value) => normalize_base_url(value)?,
-            // 未传入则使用当前保存的设备地址。
-            None => self.settings()?.base_url,
+            // 未传入则使用在线快照中的最新地址；离线时不回退历史地址。
+            None => self.current_device_base_url()?,
         };
         // 请求设备的 /health 接口，超时比发现探测更长（用户主动触发的检测）。
         let result = self
@@ -82,5 +129,103 @@ impl MonitorService {
                 .await,
             Ok(response) if response.status().is_success()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::{Ipv4Addr, TcpListener},
+        path::PathBuf,
+        thread,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+    use crate::domain::monitor::{DiscoveredMonitorDevice, DiscoverySource};
+
+    fn loaded_service(test_name: &str) -> (MonitorService, PathBuf) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-monitor-{test_name}-{}-{unique}",
+            std::process::id()
+        ));
+        let config_home = root.join("home");
+        fs::create_dir_all(&config_home).unwrap();
+        let service = MonitorService::load(&root.join("app-data"), &config_home).unwrap();
+        (service, root)
+    }
+
+    fn device(id: &str, base_url: &str) -> DiscoveredMonitorDevice {
+        DiscoveredMonitorDevice {
+            id: id.to_owned(),
+            name: format!("Monitor {id}"),
+            api_version: "1".to_owned(),
+            base_url: base_url.to_owned(),
+            path: "/api/device".to_owned(),
+            discovery_source: DiscoverySource::Mdns,
+        }
+    }
+
+    #[test]
+    fn current_device_uses_latest_online_address_and_rejects_offline_history() {
+        let (service, root) = loaded_service("current-online-device");
+        service
+            .select_device(&device("screen-1", "http://192.168.50.10:8080"))
+            .unwrap();
+        *service.online_devices.write().unwrap() = vec![
+            device("screen-2", "http://192.168.50.20:8080"),
+            device("screen-1", "http://192.168.50.99:9090/"),
+        ];
+
+        let current = service.current_online_device().unwrap();
+        assert_eq!(current.id, "screen-1");
+        assert_eq!(current.base_url, "http://192.168.50.99:9090/");
+        assert_eq!(
+            service.current_device_base_url().unwrap(),
+            "http://192.168.50.99:9090"
+        );
+        assert_eq!(
+            service.current_device_base_url_for("screen-2"),
+            Err("当前设备已切换，请重新执行操作".to_owned())
+        );
+        // 清空发现快照后，持久化的旧地址仍在，但设备业务必须拒绝请求。
+        service.online_devices.write().unwrap().clear();
+        assert_eq!(
+            service.current_device_base_url(),
+            Err("当前 AIMonitor 设备不在线".to_owned())
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_connection_url_remains_available_without_a_selected_online_device() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let length = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /health "));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let (service, root) = loaded_service("explicit-connection-url");
+        let base_url = format!("http://{address}/");
+
+        let status =
+            tauri::async_runtime::block_on(service.check_connection(Some(&base_url))).unwrap();
+
+        assert!(status.reachable);
+        assert_eq!(status.base_url, format!("http://{address}"));
+        server.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -19,7 +19,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 // 引入 TanStack Query 的 mutation/query hooks 及 queryClient
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 // 引入 React 的副作用与状态 hooks
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSetAtom } from "jotai";
 // 引入设置相关的类型化 API 函数
 import {
@@ -29,11 +29,11 @@ import {
   updateAutostart,
 } from "../api/monitor";
 import type { AiTool } from "../api/monitor";
-import { AI_TOOLS } from "../components/aiTools";
 import { HooksManagementCard } from "../components/HooksManagementCard";
 // 引入查询键与预定义的查询配置
 import {
   monitorKeys,
+  monitorCapabilitiesQuery,
   monitorSettingsQuery,
   runtimeOverviewQuery,
 } from "../queries/monitor";
@@ -45,11 +45,6 @@ import { LineIcon } from "../../../shared/ui/LineIcon";
 import { useI18n } from "../../../shared/i18n";
 import type { LanguagePreference } from "../../../shared/state/ui";
 
-// 在线设备自动检查间隔（分钟）的默认值与允许范围，与 Rust 侧
-// domain::monitor 的 DEFAULT/MIN/MAX_DISCOVERY_INTERVAL_MINUTES 保持一致。
-const DEFAULT_DISCOVERY_INTERVAL_MINUTES = 1;
-const MIN_DISCOVERY_INTERVAL_MINUTES = 1;
-const MAX_DISCOVERY_INTERVAL_MINUTES = 60;
 const AUTHOR = "ManonLoki";
 const GITHUB_URL = "https://github.com/ManonLoki/AIMonitorSetupDesktop";
 
@@ -63,18 +58,22 @@ export function SettingsPage() {
   const runtime = useQuery(runtimeOverviewQuery);
   // 查询当前监控设置（用户名、发现间隔等），对接 get_monitor_settings 命令，视为永久新鲜（仅手动失效）
   const settings = useQuery(monitorSettingsQuery);
+  // Rust 领域层声明的工具目录与数值范围，应用运行期间保持不变。
+  const capabilities = useQuery(monitorCapabilitiesQuery);
   // 显示用户名的本地编辑草稿
   const [username, setUsername] = useState("");
   // 在线设备自动检查间隔（分钟）的本地编辑草稿，默认 1 分钟
-  const [discoveryIntervalMinutes, setDiscoveryIntervalMinutes] = useState(
-    DEFAULT_DISCOVERY_INTERVAL_MINUTES,
-  );
+  const [discoveryIntervalMinutes, setDiscoveryIntervalMinutes] = useState<
+    number | string
+  >("");
   // 设置页 AI 客户端多选草稿；保存后同时影响监控管理与 Hooks 管理的选项卡。
   const [selectedTools, setSelectedTools] = useState<AiTool[]>([]);
+  const draftsInitialized = useRef(false);
 
-  // 当远端设置数据到达后，用远端数据初始化本地用户名与检查间隔草稿
+  // 只初始化一次；后续保存某一字段时不能覆盖其他尚未提交的本地草稿。
   useEffect(() => {
-    if (!settings.data) return;
+    if (!settings.data || draftsInitialized.current) return;
+    draftsInitialized.current = true;
     setUsername(settings.data.username);
     setDiscoveryIntervalMinutes(settings.data.discoveryIntervalMinutes);
     setSelectedTools(settings.data.enabledAiTools);
@@ -89,28 +88,35 @@ export function SettingsPage() {
   // 保存显示用户名的 mutation：对接 save_monitor_username 命令；成功后把返回的最新设置写入 settings 查询缓存
   const saveUsername = useMutation({
     mutationFn: saveMonitorUsername,
-    onSuccess: (data) =>
-      queryClient.setQueryData(monitorKeys.settings(), data),
+    onSuccess: (data) => {
+      queryClient.setQueryData(monitorKeys.settings(), data);
+      setUsername(data.username);
+    },
   });
 
   // 保存自动检查间隔的 mutation：对接 save_discovery_interval 命令；成功后把返回的最新设置写入 settings 查询缓存
   const saveInterval = useMutation({
     mutationFn: saveDiscoveryInterval,
-    onSuccess: (data) =>
-      queryClient.setQueryData(monitorKeys.settings(), data),
+    onSuccess: (data) => {
+      queryClient.setQueryData(monitorKeys.settings(), data);
+      setDiscoveryIntervalMinutes(data.discoveryIntervalMinutes);
+    },
   });
 
   // 保存勾选的 AI 客户端的 mutation：对接 save_enabled_ai_tools 命令；成功后把返回的最新设置写入 settings 查询缓存
   const saveTools = useMutation({
     mutationFn: saveEnabledAiTools,
-    onSuccess: (data) =>
-      queryClient.setQueryData(monitorKeys.settings(), data),
+    onSuccess: (data) => {
+      queryClient.setQueryData(monitorKeys.settings(), data);
+      setSelectedTools(data.enabledAiTools);
+    },
   });
 
   // 汇总所有相关查询/mutation 的错误，任意一个出错就展示错误提示
   const error =
     runtime.error ??
     settings.error ??
+    capabilities.error ??
     autostart.error ??
     saveUsername.error ??
     saveInterval.error ??
@@ -118,6 +124,7 @@ export function SettingsPage() {
 
   // 已保存的 AI 客户端列表，同时用作 HooksManagementCard 的可见范围
   const savedTools = settings.data?.enabledAiTools ?? [];
+  const aiTools = capabilities.data?.aiTools ?? [];
   // 本地勾选草稿是否与已保存列表不同，决定“保存 AI 客户端”按钮是否可用
   const toolsDirty =
     selectedTools.length !== savedTools.length ||
@@ -164,20 +171,24 @@ export function SettingsPage() {
             spacing="xs"
             verticalSpacing={4}
           >
-            {AI_TOOLS.map((tool) => (
+            {aiTools.map((tool) => (
               <Checkbox
-                key={tool.value}
-                label={tool.label}
+                key={tool.tool}
+                label={tool.name}
                 size="sm"
-                checked={selectedTools.includes(tool.value)}
-                disabled={settings.isPending || saveTools.isPending}
+                checked={selectedTools.includes(tool.tool)}
+                disabled={
+                  settings.isPending ||
+                  capabilities.isPending ||
+                  saveTools.isPending
+                }
                 onChange={(event) => {
                   const checked = event.currentTarget.checked;
                   saveTools.reset();
                   setSelectedTools((current) =>
                     checked
-                      ? [...current, tool.value]
-                      : current.filter((value) => value !== tool.value),
+                      ? [...current, tool.tool]
+                      : current.filter((value) => value !== tool.tool),
                   );
                 }}
               />
@@ -187,7 +198,7 @@ export function SettingsPage() {
       </Card>
 
       {/* Hooks 配置目录与写入管理卡片，使用已保存（非草稿）的可见工具范围 */}
-      <HooksManagementCard enabledTools={savedTools} />
+      <HooksManagementCard enabledTools={savedTools} aiTools={aiTools} />
 
       <Card
         withBorder
@@ -259,18 +270,14 @@ export function SettingsPage() {
                 label={t("settings.interval")}
                 description={t("settings.intervalDescription")}
                 suffix={t("settings.minutesSuffix")}
-                min={MIN_DISCOVERY_INTERVAL_MINUTES}
-                max={MAX_DISCOVERY_INTERVAL_MINUTES}
+                min={capabilities.data?.discoveryInterval.min}
+                max={capabilities.data?.discoveryInterval.max}
                 step={1}
                 value={discoveryIntervalMinutes}
                 onChange={(value) => {
-                  // 编辑间隔时清空上一次保存结果状态；非数字输入时兜底为默认值
+                  // 编辑间隔时清空上一次保存结果状态；范围由 Rust capability 提供。
                   saveInterval.reset();
-                  setDiscoveryIntervalMinutes(
-                    typeof value === "number"
-                      ? value
-                      : DEFAULT_DISCOVERY_INTERVAL_MINUTES,
-                  );
+                  setDiscoveryIntervalMinutes(value);
                 }}
                 disabled={settings.isPending}
                 style={{ flex: "1 1 auto", minWidth: 0 }}
@@ -278,10 +285,14 @@ export function SettingsPage() {
               <Button
                 size="xs"
                 // 保存当前编辑的自动检查间隔
-                onClick={() => saveInterval.mutate(discoveryIntervalMinutes)}
+                onClick={() => {
+                  if (typeof discoveryIntervalMinutes === "number") {
+                    saveInterval.mutate(discoveryIntervalMinutes);
+                  }
+                }}
                 loading={saveInterval.isPending}
                 disabled={
-                  !discoveryIntervalMinutes ||
+                  typeof discoveryIntervalMinutes !== "number" ||
                   discoveryIntervalMinutes ===
                     settings.data?.discoveryIntervalMinutes
                 }

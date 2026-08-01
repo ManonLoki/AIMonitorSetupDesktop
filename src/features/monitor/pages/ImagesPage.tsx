@@ -23,8 +23,12 @@ import {
   uploadRemoteImages,
   type RemoteImage,
 } from "../api/monitor";
-// 引入查询键与远端图片查询配置
-import { monitorKeys, remoteImagesQuery } from "../queries/monitor";
+// 引入查询键、静态能力与远端图片查询配置
+import {
+  monitorCapabilitiesQuery,
+  monitorKeys,
+  remoteImagesQuery,
+} from "../queries/monitor";
 // 引入按图片类型（jpeg/png/gif）过滤的本地 hook
 import { useImageCategoryFilter } from "../hooks/useImageCategoryFilter";
 // 引入通用图标组件
@@ -33,6 +37,7 @@ import { LineIcon } from "../../../shared/ui/LineIcon";
 import { useMonitorConnection } from "../hooks/useMonitorConnection";
 // 引入设备未就绪时的统一拦截组件
 import { useMonitorDeviceGate } from "../components/MonitorDeviceGate";
+import { imageUploadAcceptValue } from "../components/imageUploadAccept";
 import { useI18n } from "../../../shared/i18n";
 
 export function ImagesPage() {
@@ -43,40 +48,53 @@ export function ImagesPage() {
   const queryClient = useQueryClient();
   // 获取当前监控设备的连接状态：设置、设备列表、是否已配置/可用设备、是否处于加载中
   const {
-    settings,
-    devices,
+    snapshot,
     hasConfiguredDevice,
     hasAvailableDevice,
     isPending: monitorPending,
   } = useMonitorConnection();
+  const selectedDeviceId = snapshot.data?.selectedDeviceId ?? "";
+  const capabilities = useQuery(monitorCapabilitiesQuery);
   // 查询远端图片列表（对接 list_remote_images 命令），仅在设备已配置且可用时才发起请求
   const images = useQuery({
-    ...remoteImagesQuery,
+    ...remoteImagesQuery(selectedDeviceId),
     enabled: hasConfiguredDevice && hasAvailableDevice,
   });
 
   // 批量上传图片的 mutation：对接 upload_remote_images 命令；无论成功失败都使图片列表查询（monitorKeys.images）失效以重新拉取
   const upload = useMutation({
-    mutationFn: uploadRemoteImages,
+    mutationFn: ({ files, expectedDeviceId }: {
+      files: File[];
+      expectedDeviceId: string;
+    }) => uploadRemoteImages(files, expectedDeviceId),
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: monitorKeys.images() }),
   });
 
   // 删除单张图片的 mutation：对接 delete_remote_image 命令；成功后使图片列表查询失效以重新拉取
   const remove = useMutation({
-    mutationFn: deleteRemoteImage,
+    mutationFn: ({ filename, expectedDeviceId }: {
+      filename: string;
+      expectedDeviceId: string;
+    }) => deleteRemoteImage(filename, expectedDeviceId),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: monitorKeys.images() }),
   });
 
-  // 汇总所有相关查询/mutation 的错误，任意一个出错就展示错误提示
-  const error =
-    settings.error ?? devices.error ?? images.error ?? upload.error ?? remove.error;
+  const blockingError =
+    snapshot.error ?? capabilities.error ?? images.error;
+  const mutationError = upload.error ?? remove.error;
   // 图片列表数据，查询未返回数据时兜底为空数组
-  const imageList = images.data ?? [];
-  // 按类型（全部/jpeg/png/gif）过滤图片列表，并统计各类型数量
-  const { category, setCategory, filteredImages, counts } =
+  const imageList = images.data?.images ?? [];
+  const counts = images.data?.counts;
+  // 分类选择和过滤是纯 UI 状态；数量由 Rust 图库快照提供。
+  const { category, setCategory, filteredImages } =
     useImageCategoryFilter(imageList);
+  const uploadAccept = imageUploadAcceptValue(
+    capabilities.data?.imageUploadAccept,
+  );
+
+  if (blockingError) return <Alert color="red">{blockingError.message}</Alert>;
 
   // 设备门禁：设备未配置或不可用时，返回统一的拦截提示，阻止渲染正式页面内容
   const deviceGate = useMonitorDeviceGate({
@@ -113,31 +131,37 @@ export function ImagesPage() {
           hidden
           type="file"
           multiple
-          accept=".bmp,.jpg,.jpeg,.gif,.png,.webp,image/bmp,image/jpeg,image/gif,image/png,image/webp"
+          accept={uploadAccept}
           // 选中文件后触发上传 mutation，并清空 input 的值以便下次可重复选择同一文件
           onChange={(event) => {
             const files = Array.from(event.currentTarget.files ?? []);
-            if (files.length > 0) upload.mutate(files);
+            if (files.length > 0 && selectedDeviceId) {
+              upload.mutate({
+                files,
+                expectedDeviceId: selectedDeviceId,
+              });
+            }
             event.currentTarget.value = "";
           }}
         />
       </Group>
 
       {/* 汇总错误提示 */}
-      {error && <Alert color="red">{error.message}</Alert>}
+      {mutationError && <Alert color="red">{mutationError.message}</Alert>}
       {/* 上传成功后的提示，展示成功上传的图片数量 */}
-      {upload.isSuccess && (
+      {upload.isSuccess &&
+        upload.variables.expectedDeviceId === selectedDeviceId && (
         <Alert color="teal">
           {t("image.uploaded", { count: upload.data.length })}
         </Alert>
-      )}
+        )}
 
       {/* 三种主状态分支：查询中显示加载态；已有图片数据时显示分类筛选与图片网格；否则显示空态引导 */}
       {images.isPending ? (
         <Center py={80}>
           <Loader />
         </Center>
-      ) : images.data?.length ? (
+      ) : imageList.length ? (
         <>
           {/* 图片数量统计文案与按类型筛选的分段控件 */}
           <Group justify="space-between" align="center">
@@ -152,9 +176,9 @@ export function ImagesPage() {
               onChange={(value) => setCategory(value as typeof category)}
               data={[
                 { value: "all", label: t("common.allCount", { count: imageList.length }) },
-                { value: "jpeg", label: `JPEG ${counts.jpeg}` },
-                { value: "png", label: `PNG ${counts.png}` },
-                { value: "gif", label: `GIF ${counts.gif}` },
+                { value: "jpeg", label: `JPEG ${counts?.jpeg ?? 0}` },
+                { value: "png", label: `PNG ${counts?.png ?? 0}` },
+                { value: "gif", label: `GIF ${counts?.gif ?? 0}` },
               ]}
             />
           </Group>
@@ -168,7 +192,12 @@ export function ImagesPage() {
                 <RemoteImageCard
                   key={image.filename}
                   image={image}
-                  onDelete={() => remove.mutate(image.filename)}
+                  onDelete={() =>
+                    remove.mutate({
+                      filename: image.filename,
+                      expectedDeviceId: selectedDeviceId,
+                    })
+                  }
                 />
               ))}
             </SimpleGrid>
@@ -233,7 +262,7 @@ function RemoteImageCard({ image, onDelete }: RemoteImageCardProps) {
           }
         />
         <Badge className="image-type" variant="filled" color="dark" size="xs">
-          {image.mimeType.replace("image/", "").toUpperCase()}
+          {image.format.toUpperCase()}
         </Badge>
       </div>
       {/* 底部信息栏：显示图片尺寸（或加载中占位文案）与来源说明，右侧提供删除操作菜单 */}

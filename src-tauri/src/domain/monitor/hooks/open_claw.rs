@@ -1,5 +1,7 @@
 use super::{HookEvent, HookEventKind, HookProtocol, managed_hook_marker};
-use crate::domain::monitor::{AiTool, DEFAULT_HOOK_RELAY_PORT, HookBehavior, HookConfigPreview};
+use crate::domain::monitor::{
+    AiTool, DEFAULT_HOOK_RELAY_PORT, HookBehavior, HookConfigPreview, HookWriteOutcome,
+};
 
 pub(super) static OPEN_CLAW: OpenClawProtocol = OpenClawProtocol;
 
@@ -55,14 +57,9 @@ impl HookProtocol for OpenClawProtocol {
         }
     }
 
-    // 插件安装后需要用户显式 `openclaw plugins enable` 才会被信任加载。
-    fn requires_review(&self) -> bool {
-        true
-    }
-
-    // OpenClaw Gateway 需要重启才能发现并加载新插件。
-    fn restart_required(&self) -> bool {
-        true
+    // 插件安装后需要显式启用、授权，并重启 Gateway 才能发现和加载。
+    fn changed_write_outcome(&self) -> HookWriteOutcome {
+        HookWriteOutcome::OpenClawEnableRequired
     }
 
     fn standalone_config(&self) -> Option<String> {
