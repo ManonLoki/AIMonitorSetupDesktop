@@ -4,6 +4,7 @@ use axum::{
     extract::{Path as RoutePath, State},
     http::{HeaderMap, StatusCode as AxumStatusCode},
 };
+use tokio::sync::mpsc::error::TrySendError;
 
 use crate::{
     application::monitor::{
@@ -39,17 +40,29 @@ pub(crate) async fn handle_hook_request(
     if let Ok(mut current) = state.status.write() {
         current.pending_count += 1;
     }
-    if state.sender.send(event).is_ok() {
-        // 成功入队后立刻回 202，表示已接受、异步处理。
-        (AxumStatusCode::ACCEPTED, "Accepted")
-    } else {
-        // 工作线程已经退出导致发送失败：回滚待处理计数，返回 503，并记录失败。
-        if let Ok(mut current) = state.status.write() {
-            current.pending_count = current.pending_count.saturating_sub(1);
+    match state.sender.try_send(event) {
+        Ok(()) => {
+            // 成功入队后立刻回 202，表示已接受、异步处理。
+            (AxumStatusCode::ACCEPTED, "Accepted")
         }
-        record_relay_failure(&state.status, "Hook 转发工作线程已停止".to_owned());
-        (AxumStatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
+        Err(TrySendError::Full(_)) => {
+            rollback_pending_and_record_enqueue_failure(&state, "Hook 事件队列已满");
+            (AxumStatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
+        }
+        Err(TrySendError::Closed(_)) => {
+            rollback_pending_and_record_enqueue_failure(&state, "Hook 转发工作线程已停止");
+            (AxumStatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
+        }
     }
+}
+
+// 入队失败时撤销解析成功阶段预记的 pending，并把具体失败原因写入中继状态。
+// 队列满与 worker 已停止必须保持不同错误，方便工作台区分短时洪峰和服务故障。
+fn rollback_pending_and_record_enqueue_failure(state: &HookListenerState, error: &'static str) {
+    if let Ok(mut current) = state.status.write() {
+        current.pending_count = current.pending_count.saturating_sub(1);
+    }
+    record_relay_failure(&state.status, error.to_owned());
 }
 
 // 校验并解析一个 Hook 请求的最小信封：路径 slug 决定 AI 工具，请求体必须是唯一的
@@ -115,8 +128,53 @@ fn normalize_hook_context_field(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{Arc, RwLock},
+        time::Duration,
+    };
+
+    use axum::{
+        body::Bytes,
+        http::{HeaderValue, StatusCode},
+    };
+    use tokio::sync::mpsc;
+
     use super::*;
+    use crate::application::monitor::HookRelayStatus;
     use crate::domain::monitor::AiTool;
+
+    fn queued_event() -> IncomingHookEvent {
+        IncomingHookEvent {
+            tool: AiTool::Codex,
+            hook_type: "SessionStart".to_owned(),
+            session_id: None,
+            turn_id: None,
+            status: None,
+        }
+    }
+
+    async fn submit_valid_request(state: HookListenerState) -> (AxumStatusCode, &'static str) {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-aimonitor-hook-type",
+            HeaderValue::from_static("SessionStart"),
+        );
+        handle_hook_request(
+            RoutePath("codex".to_owned()),
+            State(state),
+            headers,
+            Bytes::from_static(br#"{"hook_event_name":"SessionStart"}"#),
+        )
+        .await
+    }
+
+    fn run_handler_with_timeout(state: HookListenerState) -> (AxumStatusCode, &'static str) {
+        tauri::async_runtime::block_on(async move {
+            tokio::time::timeout(Duration::from_secs(1), submit_valid_request(state))
+                .await
+                .expect("队列不可用时 Hook handler 不应阻塞 runtime")
+        })
+    }
 
     // 验证 parse_hook_envelope 能正确解析一个合法的最小 Hook 请求：
     // 最小信封和可信事件头应被成功解析出 (工具, 事件类型)。
@@ -203,5 +261,53 @@ mod tests {
             assert_eq!(parsed.tool, tool);
             assert_eq!(parsed.hook_type, "probe");
         }
+    }
+
+    #[test]
+    fn full_ingress_queue_returns_service_unavailable_without_blocking() {
+        let (sender, _receiver) = mpsc::channel(1);
+        sender.try_send(queued_event()).unwrap();
+        let status = Arc::new(RwLock::new(HookRelayStatus {
+            // 预先填入的事件在真实流程中已经计入 pending。
+            pending_count: 1,
+            ..HookRelayStatus::default()
+        }));
+        let state = HookListenerState {
+            sender,
+            status: Arc::clone(&status),
+        };
+
+        let response = run_handler_with_timeout(state);
+
+        assert_eq!(
+            response,
+            (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
+        );
+        let status = status.read().unwrap();
+        assert_eq!(status.pending_count, 1);
+        assert_eq!(status.failed_count, 1);
+        assert_eq!(status.last_error, "Hook 事件队列已满");
+    }
+
+    #[test]
+    fn closed_ingress_queue_returns_service_unavailable_without_blocking() {
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let status = Arc::new(RwLock::new(HookRelayStatus::default()));
+        let state = HookListenerState {
+            sender,
+            status: Arc::clone(&status),
+        };
+
+        let response = run_handler_with_timeout(state);
+
+        assert_eq!(
+            response,
+            (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
+        );
+        let status = status.read().unwrap();
+        assert_eq!(status.pending_count, 0);
+        assert_eq!(status.failed_count, 1);
+        assert_eq!(status.last_error, "Hook 转发工作线程已停止");
     }
 }

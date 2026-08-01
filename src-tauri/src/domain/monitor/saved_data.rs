@@ -1,8 +1,7 @@
-// 标准库：HashSet 用于去重校验，Path 用于校验目录。
-use std::collections::HashSet;
-use std::path::Path;
-
+// 标准库：HashSet 用于去重校验，IP/Path 用于校验地址与目录。
+use std::{collections::HashSet, net::Ipv6Addr, path::Path};
 // serde：结构体的序列化与反序列化派生宏。
+use http::{Uri, uri::Scheme};
 use serde::{Deserialize, Serialize};
 
 use super::device::normalize_enabled_ai_tools;
@@ -133,29 +132,53 @@ pub fn validate_client_id(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 
-// 规范化并校验用户输入的设备基地址：去空白、去掉末尾斜杠、要求 http/https 协议且不含空白。
+// 规范化并校验用户输入的设备基地址：必须是无路径、查询和用户信息的
+// HTTP(S) origin。普通 IPv6 可用；链路本地 IPv6 必须依赖 zone identifier，
+// 而 reqwest 0.12 无法传输，因此无论是否显式带 zone 都在持久化边界拒绝。
 pub fn normalize_base_url(value: &str) -> Result<String, String> {
-    // 先去首尾空白，再去掉末尾多余的 '/'，避免拼接路径时出现双斜杠。
+    // 先去首尾空白，再去掉任意数量的根路径斜杠，避免后续拼接路径
+    // 时出现双斜杠。内部空白仍是非法 URI。
     let normalized = value.trim().trim_end_matches('/');
-    // 只接受 http:// 或 https:// 开头的地址。
-    let has_supported_scheme =
-        normalized.starts_with("http://") || normalized.starts_with("https://");
-
-    // 协议不受支持，或地址内部还含有空白字符（比如粘贴时带了空格），都视为非法。
-    if !has_supported_scheme || normalized.contains(char::is_whitespace) {
+    // `http::Uri` 专注 HTTP request-target，不建模 fragment，因此在解析前
+    // 显式拒绝 `#`。
+    if normalized.is_empty() || normalized.contains(char::is_whitespace) || normalized.contains('#')
+    {
         return Err("基地址必须是以 http:// 或 https:// 开头的有效地址".to_owned());
     }
 
-    // 取出 "://" 之后的主机部分（authority），用于校验是否给了主机名/IP。
-    let authority = normalized
-        .split_once("://")
-        .map_or("", |(_, authority)| authority);
-    // authority 为空，或者以 ':' 开头（只写了端口没写主机），都视为非法。
-    if authority.is_empty() || authority.starts_with(':') {
+    let uri = normalized
+        .parse::<Uri>()
+        .map_err(|error| format!("基地址不是有效 URI：{error}"))?;
+    let scheme = uri
+        .scheme()
+        .filter(|scheme| **scheme == Scheme::HTTP || **scheme == Scheme::HTTPS)
+        .ok_or_else(|| "基地址必须使用 http 或 https 协议".to_owned())?;
+    let authority = uri
+        .authority()
+        .ok_or_else(|| "基地址缺少有效的主机名或 IP".to_owned())?;
+    if authority.as_str().contains('@') || authority.host().is_empty() {
         return Err("基地址缺少有效的主机名或 IP".to_owned());
     }
+    let host = authority.host();
+    let is_link_local_ipv6 = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .and_then(|host| host.parse::<Ipv6Addr>().ok())
+        .is_some_and(|host| host.is_unicast_link_local());
+    if host.contains('%') || is_link_local_ipv6 {
+        return Err("基地址暂不支持链路本地 IPv6 地址".to_owned());
+    }
+    // `http::Uri` 会保留无法解析为 u16 的端口文本；根据 host 后缀判断
+    // 是否显式写了端口，并严格拒绝空、非数字、越界或 0 端口。
+    let port_suffix = &authority.as_str()[authority.host().len()..];
+    if !port_suffix.is_empty() && authority.port_u16().is_none_or(|port| port == 0) {
+        return Err("基地址包含无效端口".to_owned());
+    }
+    if uri.path() != "/" || uri.query().is_some() {
+        return Err("基地址只能包含协议、主机和端口".to_owned());
+    }
 
-    Ok(normalized.to_owned())
+    Ok(format!("{}://{}", scheme.as_str(), authority.as_str()))
 }
 
 // 将一次发现结果转换为可持久化的设备路由，同时校验 ID/名称/基地址均有效。
@@ -271,9 +294,51 @@ mod tests {
     #[test]
     fn base_url_is_trimmed_and_trailing_slashes_are_removed() {
         assert_eq!(
-            normalize_base_url(" http://192.168.1.10:8080/ ").unwrap(),
+            normalize_base_url(" http://192.168.1.10:8080/// ").unwrap(),
             "http://192.168.1.10:8080"
         );
+        assert_eq!(
+            normalize_base_url("HTTPS://Example.COM/").unwrap(),
+            "https://Example.COM"
+        );
+    }
+
+    #[test]
+    fn base_url_accepts_ipv4_and_transportable_ipv6_origins() {
+        for (input, expected) in [
+            ("http://127.0.0.1", "http://127.0.0.1"),
+            ("http://[fd00::20]:8080/", "http://[fd00::20]:8080"),
+        ] {
+            assert_eq!(normalize_base_url(input).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn base_url_rejects_non_origin_components_and_invalid_authorities() {
+        for invalid in [
+            "",
+            "ftp://example.com",
+            "example.com",
+            "http://",
+            "http://:8080",
+            "http://user@example.com",
+            "http://user:password@example.com",
+            "http://example.com:",
+            "http://example.com:not-a-port",
+            "http://example.com:65536",
+            "http://example.com:0",
+            "http://[fe80::1%2512]:8080",
+            "http://[fe80::1]:8080",
+            "http://example.com/api",
+            "http://example.com?ready=true",
+            "http://example.com#status",
+            "http://example .com",
+        ] {
+            assert!(
+                normalize_base_url(invalid).is_err(),
+                "{invalid:?} must not be accepted as a device origin"
+            );
+        }
     }
 
     // 验证用户名校验：纯空白视为空用户名并拒绝，非空用户名会被去除首尾空白后保留。

@@ -1,6 +1,6 @@
 # 技术栈与版本
 
-最后核对：2026-07-27。JavaScript 版本来自 npm registry，Rust crate
+最后核对：2026-08-01。JavaScript 版本来自 npm registry，Rust crate
 版本来自 crates.io；`pnpm-lock.yaml` 和 `src-tauri/Cargo.lock` 是可复现构建的
 最终依据。
 
@@ -33,13 +33,20 @@
 
 | 用途 | 选择 | 当前锁定版本 | 使用边界 |
 | --- | --- | --- | --- |
-| 远端 HTTP | reqwest | 0.12.28 | 仅由 Rust application 层访问 AiMonitor 设备接口 |
+| 远端 HTTP | reqwest | 0.12.28 | 仅由 Rust application 层访问 AIMonitor 设备接口；本机/LAN 客户端关闭系统代理、重定向和库内隐式重试，Hook 启动竞态只使用显式固定重试契约 |
 | 命令行解析 | Clap | 4.6.4 | 仅用于解析并校验轻量 Hook relay 的内部命令行参数；桌面 GUI 启动参数不进入 Clap |
 | 本机 Hook HTTP listener | Axum / Tokio | 0.8.9 / 1.53.1 | Axum 只提供本机 Hook POST 路由与请求体限制；listener 复用 Tauri 的 Tokio runtime，并仅绑定环回地址 |
+| Hook ingress 有界通道 | Tokio MPSC | 1.53.1 | Axum handler 使用非阻塞 `try_send` 投递最小信封；状态机 worker 通过异步接收与定时 tick 保持 FIFO 和会话回收，不在 runtime worker 上阻塞等待队列 |
 | 图片解码/缩放/编码 | image（启用 `bmp`、`gif`、`jpeg`、`png`、`webp` feature） | 0.25.10 | 仅由 Rust domain 层在图片上传前使用：JPEG/PNG 长边超过 800px 时等比缩小并重新编码；GIF 校验后原样透传；BMP 与静态 WebP 转 PNG，动画 WebP 保留帧和延时转 GIF，避免依赖展示屏的 WebP 支持 |
+| 图片 Data URL 编码 | base64 | 0.22.1 | application 层使用标准 RFC 4648 字母表及 `=` padding 编码设备返回的图片字节，不保留手写位运算实现 |
+| MIME 解析 | mime | 0.3.17 | application 层解析设备图片响应的 `Content-Type` 及参数，再交由领域格式白名单判定 |
 | 局域网服务发现 | mdns-sd | 0.20.2 | 仅由 Rust application 层发现 `_aimonitor._tcp.local.` 设备 |
 | 网卡与广播地址 | if-addrs | 0.15.0 | 仅由 Rust application 层枚举可用 IPv4 网卡并发送 UDP 定向广播 |
+| HTTP 基地址解析 | http | 1.4.2 | domain/application 层使用 `Uri` 校验设备 origin 与区分 IPv4/IPv6；普通 IPv6 可用，必须依赖 RFC 6874 zone identifier、但 reqwest 0.12 无法传输的链路本地 IPv6 在发现/持久化边界明确拒绝 |
+| 原生 Hook 文本解码 | encoding_rs | 0.8.35 | relay 边界按 BOM 严格解码 UTF-8、UTF-16LE/BE；损坏输入不使用替换字符放行 |
 | JSON 持久化 | serde_json | 1.0.151 | 保存设备设置与 AI 实例配置 |
+| Kimi TOML 生成 | toml | 1.1.3 | 只序列化 AIMonitor 自己生成的托管 Hook 区块；用户区块仍按字节保留，不解析后重写整份配置 |
+| 配置原子替换 | tempfile | 3.27.0 | application 层在目标同目录创建随机临时文件并持久化替换，避免固定临时名冲突及 Windows 直接截断写入 |
 | 控制端唯一身份 | uuid | 1.24.0 | 首次启动生成并持久化 `clientId`，用于槽位归属与心跳租约 |
 | 原生目录选择 | tauri-plugin-dialog | 2.7.2 | 为前端提供系统目录选择器 |
 | 系统外链 | tauri-plugin-opener | 2.5.4 | 通过 capability 白名单只开放项目 GitHub 地址 |

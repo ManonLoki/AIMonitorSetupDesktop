@@ -1,5 +1,6 @@
 use std::fmt::Write;
 
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands, managed_hook_marker};
@@ -8,6 +9,19 @@ use crate::domain::monitor::{AiTool, HookBehavior, HookConfigPreview, HookWriteO
 pub(super) static KIMI_CODE: KimiCodeProtocol = KimiCodeProtocol;
 
 pub(super) struct KimiCodeProtocol;
+
+#[derive(Serialize)]
+struct KimiConfig {
+    hooks: Vec<KimiHook>,
+}
+
+#[derive(Serialize)]
+struct KimiHook {
+    event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matcher: Option<String>,
+    command: String,
+}
 
 // Kimi Code 的用户配置与 Hooks 共用 ~/.kimi-code/config.toml。只订阅能稳定
 // 推进四态展示的公开生命周期事件；PermissionResult 与 Notification 不直接
@@ -90,7 +104,7 @@ impl HookProtocol for KimiCodeProtocol {
 
     fn render_config(&self, hooks: Map<String, Value>) -> Result<String, String> {
         let marker = managed_hook_marker(self.tool());
-        let mut content = format!("# {marker} begin\n");
+        let mut serialized_hooks = Vec::with_capacity(self.events().len());
 
         for event in self.events() {
             let handler = hooks
@@ -101,18 +115,24 @@ impl HookProtocol for KimiCodeProtocol {
                 .get("command")
                 .and_then(Value::as_str)
                 .ok_or_else(|| format!("生成的 {} Hook 缺少 command", event.name))?;
-
-            content.push_str("[[hooks]]\n");
-            writeln!(content, "event = {}", toml_string(event.name))
-                .expect("writing to String cannot fail");
-            if let Some(matcher) = handler.get("matcher").and_then(Value::as_str) {
-                writeln!(content, "matcher = {}", toml_string(matcher))
-                    .expect("writing to String cannot fail");
-            }
-            writeln!(content, "command = {}\n", toml_string(command))
-                .expect("writing to String cannot fail");
+            serialized_hooks.push(KimiHook {
+                event: event.name.to_owned(),
+                matcher: handler
+                    .get("matcher")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                command: command.to_owned(),
+            });
         }
 
+        let serialized = toml::to_string(&KimiConfig {
+            hooks: serialized_hooks,
+        })
+        .map_err(|error| format!("无法序列化 Kimi Code Hooks 配置：{error}"))?;
+        let mut content = format!("# {marker} begin\n{serialized}");
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
         writeln!(content, "# {marker} end").expect("writing to String cannot fail");
         Ok(content)
     }
@@ -178,25 +198,4 @@ fn marker_line_ranges(content: &str, marker: &str) -> Vec<(usize, usize)> {
         offset = end;
     }
     ranges
-}
-
-fn toml_string(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            character if character.is_control() => {
-                write!(escaped, "\\u{:04X}", character as u32)
-                    .expect("writing to String cannot fail");
-            }
-            character => escaped.push(character),
-        }
-    }
-    escaped.push('"');
-    escaped
 }

@@ -1,6 +1,8 @@
 // 配置文件的读写工具：读取一个可能不存在的文件、原子写入文件内容。
 // 供 `service_lifecycle.rs` 里持久化配置/Hook 文件的逻辑使用。
-use std::{fs, path::Path};
+use std::{fs, io::Write, path::Path};
+
+use tempfile::Builder;
 
 // 读取一个可能尚不存在的配置文件；文件缺失视为正常情况（返回 None），
 // 而不是错误——首次写入前，Hook 配置和应用存储文件都可能还不存在。
@@ -30,22 +32,109 @@ pub(super) fn write_atomic_file(path: &Path, content: &str, label: &str) -> Resu
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("配置文件路径无效：{}", path.display()))?;
-    // 临时文件名以 . 开头并带特殊后缀，避免与正常文件冲突或被误读。
-    let temporary_path = parent.join(format!(".{filename}.aimonitor.tmp"));
-    fs::write(&temporary_path, content)
+    // 随机临时文件必须与目标文件位于同一目录，才能由 persist 在各平台执行
+    // 原子替换；NamedTempFile 在任何失败路径上都会自动清理尚未持久化的文件。
+    let temporary_prefix = format!(".{filename}.aimonitor-");
+    let mut temporary_file = Builder::new()
+        .prefix(&temporary_prefix)
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|error| format!("无法在 {} 创建临时配置：{error}", parent.display()))?;
+    let temporary_path = temporary_file.path().to_path_buf();
+
+    temporary_file
+        .as_file_mut()
+        .write_all(content.as_bytes())
         .map_err(|error| format!("无法写入临时配置 {}：{error}", temporary_path.display()))?;
+    temporary_file
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("无法同步临时配置 {}：{error}", temporary_path.display()))?;
+    temporary_file
+        .persist(path)
+        .map_err(|error| format!("无法写入{label} {}：{}", path.display(), error.error))?;
 
-    // 类 Unix 系统上 rename 是原子操作，可以安全地替换目标文件；
-    // Windows 上 rename 到已存在文件会失败，因此改用直接写入+删除临时文件的方式。
-    #[cfg(not(windows))]
-    let replace_result = fs::rename(&temporary_path, path);
-    #[cfg(windows)]
-    let replace_result = fs::write(path, content).and_then(|()| fs::remove_file(&temporary_path));
-
-    if let Err(error) = replace_result {
-        // 替换失败时尽力清理临时文件，避免遗留垃圾文件。
-        let _ = fs::remove_file(&temporary_path);
-        return Err(format!("无法写入{label} {}：{error}", path.display()));
-    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    use tempfile::tempdir;
+
+    use super::write_atomic_file;
+
+    #[test]
+    fn atomic_write_creates_parent_directories_and_file() {
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("nested/config.json");
+
+        write_atomic_file(&target, "new content", "测试配置").unwrap();
+
+        assert_eq!(fs::read_to_string(target).unwrap(), "new content");
+    }
+
+    #[test]
+    fn atomic_write_replaces_an_existing_file() {
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("config.json");
+        fs::write(&target, "old content").unwrap();
+
+        write_atomic_file(&target, "replacement", "测试配置").unwrap();
+
+        assert_eq!(fs::read_to_string(target).unwrap(), "replacement");
+    }
+
+    #[test]
+    fn failed_persist_keeps_target_and_cleans_temporary_file() {
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("config.json");
+        fs::create_dir(&target).unwrap();
+
+        assert!(write_atomic_file(&target, "content", "测试配置").is_err());
+        assert!(target.is_dir());
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".config.json.aimonitor-")
+                })
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn concurrent_writes_never_leave_partial_content() {
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("config.json");
+        let first_content = "a".repeat(128 * 1024);
+        let second_content = "b".repeat(128 * 1024);
+        let barrier = Arc::new(Barrier::new(3));
+
+        let writers = [first_content.clone(), second_content.clone()].map(|content| {
+            let barrier = Arc::clone(&barrier);
+            let target = target.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                write_atomic_file(&target, &content, "测试配置").unwrap();
+            })
+        });
+        barrier.wait();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let persisted = fs::read_to_string(target).unwrap();
+        assert!(persisted == first_content || persisted == second_content);
+    }
 }

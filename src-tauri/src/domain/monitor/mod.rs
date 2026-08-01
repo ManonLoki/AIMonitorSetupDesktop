@@ -6,7 +6,6 @@
 // （如 HookContent、default_enabled_ai_tools），避免为此在公共 API 上
 // 保留生产代码从未用到的重导出。
 pub(crate) mod device;
-mod encoding;
 mod hook_config_types;
 mod hook_state_machine;
 mod hooks;
@@ -22,7 +21,6 @@ pub use device::{
     AiProfile, AiTool, AiToolDescriptor, DiscoveredMonitorDevice, DiscoverySource, HookBehavior,
     MonitorCapabilities, MonitorCapabilityRange, MonitorDeviceRoute, normalize_enabled_ai_tools,
 };
-pub(crate) use encoding::encode_base64;
 pub use hook_config_types::{
     HookConfigDirectories, HookConfigLocation, HookConfigPreview, HookConfigWriteResult,
     HookWriteOutcome,

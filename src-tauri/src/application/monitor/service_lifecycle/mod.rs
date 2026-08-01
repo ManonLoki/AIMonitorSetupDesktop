@@ -7,12 +7,11 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 
-use reqwest::Client;
 use uuid::Uuid;
 
 use super::{
     DeviceSnapshotState, HOOK_BIND_ADDRESS, HOOK_LISTENER_PORT, HookRelayStatus, MonitorService,
-    STORE_FILENAME,
+    STORE_FILENAME, build_monitor_client,
     config_io::{read_optional_config, write_atomic_file, write_config},
     hook_config::{detect_hook_config_directories, detect_system_username},
     wsl::WslDirectory,
@@ -58,7 +57,7 @@ impl MonitorService {
             persist_to(&data_path, &data)?;
         }
         Ok(Self {
-            client: Client::new(),
+            client: build_monitor_client()?,
             data_path,
             default_hook_config_directories: detect_hook_config_directories(config_home),
             data: Arc::new(RwLock::new(data)),

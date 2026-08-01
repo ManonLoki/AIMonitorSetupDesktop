@@ -1,6 +1,7 @@
 use super::super::status::record_hook_results_with_accounting;
 use super::*;
 use crate::domain::monitor::HookBehavior;
+use std::{thread, time::Duration};
 
 #[test]
 fn synthetic_timeout_delivery_does_not_consume_a_hook_metric() {
@@ -46,7 +47,7 @@ fn unsupported_hook_preserves_the_last_transition_and_records_failure() {
     }));
     let data = Arc::new(RwLock::new(SavedMonitorData::default()));
     let online_devices = Arc::new(RwLock::new(Vec::new()));
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::channel(1);
     spawn_hook_worker(
         &reqwest::blocking::Client::new(),
         receiver,
@@ -56,7 +57,7 @@ fn unsupported_hook_preserves_the_last_transition_and_records_failure() {
     );
 
     sender
-        .send(IncomingHookEvent {
+        .try_send(IncomingHookEvent {
             tool: AiTool::Codex,
             hook_type: "UnknownHook".to_owned(),
             session_id: None,

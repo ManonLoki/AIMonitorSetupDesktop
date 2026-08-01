@@ -1,12 +1,11 @@
 // 设备端图片相关接口的编排：拉取远端图片列表/内容、批量上传（含压缩转换）、
 // 删除。成功性校验/错误信息提取复用 `device_response` 模块。
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::{Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
 use super::{MAX_REMOTE_IMAGE_BYTES, MonitorService, device_response::ensure_success};
-use crate::domain::monitor::{
-    ImageFormat, encode_base64, is_supported_upload_image_mime, process_image_upload,
-};
+use crate::domain::monitor::{ImageFormat, is_supported_upload_image_mime, process_image_upload};
 
 // 从设备下载的远程图片，image 字段为 base64 编码内容。
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -110,6 +109,29 @@ fn ensure_image_size(len: u64, filename: &str) -> Result<(), String> {
     Ok(())
 }
 
+// 用完整 MIME 语法解析 Content-Type，因此参数、大小写均按标准
+// 处理，而损坏的参数不会像简单 split(';') 那样被静默忽略。
+fn image_format_from_content_type(value: &str) -> Option<ImageFormat> {
+    let content_type = value.trim().parse::<mime::Mime>().ok()?;
+    ImageFormat::from_mime_type(content_type.essence_str())
+}
+
+// 有效且受支持的响应头优先于列表元数据；响应头无效或不受支持时
+// 再回退元数据，兼容较旧的设备固件。
+fn remote_image_format(header_value: Option<&str>, metadata_value: &str) -> Option<ImageFormat> {
+    header_value
+        .and_then(image_format_from_content_type)
+        .or_else(|| image_format_from_content_type(metadata_value))
+}
+
+fn image_data_url(format: ImageFormat, bytes: &[u8]) -> String {
+    format!(
+        "data:{};base64,{}",
+        format.mime_type(),
+        STANDARD.encode(bytes)
+    )
+}
+
 // 上传前的批量校验：必须至少选择一张图片，且每张图片文件名非空、内容非空、
 // 大小不超限、MIME 类型受支持；任意一张不满足都直接整体拒绝（不做部分上传）。
 fn validate_image_uploads(images: &[ImageUpload]) -> Result<(), String> {
@@ -184,18 +206,13 @@ impl MonitorService {
             ensure_image_size(length, filename)?;
         }
 
-        // 优先信任响应头里的 Content-Type（去掉可能的 charset 等参数），
-        // 找不到或不支持时回退使用元数据里记录的 MIME 类型。
-        let header_mime = response
+        // 优先信任响应头里的 Content-Type，缺失、无效或不支持时
+        // 回退使用元数据里记录的 MIME 类型。
+        let header_content_type = response
             .headers()
             .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .map(str::trim);
-        let format = [header_mime, Some(metadata.mime_type.trim())]
-            .into_iter()
-            .flatten()
-            .find_map(ImageFormat::from_mime_type)
+            .and_then(|value| value.to_str().ok());
+        let format = remote_image_format(header_content_type, &metadata.mime_type)
             .ok_or_else(|| format!("{filename} 返回了不支持的图片类型"))?;
 
         // 读取响应体全部字节。
@@ -207,11 +224,7 @@ impl MonitorService {
         ensure_image_size(bytes.len() as u64, filename)?;
 
         // 编码为 base64 data url，方便前端直接用作 img src。
-        let image = format!(
-            "data:{};base64,{}",
-            format.mime_type(),
-            encode_base64(&bytes)
-        );
+        let image = image_data_url(format, &bytes);
         Ok(RemoteImage {
             filename: filename.to_owned(),
             format,

@@ -94,6 +94,54 @@ fn batch_image_validation_accepts_all_supported_upload_types() {
 }
 
 #[test]
+fn data_urls_use_rfc4648_standard_base64_with_padding() {
+    let vectors = [
+        (b"".as_slice(), ""),
+        (b"f".as_slice(), "Zg=="),
+        (b"fo".as_slice(), "Zm8="),
+        (b"foo".as_slice(), "Zm9v"),
+        (b"foob".as_slice(), "Zm9vYg=="),
+        (b"fooba".as_slice(), "Zm9vYmE="),
+        (b"foobar".as_slice(), "Zm9vYmFy"),
+        ([0xFB, 0xFF].as_slice(), "+/8="),
+    ];
+
+    for (bytes, encoded) in vectors {
+        assert_eq!(
+            image_data_url(ImageFormat::Png, bytes),
+            format!("data:image/png;base64,{encoded}")
+        );
+    }
+}
+
+#[test]
+fn remote_image_content_type_is_strict_case_insensitive_and_header_first() {
+    assert_eq!(
+        image_format_from_content_type(" IMAGE/PNG; CHARSET=utf-8 "),
+        Some(ImageFormat::Png)
+    );
+    assert_eq!(
+        remote_image_format(Some("image/gif; version=1"), "image/jpeg"),
+        Some(ImageFormat::Gif),
+        "a supported response header must win over metadata"
+    );
+    assert_eq!(
+        remote_image_format(Some("image/png; broken"), "IMAGE/JPEG"),
+        Some(ImageFormat::Jpeg),
+        "an invalid header must fall back to valid metadata"
+    );
+    assert_eq!(
+        remote_image_format(Some("image/webp"), "image/gif"),
+        Some(ImageFormat::Gif),
+        "an unsupported header must fall back to valid metadata"
+    );
+    assert_eq!(
+        remote_image_format(Some("not a content type"), "image/tiff"),
+        None
+    );
+}
+
+#[test]
 fn remote_image_serializes_an_explicit_format_contract() {
     let image = RemoteImage {
         filename: "photo.jpg".to_owned(),

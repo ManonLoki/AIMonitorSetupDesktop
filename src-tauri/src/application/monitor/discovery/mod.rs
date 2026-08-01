@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use http::Uri;
 use if_addrs::{IfAddr, IfOperStatus};
 use mdns_sd::ScopedIp;
 use serde::Deserialize;
@@ -17,7 +18,7 @@ use super::{
     DEFAULT_DEVICE_API_PATH, DISCOVERY_MISSES_BEFORE_REMOVAL, UDP_DISCOVERY_PORT,
     UDP_DISCOVERY_REQUEST, UDP_DISCOVERY_TIMEOUT, UDP_RESPONSE_MAX_BYTES,
 };
-use crate::domain::monitor::{DiscoveredMonitorDevice, DiscoverySource};
+use crate::domain::monitor::{DiscoveredMonitorDevice, DiscoverySource, normalize_base_url};
 
 // 两轮 UDP 探测报文之间的发送间隔，给偶发丢包留出重试窗口。
 const UDP_BROADCAST_RETRY_INTERVAL: Duration = Duration::from_millis(75);
@@ -60,12 +61,9 @@ pub(super) fn discovery_base_url(address: &ScopedIp, port: u16) -> Option<String
     match address {
         // IPv4 地址直接拼接。
         ScopedIp::V4(address) => Some(format!("http://{}:{port}", address.addr())),
-        // IPv6 链路本地地址必须带上作用域 ID（zone id），否则无法正确路由；
-        // 若作用域 ID 为 0（无效），则放弃该候选地址。
-        ScopedIp::V6(address) if address.addr().is_unicast_link_local() => {
-            let scope_id = address.scope_id().index;
-            (scope_id != 0).then(|| format!("http://[{}%25{scope_id}]:{port}", address.addr()))
-        }
+        // reqwest 0.12 的 URL 传输边界无法表示 RFC 6874 zone identifier；
+        // 链路本地 IPv6 缺少作用域又无法路由，因此不要生成必然探测失败的候选。
+        ScopedIp::V6(address) if address.addr().is_unicast_link_local() => None,
         // 其他 IPv6 地址（非链路本地）直接拼接，无需作用域 ID。
         ScopedIp::V6(address) => Some(format!("http://[{}]:{port}", address.addr())),
         // 未知地址类型不生成候选。
@@ -73,12 +71,20 @@ pub(super) fn discovery_base_url(address: &ScopedIp, port: u16) -> Option<String
     }
 }
 
-/// IPv4 地址优先于 IPv6（`http://[` 形式，第 8 个字符是 `[`）：IPv6
-/// 链路本地地址更容易受网卡切换、作用域 ID 失效等问题影响，连接稳定性更低。
+/// IPv4/主机名优先于普通 IPv6；无法解析、非 HTTP(S) 或当前传输层无法
+/// 表示的链路本地 IPv6 候选排在最后。
 pub(super) fn candidate_url_priority(base_url: &str) -> u8 {
-    // 第 8 个字节（下标 7）是 `[` 说明是 IPv6 字面量地址（http://[...），返回 1（低优先级）；
-    // IPv4 或其他情况返回 0（高优先级），从而让排序时 IPv4 排在前面。
-    u8::from(base_url.as_bytes().get(7) == Some(&b'['))
+    let Ok(normalized) = normalize_base_url(base_url) else {
+        return 2;
+    };
+    let Ok(uri) = normalized.parse::<Uri>() else {
+        return 2;
+    };
+    let Some(host) = uri.host().filter(|host| !host.is_empty()) else {
+        return 2;
+    };
+
+    u8::from(host.starts_with('['))
 }
 
 // 通过 UDP 广播方式发现设备：先枚举本机所有可用网卡的广播目标，再逐个发送探测报文。

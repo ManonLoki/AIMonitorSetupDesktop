@@ -1,4 +1,7 @@
+use serde_json::{Map, Value, json};
+
 use super::{merge_hook_config, tests::generate_test_hook_config};
+use crate::domain::monitor::hooks::{HookProtocol, kimi_code::KIMI_CODE};
 use crate::domain::monitor::{
     AiTool, HookBehavior, HookEventDecision, HookStateMachine, HookTransition,
 };
@@ -6,6 +9,7 @@ use crate::domain::monitor::{
 #[test]
 fn kimi_code_preview_uses_managed_toml_rules() {
     let preview = generate_test_hook_config(AiTool::KimiCode).unwrap();
+    let parsed = toml::from_str::<toml::Value>(&preview.content).unwrap();
 
     assert_eq!(preview.filename, ".kimi-code/config.toml");
     assert!(preview.content.contains("AIMonitor:tool=kimi-code begin"));
@@ -20,7 +24,48 @@ fn kimi_code_preview_uses_managed_toml_rules() {
             .contains("--aimonitor-hook-relay 'kimi-code'")
     );
     assert!(!preview.content.contains("cmd.exe"));
+    assert_eq!(
+        parsed
+            .get("hooks")
+            .and_then(toml::Value::as_array)
+            .map(Vec::len),
+        Some(14)
+    );
     assert!(super::super::hook_restart_required(AiTool::KimiCode));
+}
+
+#[test]
+fn kimi_code_toml_serializer_round_trips_special_characters() {
+    let special_command = "printf '\"quoted\" \\\\ slash\nnext\tcolumn\u{0007}雪'";
+    let special_matcher = "tool-\"name\"\\path\nnext\t\u{0001}雪";
+    let mut hooks = Map::new();
+
+    for event in KIMI_CODE.events() {
+        let mut handler = json!({ "command": special_command });
+        if event.name == "SessionStart" {
+            handler["matcher"] = Value::String(special_matcher.to_owned());
+        }
+        hooks.insert(event.name.to_owned(), handler);
+    }
+
+    let rendered = KIMI_CODE.render_config(hooks).unwrap();
+    let parsed = toml::from_str::<toml::Value>(&rendered).unwrap();
+    let session_start = parsed
+        .get("hooks")
+        .and_then(toml::Value::as_array)
+        .unwrap()
+        .iter()
+        .find(|hook| hook.get("event").and_then(toml::Value::as_str) == Some("SessionStart"))
+        .unwrap();
+
+    assert_eq!(
+        session_start.get("command").and_then(toml::Value::as_str),
+        Some(special_command)
+    );
+    assert_eq!(
+        session_start.get("matcher").and_then(toml::Value::as_str),
+        Some(special_matcher)
+    );
 }
 
 #[test]

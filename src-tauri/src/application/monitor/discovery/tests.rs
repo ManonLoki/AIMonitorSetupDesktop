@@ -10,10 +10,21 @@ use mdns_sd::{InterfaceId, ScopedIp, ScopedIpV4};
 use super::*;
 use crate::domain::monitor::{DiscoveredMonitorDevice, DiscoverySource};
 
-// 验证 IPv4 候选地址排序时排在 IPv6 之前。
+// 验证主机名/IPv4、可传输 IPv6 与无效/不可传输 URI 的三档排序边界。
 #[test]
-fn discovery_prefers_ipv4_candidates_before_ipv6() {
+fn discovery_prioritizes_valid_ipv4_ipv6_and_invalid_candidates() {
+    assert_eq!(candidate_url_priority("http://monitor.local:8080"), 0);
+    assert_eq!(candidate_url_priority("http://192.168.50.20:8080"), 0);
+    assert_eq!(candidate_url_priority("http://[fd00::20]:8080"), 1);
+    assert_eq!(candidate_url_priority("https://[fd00::20]:8443"), 1);
+    assert_eq!(candidate_url_priority("http://[fe80::1%2512]:8080"), 2);
+    assert_eq!(candidate_url_priority("http://[fe80::1]:8080"), 2);
+    assert_eq!(candidate_url_priority("ftp://monitor.local"), 2);
+    assert_eq!(candidate_url_priority("http://"), 2);
+    assert_eq!(candidate_url_priority("not a uri"), 2);
+
     let mut urls = [
+        "not a uri".to_owned(),
         "http://[fd00::20]:8080".to_owned(),
         "http://192.168.50.20:8080".to_owned(),
     ];
@@ -21,6 +32,8 @@ fn discovery_prefers_ipv4_candidates_before_ipv6() {
     urls.sort_by_key(|url| candidate_url_priority(url));
 
     assert_eq!(urls[0], "http://192.168.50.20:8080");
+    assert_eq!(urls[1], "http://[fd00::20]:8080");
+    assert_eq!(urls[2], "not a uri");
 }
 
 // 测试辅助函数：快速构造一个只有单个 base_url 的发现候选。
@@ -148,7 +161,8 @@ fn online_snapshot_requires_two_consecutive_misses_before_removing_a_device() {
     assert_eq!(missed_scans.get("device-b"), Some(&2));
 }
 
-// 验证 discovery_base_url 对 IPv4 与 IPv6（链路本地）地址都能正确拼出可直接探测的 URL。
+// 验证 discovery_base_url 生成可直接探测的 IPv4/全局 IPv6 URL，并跳过
+// reqwest 当前无法表示作用域的链路本地 IPv6。
 #[test]
 fn discovery_formats_addresses_for_direct_health_probes() {
     let ipv4 = ScopedIp::V4(ScopedIpV4::new(
@@ -159,6 +173,7 @@ fn discovery_formats_addresses_for_direct_health_probes() {
         },
     ));
     let ipv6 = ScopedIp::from(IpAddr::V6("fd00::20".parse::<Ipv6Addr>().unwrap()));
+    let link_local_ipv6 = ScopedIp::from(IpAddr::V6("fe80::20".parse::<Ipv6Addr>().unwrap()));
 
     assert_eq!(
         discovery_base_url(&ipv4, 8080).as_deref(),
@@ -168,6 +183,7 @@ fn discovery_formats_addresses_for_direct_health_probes() {
         discovery_base_url(&ipv6, 8080).as_deref(),
         Some("http://[fd00::20]:8080")
     );
+    assert_eq!(discovery_base_url(&link_local_ipv6, 8080), None);
 }
 
 // 验证根据 IP 和子网掩码计算定向广播地址的正确性（不同掩码长度）。

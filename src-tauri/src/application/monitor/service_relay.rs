@@ -1,8 +1,9 @@
 // 启动/查询本机 Hook 中继 HTTP 服务：axum 服务本身见 `relay::listener`，
 // 状态机 worker 见 `relay::worker`；本文件只负责组装、启动与状态查询。
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 use axum::{Router, extract::DefaultBodyLimit, routing::post};
+use tokio::sync::mpsc;
 
 use super::{
     HOOK_BIND_ADDRESS, HOOK_EVENT_QUEUE_CAPACITY, HOOK_LISTENER_PORT, HookListenerState,
@@ -13,7 +14,7 @@ use super::{
 
 impl MonitorService {
     // 启动本机 Hook 中继：用 axum 起一个只绑定回环地址的 HTTP 服务接收本地 Hook 请求，
-    // 再开一个工作线程从通道里取出请求做去抖判断并转发给设备。
+    // 再启动一个 Tokio task 从通道里取出请求做去抖判断并转发给设备。
     pub fn start_hook_listener(&self) {
         let data = Arc::clone(&self.data);
         let online_devices = Arc::clone(&self.online_devices);
@@ -27,10 +28,10 @@ impl MonitorService {
                 return;
             }
         };
-        // 建立一个有界 mpsc 通道：axum handler 只负责接收、解析并交给状态机 worker。
+        // 建立一个 Tokio 有界 mpsc 通道：axum handler 只负责接收、解析并交给状态机 worker。
         // 状态推进与设备网络投递已拆成两个阶段，worker 不会被慢设备阻塞；容量
-        // 仍设为固定值，为异常洪峰提供背压并从根源上避免原始事件无界堆积。
-        let (sender, receiver) = mpsc::sync_channel::<IncomingHookEvent>(HOOK_EVENT_QUEUE_CAPACITY);
+        // 仍设为固定值，handler 通过 try_send 在洪峰时立即拒绝，既限制内存也不阻塞 runtime。
+        let (sender, receiver) = mpsc::channel::<IncomingHookEvent>(HOOK_EVENT_QUEUE_CAPACITY);
         spawn_hook_worker(
             &client,
             receiver,

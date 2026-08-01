@@ -1,3 +1,5 @@
+use encoding_rs::{Encoding, UTF_8};
+
 // serde：结构体的序列化与反序列化派生宏。
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -66,32 +68,19 @@ pub fn minimize_native_hook_payload(
 // 输出 UTF-16LE/BE。统一在业务解析边界去掉 BOM 并转成 Rust UTF-8 字符串，避免
 // serde_json 把 BOM 当成 JSON 的第一个非法字符。
 fn decode_native_json(native_json: &[u8]) -> Result<String, String> {
-    if let Some(utf8) = native_json.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return std::str::from_utf8(utf8)
-            .map(str::to_owned)
-            .map_err(|error| format!("AI Hook 原始 JSON 不是有效 UTF-8：{error}"));
-    }
-    if let Some(utf16_le) = native_json.strip_prefix(&[0xFF, 0xFE]) {
-        return decode_utf16(utf16_le, u16::from_le_bytes);
-    }
-    if let Some(utf16_be) = native_json.strip_prefix(&[0xFE, 0xFF]) {
-        return decode_utf16(utf16_be, u16::from_be_bytes);
-    }
-    std::str::from_utf8(native_json)
-        .map(str::to_owned)
-        .map_err(|error| format!("AI Hook 原始 JSON 不是有效 UTF-8：{error}"))
-}
-
-fn decode_utf16(bytes: &[u8], decode_unit: fn([u8; 2]) -> u16) -> Result<String, String> {
-    if !bytes.len().is_multiple_of(2) {
-        return Err("AI Hook 原始 UTF-16 JSON 的字节数无效".to_owned());
-    }
-    let units = bytes
-        .chunks_exact(2)
-        .map(|chunk| decode_unit([chunk[0], chunk[1]]))
-        .collect::<Vec<_>>();
-    String::from_utf16(&units)
-        .map_err(|error| format!("AI Hook 原始 JSON 不是有效 UTF-16：{error}"))
+    // 只有 BOM 能声明 UTF-16；无 BOM 输入仍严格按 UTF-8 处理，避免
+    // 猜测编码把损坏的原始数据误解为可接受的 JSON。
+    let (encoding, bom_len) = Encoding::for_bom(native_json).unwrap_or((UTF_8, 0));
+    encoding
+        .decode_without_bom_handling_and_without_replacement(&native_json[bom_len..])
+        .map(std::borrow::Cow::into_owned)
+        .ok_or_else(|| {
+            if encoding == UTF_8 {
+                "AI Hook 原始 JSON 不是有效 UTF-8".to_owned()
+            } else {
+                "AI Hook 原始 JSON 不是有效 UTF-16".to_owned()
+            }
+        })
 }
 
 // 按候选字段名列表依次查找第一个非空白字符串值；不同工具对同一概念
@@ -206,5 +195,15 @@ mod tests {
     fn malformed_utf16_bom_input_is_rejected_without_panicking() {
         let error = minimize_native_hook_payload(&[0xFF, 0xFE, b'{'], "stop").unwrap_err();
         assert!(error.contains("UTF-16"));
+
+        // 单独的高代理项也必须严格拒绝，不能替换为 U+FFFD。
+        let error = minimize_native_hook_payload(&[0xFF, 0xFE, 0x00, 0xD8], "stop").unwrap_err();
+        assert!(error.contains("UTF-16"));
+    }
+
+    #[test]
+    fn native_hook_payload_does_not_guess_a_non_utf8_encoding_without_a_bom() {
+        let error = minimize_native_hook_payload(&[0xFF, b'{', b'}'], "stop").unwrap_err();
+        assert!(error.contains("UTF-8"));
     }
 }

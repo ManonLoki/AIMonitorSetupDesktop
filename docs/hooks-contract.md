@@ -88,6 +88,10 @@ application 层只在内容未变化时统一返回 `unchanged`。当前稳定�
 等价的会话/轮次字段；候选字段会 trim 并跳过空值，空的规范字段不能遮蔽有效
 别名。prompt、transcript、tool input/output 等内容不得进入 listener。
 
+合法信封成功进入容量 256 的 ingress 队列后返回 `202 Accepted`；队列已满或状态机
+worker 已停止时立即返回 `503 Service Unavailable`、回滚待处理计数并记录中继失败，
+不得在 Tokio runtime worker 上阻塞等待队列容量。
+
 ## 状态与投递
 
 - 各工具支持的精确事件名及其 `Idle`、`Running`、`Asking`、`Error`、`Release`
