@@ -40,7 +40,7 @@ pub use image_processing::process_image_upload;
 pub use payload::{MinimalHookPayload, minimize_native_hook_payload};
 pub use profile::{AiProfileDraft, AiProfileDraftSet};
 pub use saved_data::{
-    SavedMonitorData, is_ipv6_literal_base_url, normalize_base_url, validate_device_route,
+    SavedMonitorData, normalize_base_url, normalize_base_url_parts, validate_device_route,
     validate_profile, validate_saved_monitor_data, validate_username,
 };
 pub use settings::{MonitorSettings, validate_discovery_interval_minutes};

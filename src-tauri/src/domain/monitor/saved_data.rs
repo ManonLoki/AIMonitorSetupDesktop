@@ -132,10 +132,26 @@ pub fn validate_client_id(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 
+/// `normalize_base_url` 的规范化结果，附带解析过程中已经确定、调用方
+/// 常需要复用的主机分类，避免调用方通过字符串前缀猜测 `normalize_base_url`
+/// 输出的内部格式。
+pub struct NormalizedBaseUrl {
+    pub value: String,
+    /// 主机是否是 IPv6 字面量地址（形如 `[::1]`），供候选地址排序等场景
+    /// 直接使用，无需重新解析规范化后的字符串。
+    pub is_ipv6_literal: bool,
+}
+
 // 规范化并校验用户输入的设备基地址：必须是无路径、查询和用户信息的
 // HTTP(S) origin。普通 IPv6 可用；链路本地 IPv6 必须依赖 zone identifier，
 // 而 reqwest 0.12 无法传输，因此无论是否显式带 zone 都在持久化边界拒绝。
 pub fn normalize_base_url(value: &str) -> Result<String, String> {
+    normalize_base_url_parts(value).map(|parts| parts.value)
+}
+
+/// 与 [`normalize_base_url`] 校验规则完全一致，但同时返回解析过程中得到的
+/// 主机分类，供需要它的调用方（如候选地址优先级排序）直接使用。
+pub fn normalize_base_url_parts(value: &str) -> Result<NormalizedBaseUrl, String> {
     // 先去首尾空白，再去掉任意数量的根路径斜杠，避免后续拼接路径
     // 时出现双斜杠。内部空白仍是非法 URI。
     let normalized = value.trim().trim_end_matches('/');
@@ -160,6 +176,7 @@ pub fn normalize_base_url(value: &str) -> Result<String, String> {
         return Err("基地址缺少有效的主机名或 IP".to_owned());
     }
     let host = authority.host();
+    let is_ipv6_literal = host.starts_with('[');
     let is_link_local_ipv6 = host
         .strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
@@ -179,19 +196,10 @@ pub fn normalize_base_url(value: &str) -> Result<String, String> {
         return Err("基地址只能包含协议、主机和端口".to_owned());
     }
 
-    Ok(format!("{}://{}", scheme.as_str(), authority.as_str()))
-}
-
-/// 判断一个已经过 `normalize_base_url` 规范化的 base url 是否使用 IPv6
-/// 字面量主机。调用方不应自行重新假设 `normalize_base_url` 的输出形状
-/// （`{scheme}://{authority}`，scheme 只会是 http/https 字面量）——这个
-/// 假设和该形状本就由 `normalize_base_url` 定义，因此校验逻辑收敛在此处，
-/// 与其保持在同一模块内演进。
-pub fn is_ipv6_literal_base_url(normalized_base_url: &str) -> bool {
-    normalized_base_url
-        .strip_prefix("http://")
-        .or_else(|| normalized_base_url.strip_prefix("https://"))
-        .is_some_and(|authority| authority.starts_with('['))
+    Ok(NormalizedBaseUrl {
+        value: format!("{}://{}", scheme.as_str(), authority.as_str()),
+        is_ipv6_literal,
+    })
 }
 
 // 将一次发现结果转换为可持久化的设备路由，同时校验 ID/名称/基地址均有效。
