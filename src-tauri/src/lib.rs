@@ -11,6 +11,7 @@ use application::monitor::MonitorService;
 use application::runtime::{handle_window_event, setup_desktop_runtime, show_main_window};
 // 引入 Tauri 的 Manager trait，提供 app.manage()/app.path() 等能力
 use tauri::Manager;
+use tracing::{error, info};
 
 /// 命令型 AI Hook 复用主程序的轻量 relay 模式。返回 `Some(exit_code)` 时调用方
 /// 必须立即退出，不能继续初始化 Tauri 或触发单实例窗口逻辑。
@@ -52,6 +53,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // 注册应用初始化（setup）钩子，在应用启动时执行一次性初始化逻辑
         .setup(|app| {
+            // 获取应用数据目录路径（日志与监控服务持久化数据的共同根目录）
+            let app_data_dir = app.path().app_data_dir()?;
+            // 日志初始化必须是 setup 的第一步：后续所有启动阶段的失败都要能被记录下来。
+            // `WorkerGuard` 托管到 Tauri 状态中，随应用生命周期一起释放，保证非阻塞
+            // 写入线程在进程退出前把缓冲日志刷盘。
+            let logging_guard = application::logging::init(&app_data_dir);
+            app.manage(logging_guard);
+            info!(version = env!("CARGO_PKG_VERSION"), "AIMonitor 启动中");
+
             // 初始化桌面运行时：设置激活策略、构建托盘菜单与图标
             setup_desktop_runtime(app)?;
             // 仅在 macOS 上：若开机自启已启用，则显式再启用一次自启动插件本身
@@ -64,17 +74,20 @@ pub fn run() {
                 let autostart = app.autolaunch();
                 // 若当前已启用开机自启（读取失败则视为未启用）
                 if autostart.is_enabled().unwrap_or(false) {
-                    // 再次调用启用接口，失败则转换为 io::Error 并向上传播
-                    autostart.enable().map_err(std::io::Error::other)?;
+                    // 再次调用启用接口，失败则记录日志、转换为 io::Error 并向上传播
+                    autostart.enable().map_err(|error| {
+                        error!(%error, "重新启用开机自启失败");
+                        std::io::Error::other(error)
+                    })?;
                 }
             }
-            // 获取应用数据目录路径
-            let app_data_dir = app.path().app_data_dir()?;
             // 获取用户主目录路径（用于定位各 AI 工具的 hook 配置位置）
             let config_home = app.path().home_dir()?;
-            // 加载监控服务：基于应用数据目录与用户主目录初始化状态，失败则转换为 io::Error
-            let service =
-                MonitorService::load(&app_data_dir, &config_home).map_err(std::io::Error::other)?;
+            // 加载监控服务：基于应用数据目录与用户主目录初始化状态，失败则记录日志并转换为 io::Error
+            let service = MonitorService::load(&app_data_dir, &config_home).map_err(|error| {
+                error!(%error, "监控服务加载失败");
+                std::io::Error::other(error)
+            })?;
             // 启动 hook 监听器，接收外部工具发来的 hook 事件
             service.start_hook_listener();
             // 为用户已启用的 AI 客户端自动补写缺失的 AIMonitor Hooks；
@@ -84,6 +97,7 @@ pub fn run() {
             service.start_background_device_discovery(app.handle().clone());
             // 每 30 秒向已配置且在线的接收端发送控制端租约心跳。
             service.start_heartbeat_sender();
+            info!("监控服务已启动：hook 监听器、设备发现与心跳后台任务就绪");
             // 将监控服务实例托管到 Tauri 状态管理中，供各命令通过 State 提取使用
             app.manage(service);
             // 判断本次启动参数中是否包含 "--silent"（即由开机自启静默拉起）

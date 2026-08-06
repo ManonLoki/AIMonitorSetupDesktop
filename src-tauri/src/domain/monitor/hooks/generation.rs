@@ -2,6 +2,8 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
+use crate::domain::AppError;
+
 use super::{
     AiTool, HookConfigPreview, HookProtocol, ManagedCommands, managed_hook_marker, protocol,
     shell_quote,
@@ -12,7 +14,7 @@ use super::{
 pub fn generate_hook_config(
     tool: AiTool,
     relay_executable: &Path,
-) -> Result<HookConfigPreview, String> {
+) -> Result<HookConfigPreview, AppError> {
     generate_hook_config_with_executable(tool, relay_executable, None)
 }
 
@@ -22,7 +24,7 @@ pub fn generate_wsl_hook_config(
     tool: AiTool,
     relay_executable: &Path,
     wsl_executable: &str,
-) -> Result<HookConfigPreview, String> {
+) -> Result<HookConfigPreview, AppError> {
     generate_hook_config_with_executable(tool, relay_executable, Some(wsl_executable))
 }
 
@@ -30,7 +32,7 @@ fn generate_hook_config_with_executable(
     tool: AiTool,
     relay_executable: &Path,
     wsl_executable: Option<&str>,
-) -> Result<HookConfigPreview, String> {
+) -> Result<HookConfigPreview, AppError> {
     let protocol = protocol(tool);
     if let Some(content) = protocol.standalone_config() {
         return Ok(HookConfigPreview {
@@ -57,7 +59,7 @@ pub fn merge_hook_config(
     existing_content: Option<&str>,
     generated: &HookConfigPreview,
     tool: AiTool,
-) -> Result<HookConfigPreview, String> {
+) -> Result<HookConfigPreview, AppError> {
     let protocol = protocol(tool);
     if protocol.uses_custom_merge() {
         return Ok(HookConfigPreview {
@@ -66,18 +68,20 @@ pub fn merge_hook_config(
         });
     }
     let mut existing = match existing_content {
-        Some(content) => serde_json::from_str::<Value>(content)
-            .map_err(|error| format!("现有 Hooks 配置格式错误：{error}"))?,
+        Some(content) => serde_json::from_str::<Value>(content).map_err(|error| {
+            AppError::new("error.hooks.existingConfigInvalid").param("detail", error.to_string())
+        })?,
         None => json!({}),
     };
-    let generated_value = serde_json::from_str::<Value>(&generated.content)
-        .map_err(|error| format!("生成的 Hooks 配置格式错误：{error}"))?;
+    let generated_value = serde_json::from_str::<Value>(&generated.content).map_err(|error| {
+        AppError::new("error.hooks.generatedConfigInvalid").param("detail", error.to_string())
+    })?;
     let existing_root = existing
         .as_object_mut()
-        .ok_or_else(|| "现有 Hooks 配置的根节点必须是对象".to_owned())?;
+        .ok_or_else(|| AppError::new("error.hooks.existingConfigRootNotObject"))?;
     let generated_root = generated_value
         .as_object()
-        .ok_or_else(|| "生成的 Hooks 配置的根节点必须是对象".to_owned())?;
+        .ok_or_else(|| AppError::new("error.hooks.generatedConfigRootNotObject"))?;
 
     for (key, value) in generated_root {
         if key != "hooks" {
@@ -91,11 +95,11 @@ pub fn merge_hook_config(
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
-        .ok_or_else(|| "现有配置中的 hooks 必须是对象".to_owned())?;
+        .ok_or_else(|| AppError::new("error.hooks.existingHooksNotObject"))?;
     let generated_hooks = generated_root
         .get("hooks")
         .and_then(Value::as_object)
-        .ok_or_else(|| "生成的配置缺少 hooks 对象".to_owned())?;
+        .ok_or_else(|| AppError::new("error.hooks.generatedHooksMissing"))?;
     for event in existing_hooks.keys().cloned().collect::<Vec<_>>() {
         let should_remove = existing_hooks.get_mut(&event).is_some_and(|entries| {
             let Some(entries) = entries.as_array_mut() else {
@@ -110,21 +114,24 @@ pub fn merge_hook_config(
     }
 
     for (event, generated_entries) in generated_hooks {
-        let generated_entries = generated_entries
-            .as_array()
-            .ok_or_else(|| format!("生成的 {event} 配置必须是数组"))?;
+        let generated_entries = generated_entries.as_array().ok_or_else(|| {
+            AppError::new("error.hooks.generatedEventNotArray").param("event", event.clone())
+        })?;
         let existing_entries = existing_hooks
             .entry(event.clone())
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
-            .ok_or_else(|| format!("现有配置中的 {event} 必须是数组"))?;
+            .ok_or_else(|| {
+                AppError::new("error.hooks.existingEventNotArray").param("event", event.clone())
+            })?;
         existing_entries.extend(generated_entries.iter().cloned());
     }
 
     Ok(HookConfigPreview {
         filename: generated.filename.clone(),
-        content: serde_json::to_string_pretty(&existing)
-            .map_err(|error| format!("无法生成合并后的 Hooks 配置：{error}"))?,
+        content: serde_json::to_string_pretty(&existing).map_err(|error| {
+            AppError::new("error.hooks.mergeFailed").param("detail", error.to_string())
+        })?,
     })
 }
 

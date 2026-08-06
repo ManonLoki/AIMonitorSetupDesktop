@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context;
 use clap::Parser;
 use reqwest::blocking::Client;
 
@@ -68,11 +69,13 @@ pub fn run_from_process_args() -> Option<i32> {
 // Copilot CLI 的 preToolUse 在命令非零退出时会拒绝工具调用。AIMonitor 是旁路
 // 观测器，桌面端未运行或 listener 暂时不可达时绝不能改变 AI 工具行为，因此
 // Copilot 投递失败只记录 stderr 并以成功退出；其他工具保持既有错误可见语义。
-fn relay_exit_code(tool: AiTool, result: Result<(), String>) -> i32 {
+fn relay_exit_code(tool: AiTool, result: anyhow::Result<()>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("{error}");
+            // `{:#}` 打印 anyhow 的完整错误链（本层 context + 底层原因），
+            // 便于从 AI 工具捕获的 stderr 直接定位问题，不需要额外查日志文件。
+            eprintln!("{error:#}");
             i32::from(tool != AiTool::GitHubCopilot)
         }
     }
@@ -99,28 +102,40 @@ where
     ))
 }
 
+/// 校验失败时的两种已知原因，供调用方按 `Display` 直接输出到 stderr。
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+enum RelayValidationError {
+    #[error("Hook relay 不支持 AI 工具：{0}")]
+    UnsupportedTool(String),
+    #[error("Hook relay 的管理标识与 AI 工具不匹配")]
+    MarkerMismatch,
+}
+
 // 校验 relay 参数的语义（clap 只保证了形状）：tool_slug 必须是受支持的 AI
 // 工具，且 marker 必须与该工具的 `managed_hook_marker` 完全一致，防止配置
 // 文件被篡改后触发跨工具的 Hook 请求。
-fn validate_relay_arguments(arguments: &HookRelayArguments) -> Result<AiTool, String> {
+fn validate_relay_arguments(
+    arguments: &HookRelayArguments,
+) -> Result<AiTool, RelayValidationError> {
     let tool = tool_from_slug(&arguments.tool_slug)
-        .ok_or_else(|| format!("Hook relay 不支持 AI 工具：{}", arguments.tool_slug))?;
+        .ok_or_else(|| RelayValidationError::UnsupportedTool(arguments.tool_slug.clone()))?;
     let expected_marker = managed_hook_marker(tool);
     if arguments.managed_by != expected_marker {
-        return Err("Hook relay 的管理标识与 AI 工具不匹配".to_owned());
+        return Err(RelayValidationError::MarkerMismatch);
     }
     Ok(tool)
 }
 
 // 读取 AI 工具通过 stdin 传来的原生 Hook JSON，压缩成最小信封后 POST 给本机
 // listener；需要 stdout JSON 的协议由下方按工具显式处理。
-fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> Result<(), String> {
+fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> anyhow::Result<()> {
     let mut native_json = Vec::new();
     io::stdin()
         .take((MAX_NATIVE_HOOK_INPUT_BYTES + 1) as u64)
         .read_to_end(&mut native_json)
-        .map_err(|error| format!("无法读取 AI Hook 原始输入：{error}"))?;
-    let payload = minimize_native_hook_payload(&native_json, event)?;
+        .context("无法读取 AI Hook 原始输入")?;
+    let payload =
+        minimize_native_hook_payload(&native_json, event).context("无法处理 AI Hook 原始载荷")?;
     let endpoint = format!("http://127.0.0.1:{DEFAULT_HOOK_RELAY_PORT}/api/hooks/{tool_slug}");
     let client = super::net::harden_blocking_client(
         Client::builder()
@@ -128,16 +143,26 @@ fn relay_stdin(tool: AiTool, tool_slug: &str, event: &str) -> Result<(), String>
             .timeout(LOCAL_RELAY_REQUEST_TIMEOUT),
     )
     .build()
-    .map_err(|error| format!("无法创建 Hook relay 客户端：{error}"))?;
+    .context("无法创建 Hook relay 客户端")?;
     post_minimal_payload(&client, &endpoint, event, &payload)?;
     // Cursor、Qwen Code 与 Gemini CLI 都要求 command Hook 的 stdout 是合法 JSON；
     // 其他工具成功时保持空输出，避免干扰各自的默认 Hook 决策。
     if matches!(tool, AiTool::Cursor | AiTool::QwenCode | AiTool::GeminiCli) {
         io::stdout()
             .write_all(b"{}\n")
-            .map_err(|error| format!("无法写入 AI Hook JSON 响应：{error}"))?;
+            .context("无法写入 AI Hook JSON 响应")?;
     }
     Ok(())
+}
+
+/// `post_minimal_payload` 的两种已知失败原因；其余网络/序列化问题仍通过
+/// `anyhow::Error` 的来源链（`reqwest::Error` 等）向上传播，不必逐一枚举。
+#[derive(Debug, thiserror::Error)]
+enum RelayDeliveryError {
+    #[error("AIMonitor Hook listener 拒绝了事件：HTTP {status}")]
+    Rejected { status: reqwest::StatusCode },
+    #[error("无法连接 AIMonitor Hook listener")]
+    ConnectFailed(#[source] reqwest::Error),
 }
 
 // 把最小信封 POST 给本机 listener；仅在连接失败（listener 可能还没起来）时
@@ -147,7 +172,7 @@ fn post_minimal_payload(
     endpoint: &str,
     event: &str,
     payload: &crate::domain::monitor::MinimalHookPayload,
-) -> Result<(), String> {
+) -> anyhow::Result<()> {
     let mut attempt = 0_u8;
     loop {
         match client
@@ -158,16 +183,16 @@ fn post_minimal_payload(
         {
             Ok(response) if response.status().is_success() => break,
             Ok(response) => {
-                return Err(format!(
-                    "AIMonitor Hook listener 拒绝了事件：HTTP {}",
-                    response.status()
-                ));
+                return Err(RelayDeliveryError::Rejected {
+                    status: response.status(),
+                }
+                .into());
             }
             Err(error) if error.is_connect() && attempt < LOCAL_RELAY_RETRY_COUNT => {
                 attempt += 1;
                 thread::sleep(LOCAL_RELAY_RETRY_DELAY);
             }
-            Err(error) => return Err(format!("无法连接 AIMonitor Hook listener：{error}")),
+            Err(error) => return Err(RelayDeliveryError::ConnectFailed(error).into()),
         }
     }
     Ok(())
@@ -281,18 +306,21 @@ mod tests {
 
         assert_eq!(
             validate_relay_arguments(&parsed),
-            Err("Hook relay 的管理标识与 AI 工具不匹配".to_owned())
+            Err(RelayValidationError::MarkerMismatch)
         );
     }
 
     #[test]
     fn copilot_delivery_failure_is_fail_open() {
         assert_eq!(
-            relay_exit_code(AiTool::GitHubCopilot, Err("listener offline".to_owned())),
+            relay_exit_code(
+                AiTool::GitHubCopilot,
+                Err(anyhow::anyhow!("listener offline"))
+            ),
             0
         );
         assert_eq!(
-            relay_exit_code(AiTool::Codex, Err("listener offline".to_owned())),
+            relay_exit_code(AiTool::Codex, Err(anyhow::anyhow!("listener offline"))),
             1
         );
     }

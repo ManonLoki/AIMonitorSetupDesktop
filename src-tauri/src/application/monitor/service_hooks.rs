@@ -5,7 +5,10 @@
 
 use std::{path::Path, thread};
 
+use tracing::{error, warn};
+
 use super::{MonitorService, config_io::read_optional_config, wsl::WslDirectory};
+use crate::domain::AppError;
 use crate::domain::monitor::{
     AiTool, ai_tool_name, hook_config_filename, hook_config_has_managed_marker,
 };
@@ -19,7 +22,7 @@ impl MonitorService {
             .name("aimonitor-auto-hooks".to_owned())
             .spawn(move || service.auto_write_enabled_hook_configs())
         {
-            eprintln!("AIMonitor 无法启动 Hooks 自动补写任务：{error}");
+            error!(%error, "无法启动 Hooks 自动补写任务");
         }
     }
 
@@ -32,7 +35,7 @@ impl MonitorService {
         let tools = match self.settings() {
             Ok(settings) => settings.enabled_ai_tools,
             Err(error) => {
-                eprintln!("AIMonitor 无法读取自动 Hooks 写入范围：{error}");
+                error!(%error, "无法读取自动 Hooks 写入范围");
                 return;
             }
         };
@@ -40,20 +43,19 @@ impl MonitorService {
         for tool in tools {
             let result = self.write_hook_config_automatically(tool);
             if let Err(error) = result {
-                eprintln!(
-                    "AIMonitor 无法自动写入 {} Hooks：{error}",
-                    ai_tool_name(tool)
-                );
+                warn!(tool = ai_tool_name(tool), %error, "无法自动写入 Hooks");
             }
         }
     }
 
-    fn write_hook_config_automatically(&self, tool: AiTool) -> Result<(), String> {
+    fn write_hook_config_automatically(&self, tool: AiTool) -> Result<(), AppError> {
         let location = self
             .hook_config_locations()?
             .into_iter()
             .find(|location| location.tool == tool)
-            .ok_or_else(|| format!("无法定位 {} Hooks 配置", ai_tool_name(tool)))?;
+            .ok_or_else(|| {
+                AppError::new("error.hooks.locationNotFound").param("tool", ai_tool_name(tool))
+            })?;
         let existing = if let Some(wsl_directory) = WslDirectory::parse(&location.directory) {
             wsl_directory
                 .join(hook_config_filename(tool))

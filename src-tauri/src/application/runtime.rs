@@ -12,6 +12,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 // 引入上级模块中监控相关的 hook 中继状态类型与监控服务
 use super::monitor::{HookRelayStatus, MonitorService};
+use crate::domain::AppError;
 
 // 托盘图标的固定标识符
 const TRAY_ID: &str = "aimonitor-tray";
@@ -50,14 +51,12 @@ pub fn runtime_overview(
     app: &AppHandle,
     // 监控服务引用，用于查询 hook 中继状态
     monitor: &MonitorService,
-) -> Result<RuntimeOverview, String> {
+) -> Result<RuntimeOverview, AppError> {
     Ok(RuntimeOverview {
         // 读取当前开机自启是否启用
-        autostart_enabled: app
-            .autolaunch()
-            .is_enabled()
-            // 读取失败时转换为业务可读的中文错误信息
-            .map_err(|error| format!("无法读取开机自启状态：{error}"))?,
+        autostart_enabled: app.autolaunch().is_enabled().map_err(|error| {
+            AppError::new("error.runtime.readAutostartFailed").param("detail", error.to_string())
+        })?,
         // 静默启动能力固定为已支持
         silent_start_supported: true,
         // 查询监控服务的 hook 中继状态，失败则向上传播错误
@@ -66,18 +65,18 @@ pub fn runtime_overview(
 }
 
 // 设置开机自启的启用/关闭状态
-pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
+pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
     // 获取自启动管理器
     let manager = app.autolaunch();
-    // 根据目标状态调用启用或关闭接口，并统一转换错误信息为中文
+    // 根据目标状态调用启用或关闭接口，并统一转换为结构化错误
     let result = if enabled {
-        manager
-            .enable()
-            .map_err(|error| format!("无法启用开机自启：{error}"))
+        manager.enable().map_err(|error| {
+            AppError::new("error.runtime.enableAutostartFailed").param("detail", error.to_string())
+        })
     } else {
-        manager
-            .disable()
-            .map_err(|error| format!("无法关闭开机自启：{error}"))
+        manager.disable().map_err(|error| {
+            AppError::new("error.runtime.disableAutostartFailed").param("detail", error.to_string())
+        })
     };
     // 操作成功后同步托盘菜单中的勾选状态，保持 UI 与实际状态一致
     if result.is_ok() {

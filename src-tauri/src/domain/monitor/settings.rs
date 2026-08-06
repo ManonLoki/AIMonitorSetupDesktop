@@ -1,6 +1,8 @@
 // serde：结构体的序列化与反序列化派生宏。
 use serde::{Deserialize, Serialize};
 
+use crate::domain::AppError;
+
 use super::device::AiTool;
 use super::{
     DEFAULT_BASE_URL, DEFAULT_DISCOVERY_INTERVAL_MINUTES, MAX_DISCOVERY_INTERVAL_MINUTES,
@@ -55,12 +57,12 @@ impl Default for MonitorSettings {
 
 /// 校验用户在设置页填写的自动检查间隔，防止 0（忙轮询）或过大的值
 /// （长时间感知不到设备上下线）。
-pub fn validate_discovery_interval_minutes(minutes: u64) -> Result<u64, String> {
-    // 超出 [MIN, MAX] 区间则拒绝并返回中文错误信息。
+pub fn validate_discovery_interval_minutes(minutes: u64) -> Result<u64, AppError> {
+    // 超出 [MIN, MAX] 区间则拒绝并返回结构化错误码。
     if !(MIN_DISCOVERY_INTERVAL_MINUTES..=MAX_DISCOVERY_INTERVAL_MINUTES).contains(&minutes) {
-        return Err(format!(
-            "自动检查间隔必须在 {MIN_DISCOVERY_INTERVAL_MINUTES} 到 {MAX_DISCOVERY_INTERVAL_MINUTES} 分钟之间"
-        ));
+        return Err(AppError::new("error.settings.discoveryIntervalOutOfRange")
+            .param("min", MIN_DISCOVERY_INTERVAL_MINUTES.to_string())
+            .param("max", MAX_DISCOVERY_INTERVAL_MINUTES.to_string()));
     }
     // 校验通过，原样返回该分钟数。
     Ok(minutes)

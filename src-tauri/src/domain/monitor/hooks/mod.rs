@@ -28,6 +28,8 @@ use serde_json::{Map, Value, json};
 use generation::command_has_marker;
 pub use generation::{generate_hook_config, generate_wsl_hook_config, merge_hook_config};
 
+use crate::domain::AppError;
+
 use super::{
     AiTool, AiToolDescriptor, HookBehavior, HookConfigPreview, HookConfigWriteResult,
     HookTransition, HookWriteOutcome,
@@ -138,12 +140,10 @@ pub(super) trait HookProtocol: Sync {
         &self,
         existing_content: Option<&str>,
         generated: &HookConfigPreview,
-    ) -> Result<String, String> {
+    ) -> Result<String, AppError> {
         if existing_content.is_some_and(|content| !contains_managed_marker(content, self.tool())) {
-            return Err(format!(
-                "现有 {} 不是 AIMonitor 管理的文件，已拒绝覆盖",
-                generated.filename
-            ));
+            return Err(AppError::new("error.hooks.foreignFileRejected")
+                .param("filename", generated.filename.clone()));
         }
         Ok(generated.content.clone())
     }
@@ -173,9 +173,10 @@ pub(super) trait HookProtocol: Sync {
 
     /// 把逐事件生成的 handler 序列化为最终配置。默认输出 JSON；若未来出现公开
     /// 配置格式不是 JSON 的 command Hook，可覆盖该步骤。
-    fn render_config(&self, hooks: Map<String, Value>) -> Result<String, String> {
-        serde_json::to_string_pretty(&self.config_root(hooks))
-            .map_err(|error| format!("无法生成 Hooks 配置：{error}"))
+    fn render_config(&self, hooks: Map<String, Value>) -> Result<String, AppError> {
+        serde_json::to_string_pretty(&self.config_root(hooks)).map_err(|error| {
+            AppError::new("error.hooks.renderFailed").param("detail", error.to_string())
+        })
     }
 
     /// 是否绕过公共 JSON 合并器。独立插件默认需要自定义合并；共享 TOML 等

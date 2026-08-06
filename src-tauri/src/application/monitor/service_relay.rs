@@ -11,6 +11,7 @@ use super::{
     build_hook_forward_client,
     relay::{handle_hook_request, record_relay_failure, spawn_hook_worker},
 };
+use crate::domain::AppError;
 
 impl MonitorService {
     // 启动本机 Hook 中继：用 axum 起一个只绑定回环地址的 HTTP 服务接收本地 Hook 请求，
@@ -88,10 +89,10 @@ impl MonitorService {
     }
 
     // 读取当前 Hook 中继状态快照，供前端查询展示。
-    pub fn hook_relay_status(&self) -> Result<HookRelayStatus, String> {
+    pub fn hook_relay_status(&self) -> Result<HookRelayStatus, AppError> {
         self.relay_status
             .read()
             .map(|status| status.clone())
-            .map_err(|_| "Hook 服务状态读取锁已损坏".to_owned())
+            .map_err(|_| AppError::new("error.internal.lockPoisoned"))
     }
 }

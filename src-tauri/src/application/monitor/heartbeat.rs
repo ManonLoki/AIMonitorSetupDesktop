@@ -2,6 +2,8 @@
 
 use std::{collections::HashSet, thread};
 
+use tracing::error;
+
 use super::{HEARTBEAT_INTERVAL, MonitorService, build_hook_forward_client};
 use crate::domain::monitor::{DiscoveredMonitorDevice, SavedMonitorData};
 
@@ -15,7 +17,7 @@ impl MonitorService {
                 let client = match build_hook_forward_client() {
                     Ok(client) => client,
                     Err(error) => {
-                        eprintln!("无法创建心跳客户端：{error}");
+                        error!(%error, "无法创建心跳客户端");
                         return;
                     }
                 };

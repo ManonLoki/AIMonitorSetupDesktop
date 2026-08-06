@@ -4,6 +4,8 @@ use std::{collections::HashSet, net::Ipv6Addr, path::Path};
 use http::{Uri, uri::Scheme};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::AppError;
+
 use super::device::normalize_enabled_ai_tools;
 use super::device::{AiProfile, DiscoveredMonitorDevice, HookBehavior, MonitorDeviceRoute};
 use super::hook_config_types::HookConfigDirectories;
@@ -31,7 +33,7 @@ pub struct SavedMonitorData {
 
 /// 在应用接纳持久化数据前验证跨集合不变量，避免损坏或部分写入的数据让
 /// “当前设备”、设备路由和 Profile 指向不同事实来源。
-pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String> {
+pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), AppError> {
     validate_client_id(&data.client_id)?;
     // 当前选中设备的基地址必须是合法格式。
     normalize_base_url(&data.settings.base_url)?;
@@ -39,7 +41,7 @@ pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String
     validate_discovery_interval_minutes(data.settings.discovery_interval_minutes)?;
     if normalize_enabled_ai_tools(&data.settings.enabled_ai_tools) != data.settings.enabled_ai_tools
     {
-        return Err("AI 客户端设置包含重复项或顺序无效".to_owned());
+        return Err(AppError::new("error.savedData.aiToolsInvalid"));
     }
     // 用户名非空时才校验（允许尚未设置用户名的初始状态）。
     if !data.settings.username.is_empty() {
@@ -51,13 +53,14 @@ pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String
     for device in &data.devices {
         // 设备 ID 或名称为空视为脏数据，直接拒绝。
         if device.device_id.trim().is_empty() || device.device_name.trim().is_empty() {
-            return Err("持久化设备路由缺少设备 ID 或名称".to_owned());
+            return Err(AppError::new("error.savedData.deviceRouteMissingIdOrName"));
         }
         // 每条设备路由的基地址也必须合法。
         normalize_base_url(&device.base_url)?;
         // insert 返回 false 表示该 ID 已存在，说明设备路由重复。
         if !device_ids.insert(device.device_id.as_str()) {
-            return Err(format!("设备路由重复：{}", device.device_id));
+            return Err(AppError::new("error.savedData.deviceRouteDuplicate")
+                .param("deviceId", device.device_id.clone()));
         }
     }
 
@@ -68,11 +71,11 @@ pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String
             .devices
             .iter()
             .find(|device| device.device_id == data.settings.device_id)
-            .ok_or_else(|| "当前设备缺少对应的持久化路由".to_owned())?;
+            .ok_or_else(|| AppError::new("error.savedData.currentDeviceMissingRoute"))?;
         if selected.base_url != data.settings.base_url
             || selected.device_name != data.settings.device_name
         {
-            return Err("当前设备设置与持久化路由不一致".to_owned());
+            return Err(AppError::new("error.savedData.currentDeviceMismatch"));
         }
     }
 
@@ -81,17 +84,15 @@ pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String
     for profile in &data.profiles {
         // Profile 关联的设备必须真实存在于 device_ids 中。
         if profile.device_id.trim().is_empty() || !device_ids.contains(profile.device_id.as_str()) {
-            return Err("AI 配置关联了不存在的设备".to_owned());
+            return Err(AppError::new("error.savedData.aiConfigUnknownDevice"));
         }
         // 复用单个 Profile 的完整校验逻辑（位置范围、四种行为齐全等）。
         validate_profile(profile.clone())?;
         // insert 返回 false 说明该设备的该工具已经配置过一次，属于重复。
         if !profile_keys.insert((profile.device_id.as_str(), profile.tool)) {
-            return Err(format!(
-                "设备 {} 的 {} AI 配置重复",
-                profile.device_id,
-                ai_tool_name(profile.tool)
-            ));
+            return Err(AppError::new("error.savedData.aiConfigDuplicate")
+                .param("deviceId", profile.device_id.clone())
+                .param("tool", ai_tool_name(profile.tool)));
         }
     }
 
@@ -112,14 +113,14 @@ pub fn validate_saved_monitor_data(data: &SavedMonitorData) -> Result<(), String
         &data.hook_config_directories.github_copilot,
     ] {
         if !directory.is_empty() && !Path::new(directory).is_absolute() {
-            return Err("持久化 Hooks 配置目录必须使用绝对路径".to_owned());
+            return Err(AppError::new("error.savedData.hooksDirectoryNotAbsolute"));
         }
     }
     Ok(())
 }
 
 /// 控制端身份会进入 URL path 和接收端租约表，仅允许紧凑的 ASCII 标识。
-pub fn validate_client_id(value: &str) -> Result<&str, String> {
+pub fn validate_client_id(value: &str) -> Result<&str, AppError> {
     let value = value.trim();
     if value.is_empty()
         || value.len() > 128
@@ -127,7 +128,7 @@ pub fn validate_client_id(value: &str) -> Result<&str, String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err("客户端 ID 必须是 1-128 位字母、数字、连字符或下划线".to_owned());
+        return Err(AppError::new("error.savedData.clientIdInvalid"));
     }
     Ok(value)
 }
@@ -145,13 +146,13 @@ pub struct NormalizedBaseUrl {
 // 规范化并校验用户输入的设备基地址：必须是无路径、查询和用户信息的
 // HTTP(S) origin。普通 IPv6 可用；链路本地 IPv6 必须依赖 zone identifier，
 // 而 reqwest 0.12 无法传输，因此无论是否显式带 zone 都在持久化边界拒绝。
-pub fn normalize_base_url(value: &str) -> Result<String, String> {
+pub fn normalize_base_url(value: &str) -> Result<String, AppError> {
     normalize_base_url_parts(value).map(|parts| parts.value)
 }
 
 /// 与 [`normalize_base_url`] 校验规则完全一致，但同时返回解析过程中得到的
 /// 主机分类，供需要它的调用方（如候选地址优先级排序）直接使用。
-pub fn normalize_base_url_parts(value: &str) -> Result<NormalizedBaseUrl, String> {
+pub fn normalize_base_url_parts(value: &str) -> Result<NormalizedBaseUrl, AppError> {
     // 先去首尾空白，再去掉任意数量的根路径斜杠，避免后续拼接路径
     // 时出现双斜杠。内部空白仍是非法 URI。
     let normalized = value.trim().trim_end_matches('/');
@@ -159,21 +160,21 @@ pub fn normalize_base_url_parts(value: &str) -> Result<NormalizedBaseUrl, String
     // 显式拒绝 `#`。
     if normalized.is_empty() || normalized.contains(char::is_whitespace) || normalized.contains('#')
     {
-        return Err("基地址必须是以 http:// 或 https:// 开头的有效地址".to_owned());
+        return Err(AppError::new("error.savedData.baseUrlInvalidScheme"));
     }
 
-    let uri = normalized
-        .parse::<Uri>()
-        .map_err(|error| format!("基地址不是有效 URI：{error}"))?;
+    let uri = normalized.parse::<Uri>().map_err(|error| {
+        AppError::new("error.savedData.baseUrlNotAUri").param("detail", error.to_string())
+    })?;
     let scheme = uri
         .scheme()
         .filter(|scheme| **scheme == Scheme::HTTP || **scheme == Scheme::HTTPS)
-        .ok_or_else(|| "基地址必须使用 http 或 https 协议".to_owned())?;
+        .ok_or_else(|| AppError::new("error.savedData.baseUrlInvalidScheme"))?;
     let authority = uri
         .authority()
-        .ok_or_else(|| "基地址缺少有效的主机名或 IP".to_owned())?;
+        .ok_or_else(|| AppError::new("error.savedData.baseUrlMissingHost"))?;
     if authority.as_str().contains('@') || authority.host().is_empty() {
-        return Err("基地址缺少有效的主机名或 IP".to_owned());
+        return Err(AppError::new("error.savedData.baseUrlMissingHost"));
     }
     let host = authority.host();
     let is_ipv6_literal = host.starts_with('[');
@@ -183,17 +184,17 @@ pub fn normalize_base_url_parts(value: &str) -> Result<NormalizedBaseUrl, String
         .and_then(|host| host.parse::<Ipv6Addr>().ok())
         .is_some_and(|host| host.is_unicast_link_local());
     if host.contains('%') || is_link_local_ipv6 {
-        return Err("基地址暂不支持链路本地 IPv6 地址".to_owned());
+        return Err(AppError::new("error.savedData.baseUrlLinkLocalUnsupported"));
     }
     // `http::Uri` 会保留无法解析为 u16 的端口文本，但对空端口段（如
     // "example.com:"）连 `authority.port()` 也视为没写端口；根据 host 后缀
     // 直接判断是否显式写了端口，才能严格拒绝空、非数字、越界或 0 端口。
     let port_suffix = &authority.as_str()[authority.host().len()..];
     if !port_suffix.is_empty() && authority.port_u16().is_none_or(|port| port == 0) {
-        return Err("基地址包含无效端口".to_owned());
+        return Err(AppError::new("error.savedData.baseUrlInvalidPort"));
     }
     if uri.path() != "/" || uri.query().is_some() {
-        return Err("基地址只能包含协议、主机和端口".to_owned());
+        return Err(AppError::new("error.savedData.baseUrlExtraComponents"));
     }
 
     Ok(NormalizedBaseUrl {
@@ -205,12 +206,12 @@ pub fn normalize_base_url_parts(value: &str) -> Result<NormalizedBaseUrl, String
 // 将一次发现结果转换为可持久化的设备路由，同时校验 ID/名称/基地址均有效。
 pub fn validate_device_route(
     device: &DiscoveredMonitorDevice,
-) -> Result<MonitorDeviceRoute, String> {
+) -> Result<MonitorDeviceRoute, AppError> {
     let device_id = device.id.trim();
     let device_name = device.name.trim();
     // ID 或名称为空说明用户还没有真正选中一个已发现的设备。
     if device_id.is_empty() || device_name.is_empty() {
-        return Err("请选择发现的 AIMonitor 设备".to_owned());
+        return Err(AppError::new("error.savedData.deviceNotSelected"));
     }
 
     Ok(MonitorDeviceRoute {
@@ -221,29 +222,29 @@ pub fn validate_device_route(
 }
 
 // 校验并规范化显示用户名：去空白后不能为空。
-pub fn validate_username(username: &str) -> Result<String, String> {
+pub fn validate_username(username: &str) -> Result<String, AppError> {
     let username = username.trim();
     if username.is_empty() {
-        return Err("显示用户名不能为空".to_owned());
+        return Err(AppError::new("error.savedData.usernameRequired"));
     }
     Ok(username.to_owned())
 }
 
 /// 校验 Profile 是否可用于生成 Hooks 配置：位置在 1-25 之间，且四种展示
 /// 行为（空闲/运行中/询问/异常）各配置一次、都选择了图片。
-pub fn validate_profile(mut profile: AiProfile) -> Result<AiProfile, String> {
+pub fn validate_profile(mut profile: AiProfile) -> Result<AiProfile, AppError> {
     // 先去除设备 ID 首尾空白，回写到 profile 上。
     let device_id = profile.device_id.trim().to_owned();
     profile.device_id = device_id;
     // 展示位置必须落在领域层声明的闭区间内。
     if !(MIN_PROFILE_SLOT..=MAX_PROFILE_SLOT).contains(&profile.slot) {
-        return Err(format!(
-            "显示位置必须在 {MIN_PROFILE_SLOT} 到 {MAX_PROFILE_SLOT} 之间"
-        ));
+        return Err(AppError::new("error.savedData.slotOutOfRange")
+            .param("min", MIN_PROFILE_SLOT.to_string())
+            .param("max", MAX_PROFILE_SLOT.to_string()));
     }
     // 必须为领域层声明的每种展示行为各提供一条配置，多了少了都不合法。
     if profile.hooks.len() != HookBehavior::DISPLAY_BEHAVIORS.len() {
-        return Err("必须配置空闲、运行中、询问和异常四种行为".to_owned());
+        return Err(AppError::new("error.savedData.behaviorsIncomplete"));
     }
 
     // 用于记录已经出现过的行为类型，检测重复配置。
@@ -254,11 +255,11 @@ pub fn validate_profile(mut profile: AiProfile) -> Result<AiProfile, String> {
         hook.image = hook.image.trim().to_owned();
         // 每种行为都必须选择图片，否则展示屏无法渲染。
         if hook.image.is_empty() {
-            return Err("每个行为都必须选择图片".to_owned());
+            return Err(AppError::new("error.savedData.behaviorMissingImage"));
         }
         // insert 返回 false 说明该行为已经出现过一次，属于重复配置。
         if !behaviors.insert(hook.behavior) {
-            return Err("同一行为不能重复配置".to_owned());
+            return Err(AppError::new("error.savedData.behaviorDuplicate"));
         }
     }
     // 四种行为（空闲/运行中/询问/异常）必须全部出现在已配置集合中。
@@ -266,7 +267,7 @@ pub fn validate_profile(mut profile: AiProfile) -> Result<AiProfile, String> {
         .iter()
         .all(|behavior| behaviors.contains(behavior))
     {
-        return Err("必须配置空闲、运行中、询问和异常四种行为".to_owned());
+        return Err(AppError::new("error.savedData.behaviorsIncomplete"));
     }
     Ok(profile)
 }

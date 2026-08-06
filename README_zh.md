@@ -141,6 +141,10 @@ xcrun notarytool history --keychain-profile AIMonitorNotary
 证书、证书私钥、API Key、`.p8` 文件和 Issuer ID 都不得提交到仓库。若使用其他
 profile 名称，构建前设置 `AIMONITOR_NOTARY_PROFILE`。
 
+本项目明确不要求 Windows Authenticode 签名。Windows 发布使用 Tauri
+`--no-sign` 参数；无需 Windows 证书、签名密码、自定义 `signCommand` 或
+`osslsigncode`。
+
 ### 每次发布
 
 1. 同步修改 `package.json`、`src-tauri/Cargo.toml` 和
@@ -158,11 +162,11 @@ profile 名称，构建前设置 `AIMONITOR_NOTARY_PROFILE`。
    # macOS 通用架构（Apple Silicon + Intel）
    pnpm run build:mac
 
-   # Windows x64（在 macOS/Linux 上使用 cargo-xwin）
+   # 明确不签名的 Windows x64（在 macOS/Linux 上使用 cargo-xwin）
    pnpm run build:win
 
-   # 依次构建 macOS 通用架构和 Windows x64
-   pnpm run build:release
+   # 规范发布入口：签名并公证 macOS + 不签名 Windows x64
+   pnpm release:desktop
    ```
 
    如只需单一 macOS 架构，可覆盖默认目标：
@@ -174,27 +178,31 @@ profile 名称，构建前设置 `AIMONITOR_NOTARY_PROFILE`。
 
 4. 命令成功后检查 `publish/`：
 
-   - `AIMonitorSetup-macOS-<架构>-v<版本>.dmg`
+   - `AIMonitorSetup-macOS-universal-v<版本>.dmg`
    - `AIMonitorSetup-Windows-x64-v<版本>-setup.exe`
    - `AIMonitorSetup-SHA256SUMS.txt`
+
+   单独执行 `build:mac` 并设置 `AIMONITOR_MAC_TARGET` 时，DMG 文件名中的
+   `universal` 会相应变为 `arm64` 或 `x64`。
 
 脚本只会在本次请求的所有平台均构建成功后清空并重建 `publish/`，不会发布
 半成品。macOS 自动流程为：Tauri 构建并签名 → 校验 DMG 签名 → 提交 Apple
 公证并等待 `Accepted` → staple 公证票据 → Gatekeeper 校验 → 复制安装器。
 
-Windows x64 安装器通过 `cargo-xwin` 和 NSIS 构建，目前使用 `--no-sign`，没有
-Authenticode 签名；它与 macOS Developer ID 签名、公证是两套独立机制。
+Windows x64 安装器通过 `cargo-xwin` 和 NSIS 构建，并明确使用 `--no-sign`，没有
+Authenticode 签名。发布脚本仍会在复制安装器前验证其中的应用二进制确实为
+x86_64 MSVC PE。Windows 不签名与 macOS Developer ID 签名、公证是两项独立策略。
 
 ### 发布后验证
 
 将文件名中的版本替换为本次实际版本：
 
 ```bash
-xcrun stapler validate "publish/AIMonitorSetup-macOS-<架构>-v<版本>.dmg"
+xcrun stapler validate "publish/AIMonitorSetup-macOS-universal-v<版本>.dmg"
 spctl --assess --verbose=2 --type open \
   --context context:primary-signature \
-  "publish/AIMonitorSetup-macOS-<架构>-v<版本>.dmg"
-shasum -a 256 -c publish/AIMonitorSetup-SHA256SUMS.txt
+  "publish/AIMonitorSetup-macOS-universal-v<版本>.dmg"
+(cd publish && shasum -a 256 -c AIMonitorSetup-SHA256SUMS.txt)
 ```
 
 `stapler validate` 应成功；`spctl` 输出应包含 `accepted` 和
@@ -203,9 +211,9 @@ shasum -a 256 -c publish/AIMonitorSetup-SHA256SUMS.txt
 
 ### 更换电脑或轮换密钥
 
-新电脑需要同时迁移 Developer ID 证书及其私钥，以及 App Store Connect `.p8`
-私钥。导入签名证书后，在新电脑重新运行 `notarytool store-credentials`。确认新
-配置可以构建和公证后，再在 App Store Connect 撤销不再使用的旧 API Key。
+新电脑需要 Developer ID 证书及其私钥，以及 App Store Connect `.p8` 私钥。
+导入 macOS 签名证书后，在新电脑重新运行 `notarytool store-credentials`。确认新
+配置可以构建并公证 macOS 后，再撤销旧 API Key。Windows 不需要签名密钥。
 
 ### 常见问题
 
@@ -215,8 +223,8 @@ shasum -a 256 -c publish/AIMonitorSetup-SHA256SUMS.txt
   `AIMONITOR_NOTARY_PROFILE`。
 - 公证返回 `Invalid`：从构建输出取得 Submission ID，然后执行
   `xcrun notarytool log <SUBMISSION_ID> --keychain-profile AIMonitorNotary` 查看原因。
-- Windows 构建缺少工具：确认 `cargo-xwin`、`makensis` 和 LLVM 已安装，并确保
-  `llvm-rc` 在 `PATH` 中。
+- Windows 构建缺少前置条件：确认 `cargo-xwin`、`makensis` 和 LLVM 已安装，
+  `llvm-rc` 与 `llvm-readobj` 位于 `PATH`。
 - DMG 被 Gatekeeper 拦截：不要通过“仍要打开”绕过后直接发布；确认
   `stapler validate` 成功且 `spctl` 显示 `Notarized Developer ID`。
 

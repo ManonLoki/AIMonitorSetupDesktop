@@ -69,7 +69,7 @@ fn batch_image_validation_checks_every_file_before_upload() {
 
     assert_eq!(
         validate_image_uploads(&images),
-        Err("invalid.tiff 不是支持的 BMP、JPEG、GIF、PNG 或 WebP 图片".to_owned())
+        Err(AppError::new("error.images.unsupportedUploadType").param("filename", "invalid.tiff"))
     );
 }
 
@@ -199,7 +199,7 @@ fn gallery_aggregates_explicit_formats_and_serializes_zero_counts() {
 fn batch_image_validation_rejects_an_empty_selection() {
     assert_eq!(
         validate_image_uploads(&[]),
-        Err("请选择要上传的图片".to_owned())
+        Err(AppError::new("error.images.noneSelected"))
     );
 }
 
@@ -248,7 +248,7 @@ fn all_image_operations_reject_an_offline_current_device() {
         )
     });
 
-    let expected = Err("当前 AIMonitor 设备不在线".to_owned());
+    let expected = Err(AppError::new("error.connection.deviceOffline"));
     assert_eq!(list, expected);
     assert_eq!(upload, expected);
     assert_eq!(delete, expected);
@@ -280,7 +280,7 @@ fn all_image_operations_reject_a_stale_device_token_before_http() {
         )
     });
 
-    let expected = Err("当前设备已切换，请重新执行操作".to_owned());
+    let expected = Err(AppError::new("error.connection.deviceChanged"));
     assert_eq!(list, expected);
     assert_eq!(upload, expected);
     assert_eq!(delete, expected);

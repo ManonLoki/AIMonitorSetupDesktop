@@ -5,6 +5,7 @@ use reqwest::{Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
 use super::{MAX_REMOTE_IMAGE_BYTES, MonitorService, device_response::ensure_success};
+use crate::domain::AppError;
 use crate::domain::monitor::{ImageFormat, is_supported_upload_image_mime, process_image_upload};
 
 // 从设备下载的远程图片，image 字段为 base64 编码内容。
@@ -83,28 +84,29 @@ pub struct ImageUpload {
 }
 
 // 拼出下载单张图片的完整 URL，同时校验文件名合法，防止路径穿越攻击。
-fn remote_image_url(base_url: &str, filename: &str) -> Result<Url, String> {
+fn remote_image_url(base_url: &str, filename: &str) -> Result<Url, AppError> {
     // 拒绝空文件名、"." "/.." 以及包含路径分隔符的文件名。
     if filename.is_empty() || filename == "." || filename == ".." || filename.contains(['/', '\\'])
     {
-        return Err("远端图片文件名无效".to_owned());
+        return Err(AppError::new("error.images.invalidRemoteFilename"));
     }
 
-    let mut url = Url::parse(&format!("{base_url}/api/images/"))
-        .map_err(|error| format!("设备图片地址无效：{error}"))?;
+    let mut url = Url::parse(&format!("{base_url}/api/images/")).map_err(|error| {
+        AppError::new("error.images.invalidDeviceUrl").param("detail", error.to_string())
+    })?;
     // 通过 path_segments_mut 安全地追加文件名段（会自动做 URL 编码），
     // 而不是用字符串拼接，避免特殊字符导致的问题。
     url.path_segments_mut()
-        .map_err(|()| "设备图片地址不能包含路径段".to_owned())?
+        .map_err(|()| AppError::new("error.images.deviceUrlCannotHavePathSegments"))?
         .pop_if_empty()
         .push(filename);
     Ok(url)
 }
 
 // 校验图片字节长度不超过最大限制。
-fn ensure_image_size(len: u64, filename: &str) -> Result<(), String> {
+fn ensure_image_size(len: u64, filename: &str) -> Result<(), AppError> {
     if len > MAX_REMOTE_IMAGE_BYTES as u64 {
-        return Err(format!("{filename} 不能超过 8 MiB"));
+        return Err(AppError::new("error.images.tooLarge").param("filename", filename));
     }
     Ok(())
 }
@@ -134,21 +136,19 @@ fn image_data_url(format: ImageFormat, bytes: &[u8]) -> String {
 
 // 上传前的批量校验：必须至少选择一张图片，且每张图片文件名非空、内容非空、
 // 大小不超限、MIME 类型受支持；任意一张不满足都直接整体拒绝（不做部分上传）。
-fn validate_image_uploads(images: &[ImageUpload]) -> Result<(), String> {
+fn validate_image_uploads(images: &[ImageUpload]) -> Result<(), AppError> {
     if images.is_empty() {
-        return Err("请选择要上传的图片".to_owned());
+        return Err(AppError::new("error.images.noneSelected"));
     }
 
     for image in images {
         if image.filename.trim().is_empty() || image.bytes.is_empty() {
-            return Err("所选图片中包含空文件".to_owned());
+            return Err(AppError::new("error.images.emptyFile"));
         }
         ensure_image_size(image.bytes.len() as u64, &image.filename)?;
         if !is_supported_upload_image_mime(&image.mime_type) {
-            return Err(format!(
-                "{} 不是支持的 BMP、JPEG、GIF、PNG 或 WebP 图片",
-                image.filename
-            ));
+            return Err(AppError::new("error.images.unsupportedUploadType")
+                .param("filename", image.filename.clone()));
         }
     }
 
@@ -157,7 +157,7 @@ fn validate_image_uploads(images: &[ImageUpload]) -> Result<(), String> {
 
 impl MonitorService {
     // 获取设备端保存的所有图片：先拉取图片列表元数据，再逐张下载图片内容。
-    pub async fn images(&self, expected_device_id: &str) -> Result<RemoteImageGallery, String> {
+    pub async fn images(&self, expected_device_id: &str) -> Result<RemoteImageGallery, AppError> {
         // 设备可能换了 DHCP 地址；始终使用在线发现快照中的最新路由。
         let base_url = self.current_device_base_url_for(expected_device_id)?;
         let response = self
@@ -165,14 +165,18 @@ impl MonitorService {
             .get(format!("{base_url}/api/images"))
             .send()
             .await
-            .map_err(|error| format!("无法读取远端图片：{error}"))?;
+            .map_err(|error| {
+                AppError::new("error.images.listFetchFailed").param("detail", error.to_string())
+            })?;
         // 校验 HTTP 状态码，非成功状态转换为业务错误。
         let response = ensure_success(response).await?;
         let metadata = response
             .json::<ImageListResponse>()
             .await
             .map(|body| body.images)
-            .map_err(|error| format!("图片列表响应格式错误：{error}"))?;
+            .map_err(|error| {
+                AppError::new("error.images.listResponseInvalid").param("detail", error.to_string())
+            })?;
         let mut images = Vec::with_capacity(metadata.len());
 
         // AIMonitor serves image bytes through GET /api/images/{filename}.
@@ -190,16 +194,15 @@ impl MonitorService {
         &self,
         base_url: &str,
         metadata: RemoteImageMetadata,
-    ) -> Result<RemoteImage, String> {
+    ) -> Result<RemoteImage, AppError> {
         let filename = metadata.filename.trim();
         // 拼出图片下载 url（内部会对文件名做安全校验，防止路径穿越）。
         let url = remote_image_url(base_url, filename)?;
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|error| format!("{filename} 读取失败：{error}"))?;
+        let response = self.client.get(url).send().await.map_err(|error| {
+            AppError::new("error.images.readFailed")
+                .param("filename", filename)
+                .param("detail", error.to_string())
+        })?;
         let response = ensure_success(response).await?;
         // 若响应头带有 Content-Length，提前校验大小是否超限，避免读取超大响应体。
         if let Some(length) = response.content_length() {
@@ -212,14 +215,17 @@ impl MonitorService {
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok());
-        let format = remote_image_format(header_content_type, &metadata.mime_type)
-            .ok_or_else(|| format!("{filename} 返回了不支持的图片类型"))?;
+        let format =
+            remote_image_format(header_content_type, &metadata.mime_type).ok_or_else(|| {
+                AppError::new("error.images.unsupportedRemoteType").param("filename", filename)
+            })?;
 
         // 读取响应体全部字节。
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| format!("{filename} 读取失败：{error}"))?;
+        let bytes = response.bytes().await.map_err(|error| {
+            AppError::new("error.images.readFailed")
+                .param("filename", filename)
+                .param("detail", error.to_string())
+        })?;
         // 读取到实际字节后再次校验大小（防止 Content-Length 缺失或不准确的情况）。
         ensure_image_size(bytes.len() as u64, filename)?;
 
@@ -237,7 +243,7 @@ impl MonitorService {
         &self,
         expected_device_id: &str,
         images: Vec<ImageUpload>,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>, AppError> {
         validate_image_uploads(&images)?;
         let base_url = self.current_device_base_url_for(expected_device_id)?;
         let mut uploaded = Vec::with_capacity(images.len());
@@ -246,26 +252,42 @@ impl MonitorService {
             let source_filename = image.filename.clone();
             // 上传前在 Rust domain 层完成格式校验、缩放及兼容格式转换。
             let processed = process_image_upload(&source_filename, &image.bytes, &image.mime_type)
-                .map_err(|error| format!("{source_filename} 处理失败：{error}"))?;
+                .map_err(|error| {
+                    AppError::new("error.images.processFailed")
+                        .param("filename", source_filename.clone())
+                        .param("cause", error.code)
+                })?;
             ensure_image_size(processed.bytes.len() as u64, &processed.filename)?;
             // 构造 multipart 表单的文件分片。
             let file_part = multipart::Part::bytes(processed.bytes)
                 .file_name(processed.filename.clone())
                 .mime_str(processed.mime_type)
-                .map_err(|error| format!("{source_filename} 的图片类型无效：{error}"))?;
+                .map_err(|error| {
+                    AppError::new("error.images.invalidMimeType")
+                        .param("filename", source_filename.clone())
+                        .param("detail", error.to_string())
+                })?;
             let response = self
                 .client
                 .post(format!("{base_url}/api/images"))
                 .multipart(multipart::Form::new().part("file", file_part))
                 .send()
                 .await
-                .map_err(|error| format!("{source_filename} 上传失败：{error}"))?;
+                .map_err(|error| {
+                    AppError::new("error.images.uploadFailed")
+                        .param("filename", source_filename.clone())
+                        .param("detail", error.to_string())
+                })?;
             let response = ensure_success(response).await?;
             let uploaded_filename = response
                 .json::<UploadResponse>()
                 .await
                 .map(|body| body.filename)
-                .map_err(|error| format!("{source_filename} 的上传响应格式错误：{error}"))?;
+                .map_err(|error| {
+                    AppError::new("error.images.uploadResponseInvalid")
+                        .param("filename", source_filename.clone())
+                        .param("detail", error.to_string())
+                })?;
             uploaded.push(uploaded_filename);
         }
 
@@ -277,17 +299,14 @@ impl MonitorService {
         &self,
         expected_device_id: &str,
         filename: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), AppError> {
         let base_url = self.current_device_base_url_for(expected_device_id)?;
         // 复用下载时的单路径段校验与 URL 编码，禁止路径穿越，
         // 也避免中文、空格、# 和 ? 等文件名改变请求路径语义。
         let url = remote_image_url(&base_url, filename)?;
-        let response = self
-            .client
-            .delete(url)
-            .send()
-            .await
-            .map_err(|error| format!("删除图片失败：{error}"))?;
+        let response = self.client.delete(url).send().await.map_err(|error| {
+            AppError::new("error.images.deleteFailed").param("detail", error.to_string())
+        })?;
         ensure_success(response).await?;
         Ok(())
     }

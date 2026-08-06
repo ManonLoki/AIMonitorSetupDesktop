@@ -7,9 +7,10 @@ use super::super::{
     managed_hook_marker, protocol, tool_from_slug,
 };
 use super::{command_has_marker, generate_hook_config};
+use crate::domain::AppError;
 use crate::domain::monitor::{AiTool, HookConfigPreview, merge_hook_config};
 
-pub(super) fn generate_test_hook_config(tool: AiTool) -> Result<HookConfigPreview, String> {
+pub(super) fn generate_test_hook_config(tool: AiTool) -> Result<HookConfigPreview, AppError> {
     generate_hook_config(tool, Path::new("/opt/AIMonitor/AIMonitor"))
 }
 

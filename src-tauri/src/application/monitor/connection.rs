@@ -3,8 +3,10 @@
 use std::time::Duration;
 
 use serde::Serialize;
+use tracing::warn;
 
 use super::{DISCOVERY_PROBE_TIMEOUT, MonitorService};
+use crate::domain::AppError;
 use crate::domain::monitor::{DiscoveredMonitorDevice, normalize_base_url};
 
 // 用户主动触发的连接检测比批量发现探测更宽松：偶发触发、无需批量并发扫描，
@@ -24,7 +26,7 @@ impl MonitorService {
     /// 从当前在线快照中取出 UI 当前选中的设备。只按稳定的设备 ID
     /// 匹配，因此返回的名称和地址都来自设备发现的最新快照，而不是可能
     /// 已经过期的持久化路由。当前设备不在快照时直接拒绝设备业务请求。
-    pub(super) fn current_online_device(&self) -> Result<DiscoveredMonitorDevice, String> {
+    pub(super) fn current_online_device(&self) -> Result<DiscoveredMonitorDevice, AppError> {
         // 与发现提交/手动切换共用事务锁，避免在读取 device_id 后、
         // 查找在线路由前被切换打断，从而让旧 expectedDeviceId 错误通过。
         let _snapshot_transaction = self.lock_device_snapshot_transaction()?;
@@ -32,23 +34,23 @@ impl MonitorService {
     }
 
     /// 调用方必须已持有设备快照事务锁。
-    fn current_online_device_locked(&self) -> Result<DiscoveredMonitorDevice, String> {
+    fn current_online_device_locked(&self) -> Result<DiscoveredMonitorDevice, AppError> {
         let device_id = self.settings()?.device_id;
         if device_id.is_empty() {
-            return Err("请先选择 AIMonitor 设备".to_owned());
+            return Err(AppError::new("error.connection.deviceNotSelected"));
         }
 
         self.online_devices
             .read()
-            .map_err(|_| "在线设备读取锁已损坏".to_owned())?
+            .map_err(|_| AppError::new("error.internal.lockPoisoned"))?
             .iter()
             .find(|device| device.id == device_id)
             .cloned()
-            .ok_or_else(|| "当前 AIMonitor 设备不在线".to_owned())
+            .ok_or_else(|| AppError::new("error.connection.deviceOffline"))
     }
 
     /// 返回当前在线设备的最新基地址，供图片等设备业务统一复用。
-    pub(super) fn current_device_base_url(&self) -> Result<String, String> {
+    pub(super) fn current_device_base_url(&self) -> Result<String, AppError> {
         normalize_base_url(&self.current_online_device()?.base_url)
     }
 
@@ -57,12 +59,12 @@ impl MonitorService {
     pub(super) fn current_device_base_url_for(
         &self,
         expected_device_id: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, AppError> {
         // expected ID 校验也必须位于同一事务内，不能在取出设备后先释放锁。
         let _snapshot_transaction = self.lock_device_snapshot_transaction()?;
         let device = self.current_online_device_locked()?;
         if device.id != expected_device_id {
-            return Err("当前设备已切换，请重新执行操作".to_owned());
+            return Err(AppError::new("error.connection.deviceChanged"));
         }
         normalize_base_url(&device.base_url)
     }
@@ -72,7 +74,7 @@ impl MonitorService {
     pub async fn check_connection(
         &self,
         base_url: Option<&str>,
-    ) -> Result<ConnectionStatus, String> {
+    ) -> Result<ConnectionStatus, AppError> {
         let base_url = match base_url {
             // 显式传入 url 时先做归一化校验。
             Some(value) => normalize_base_url(value)?,
@@ -95,17 +97,24 @@ impl MonitorService {
                 message: "设备连接正常".to_owned(),
             },
             // 有响应但状态码非成功：视为不可达，附带状态码。
-            Ok(response) => ConnectionStatus {
-                reachable: false,
-                base_url,
-                message: format!("设备返回 HTTP {}", response.status().as_u16()),
-            },
+            Ok(response) => {
+                let status_code = response.status().as_u16();
+                warn!(base_url = %base_url, status_code, "设备连接检测收到非成功状态码");
+                ConnectionStatus {
+                    reachable: false,
+                    base_url,
+                    message: format!("设备返回 HTTP {status_code}"),
+                }
+            }
             // 请求本身失败（网络错误等）：视为不可达，附带错误详情。
-            Err(error) => ConnectionStatus {
-                reachable: false,
-                base_url,
-                message: format!("无法连接设备：{error}"),
-            },
+            Err(error) => {
+                warn!(base_url = %base_url, %error, "设备连接检测失败");
+                ConnectionStatus {
+                    reachable: false,
+                    base_url,
+                    message: format!("无法连接设备：{error}"),
+                }
+            }
         })
     }
 
@@ -192,13 +201,13 @@ mod tests {
         );
         assert_eq!(
             service.current_device_base_url_for("screen-2"),
-            Err("当前设备已切换，请重新执行操作".to_owned())
+            Err(AppError::new("error.connection.deviceChanged"))
         );
         // 清空发现快照后，持久化的旧地址仍在，但设备业务必须拒绝请求。
         service.online_devices.write().unwrap().clear();
         assert_eq!(
             service.current_device_base_url(),
-            Err("当前 AIMonitor 设备不在线".to_owned())
+            Err(AppError::new("error.connection.deviceOffline"))
         );
 
         fs::remove_dir_all(root).unwrap();

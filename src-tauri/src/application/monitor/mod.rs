@@ -12,6 +12,7 @@ use reqwest::Client;
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
 
+use crate::domain::AppError;
 use crate::domain::monitor::{
     AiTool, DEFAULT_HOOK_RELAY_PORT, DiscoveredMonitorDevice, HookBehavior, HookConfigDirectories,
     SavedMonitorData,
@@ -106,10 +107,13 @@ fn build_hook_forward_client() -> reqwest::Result<reqwest::blocking::Client> {
 
 // 构造监控设备业务使用的异步 HTTP 客户端。调用方仍可按具体操作设置请求级
 // timeout，但所有设备请求统一禁用隐藏重试、重定向和系统代理。
-fn build_monitor_client() -> Result<Client, String> {
+fn build_monitor_client() -> Result<Client, AppError> {
     super::net::harden_async_client(Client::builder())
         .build()
-        .map_err(|error| format!("无法创建监控设备 HTTP 客户端：{error}"))
+        .map_err(|error| {
+            AppError::new("error.lifecycle.buildHttpClientFailed")
+                .param("detail", error.to_string())
+        })
 }
 
 // 应用核心服务：持有 HTTP 客户端、数据存储路径与内存态、在线设备快照、

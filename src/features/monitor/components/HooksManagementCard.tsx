@@ -35,7 +35,7 @@ import {
 // 引入全部受支持 AI 工具的取值/展示名映射与可见性过滤函数
 import { enabledAiTools } from "./aiTools";
 import { hookActivationPresentation } from "./hookActivationGuidance";
-import { useI18n } from "../../../shared/i18n";
+import { describeError, useI18n } from "../../../shared/i18n";
 
 interface HooksManagementCardProps {
   enabledTools: readonly AiTool[];
@@ -119,7 +119,7 @@ export function HooksManagementCard({
             {t("hooks.description")}
           </Text>
         </div>
-        {error && <Alert color="red">{error.message}</Alert>}
+        {error && <Alert color="red">{describeError(error, t)}</Alert>}
         {pickerError && <Alert color="red">{pickerError}</Alert>}
 
         {visibleTools.length === 0 ? (
@@ -213,11 +213,7 @@ export function HooksManagementCard({
                                 }));
                               }
                             } catch (error) {
-                              setPickerError(
-                                error instanceof Error
-                                  ? error.message
-                                  : String(error),
-                              );
+                              setPickerError(describeError(error, t));
                             } finally {
                               setSelectingDirectory(null);
                             }

@@ -22,7 +22,7 @@ import {
 } from "../queries/monitor";
 // 引入通用图标组件
 import { LineIcon } from "../../../shared/ui/LineIcon";
-import { useI18n } from "../../../shared/i18n";
+import { describeError, useI18n } from "../../../shared/i18n";
 
 export function WorkbenchPage() {
   const { t } = useI18n();
@@ -42,7 +42,7 @@ export function WorkbenchPage() {
   return (
     <Stack gap="md">
       {/* 运行时概览查询本身的错误提示 */}
-      {runtime.error && <Alert color="red">{runtime.error.message}</Alert>}
+      {runtime.error && <Alert color="red">{describeError(runtime.error, t)}</Alert>}
 
       {/* 在线设备卡片：展示已发现设备列表，并支持手动强制重新检查 */}
       <Card withBorder radius="lg" p="md" className="surface-card">
@@ -68,7 +68,7 @@ export function WorkbenchPage() {
 
           {/* 设备发现查询自身的错误提示 */}
           {deviceSnapshot.error && (
-            <Alert color="red">{deviceSnapshot.error.message}</Alert>
+            <Alert color="red">{describeError(deviceSnapshot.error, t)}</Alert>
           )}
 
           {/* 查询完成但未发现任何设备时的提示 */}

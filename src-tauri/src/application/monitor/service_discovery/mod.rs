@@ -8,6 +8,7 @@ use std::{
 
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use tauri::{AppHandle, Emitter};
+use tracing::{debug, warn};
 
 use super::{
     AIMONITOR_SERVICE_TYPE, DEFAULT_DEVICE_API_PATH, DISCOVERY_POLL_GRANULARITY, DISCOVERY_TIMEOUT,
@@ -17,6 +18,7 @@ use super::{
         merge_discovery_candidates,
     },
 };
+use crate::domain::AppError;
 use crate::domain::monitor::{
     DiscoveredMonitorDevice, DiscoverySource, validate_discovery_interval_minutes,
 };
@@ -46,7 +48,11 @@ impl MonitorService {
                 if Instant::now() >= next_run {
                     // 后台轮询与前端强制刷新共用同一编排，避免两条路径产生
                     // 不同的探测、自动切换或事件负载语义。
-                    let _ = tauri::async_runtime::block_on(service.refresh_online_devices(&app));
+                    if let Err(error) =
+                        tauri::async_runtime::block_on(service.refresh_online_devices(&app))
+                    {
+                        warn!(%error, "后台设备发现刷新失败");
+                    }
                     // 按当前配置的检查间隔计算下一次执行时间。
                     next_run = Instant::now() + service.discovery_interval();
                 }
@@ -74,11 +80,13 @@ impl MonitorService {
     pub async fn refresh_online_devices(
         &self,
         app: &AppHandle,
-    ) -> Result<MonitorDeviceSnapshot, String> {
+    ) -> Result<MonitorDeviceSnapshot, AppError> {
         let refresh_generation = self.begin_online_device_refresh()?;
         let candidates = tauri::async_runtime::spawn_blocking(Self::discover_device_candidates)
             .await
-            .map_err(|error| format!("设备发现任务失败：{error}"))??;
+            .map_err(|error| {
+                AppError::new("error.discovery.taskFailed").param("detail", error.to_string())
+            })??;
         let devices = self.finish_device_discovery(candidates).await?;
         self.publish_online_devices(app, refresh_generation, devices)
     }
@@ -90,9 +98,10 @@ impl MonitorService {
         app: &AppHandle,
         refresh_generation: u64,
         devices: Vec<DiscoveredMonitorDevice>,
-    ) -> Result<MonitorDeviceSnapshot, String> {
+    ) -> Result<MonitorDeviceSnapshot, AppError> {
         let (snapshot, changed) = self.update_online_devices(refresh_generation, devices)?;
         if changed {
+            debug!(device_count = snapshot.devices.len(), "在线设备快照已变化");
             let _ = app.emit(MONITOR_DEVICES_CHANGED_EVENT, snapshot.clone());
         }
         Ok(snapshot)
@@ -103,7 +112,7 @@ impl MonitorService {
     /// 的 mDNS 广播能穿透当前网络（多播被 AP 丢弃、跨 VLAN 等），仅在其中一路
     /// 发现了设备时就放弃另一路会把只靠 UDP 广播现身的设备从列表里漏掉。
     /// 只有两路都出错才报错。
-    pub(crate) fn discover_device_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
+    pub(crate) fn discover_device_candidates() -> Result<Vec<DiscoveryCandidate>, AppError> {
         // 用 thread::scope 并发跑 mDNS 发现和 UDP 广播发现两路，互不阻塞。
         let (mdns_result, udp_result) = thread::scope(|scope| {
             let mdns = scope.spawn(Self::discover_mdns_candidates);
@@ -111,9 +120,9 @@ impl MonitorService {
             (
                 // 子线程 panic 时也转换成 Err，不让整个发现流程 panic。
                 mdns.join()
-                    .unwrap_or_else(|_| Err("mDNS 发现线程异常退出".to_owned())),
+                    .unwrap_or_else(|_| Err(AppError::new("error.discovery.mdnsThreadCrashed"))),
                 udp.join()
-                    .unwrap_or_else(|_| Err("UDP 发现线程异常退出".to_owned())),
+                    .unwrap_or_else(|_| Err(AppError::new("error.discovery.udpThreadCrashed"))),
             )
         });
         match (mdns_result, udp_result) {
@@ -124,24 +133,29 @@ impl MonitorService {
             // 只有一路成功：直接使用成功的一路，不因另一路失败而报错。
             (Ok(candidates), Err(_)) | (Err(_), Ok(candidates)) => Ok(candidates),
             // 两路都失败才报错，并把两边的错误信息都带上。
-            (Err(mdns_error), Err(udp_error)) => Err(format!(
-                "mDNS 发现失败：{mdns_error}；UDP 广播发现失败：{udp_error}"
-            )),
+            (Err(mdns_error), Err(udp_error)) => {
+                warn!(mdns = %mdns_error, udp = %udp_error, "mDNS 与 UDP 广播发现均失败");
+                Err(AppError::new("error.discovery.bothFailed")
+                    .param("mdns", mdns_error.to_string())
+                    .param("udp", udp_error.to_string()))
+            }
         }
     }
 
     // 通过 mDNS 浏览 `_aimonitor._tcp.local.` 服务类型，在超时时间内收集所有被解析出的设备。
-    fn discover_mdns_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
+    fn discover_mdns_candidates() -> Result<Vec<DiscoveryCandidate>, AppError> {
         // 创建 mDNS 守护实例。
-        let daemon = ServiceDaemon::new().map_err(|error| format!("无法启动设备发现：{error}"))?;
+        let daemon = ServiceDaemon::new().map_err(|error| {
+            AppError::new("error.discovery.mdnsStartFailed").param("detail", error.to_string())
+        })?;
         // 缩短网卡状态刷新周期到 1 秒，尽量及时感知网络变化（如切换 Wi-Fi）。
-        daemon
-            .set_ip_check_interval(1)
-            .map_err(|error| format!("无法启用网卡刷新：{error}"))?;
+        daemon.set_ip_check_interval(1).map_err(|error| {
+            AppError::new("error.discovery.mdnsRefreshFailed").param("detail", error.to_string())
+        })?;
         // 开始浏览指定服务类型，得到一个事件接收器。
-        let receiver = daemon
-            .browse(AIMONITOR_SERVICE_TYPE)
-            .map_err(|error| format!("无法扫描 AIMonitor 设备：{error}"))?;
+        let receiver = daemon.browse(AIMONITOR_SERVICE_TYPE).map_err(|error| {
+            AppError::new("error.discovery.mdnsBrowseFailed").param("detail", error.to_string())
+        })?;
         let deadline = Instant::now() + DISCOVERY_TIMEOUT;
         let mut candidates: HashMap<String, DiscoveryCandidate> = HashMap::new();
 
@@ -240,7 +254,7 @@ impl MonitorService {
     pub(crate) async fn finish_device_discovery(
         &self,
         candidates: Vec<DiscoveryCandidate>,
-    ) -> Result<Vec<DiscoveredMonitorDevice>, String> {
+    ) -> Result<Vec<DiscoveredMonitorDevice>, AppError> {
         let settings = self.settings()?;
         // 先探测一次当前已保存设备的地址是否可达，后面多处会用到这个结果。
         let saved_is_reachable =

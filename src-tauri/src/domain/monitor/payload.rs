@@ -4,6 +4,8 @@ use encoding_rs::{Encoding, UTF_8};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::domain::AppError;
+
 use super::MAX_NATIVE_HOOK_INPUT_BYTES;
 
 /// 本机 Hook 接口的唯一正文契约。设备展示文案、图片、用户名等数据不属于
@@ -25,22 +27,23 @@ pub struct MinimalHookPayload {
 pub fn minimize_native_hook_payload(
     native_json: &[u8],
     configured_event: &str,
-) -> Result<MinimalHookPayload, String> {
+) -> Result<MinimalHookPayload, AppError> {
     if native_json.is_empty() || native_json.len() > MAX_NATIVE_HOOK_INPUT_BYTES {
-        return Err("AI Hook 原始输入为空或过大".to_owned());
+        return Err(AppError::new("error.payload.rawInputInvalid"));
     }
     let decoded = decode_native_json(native_json)?;
-    let source = serde_json::from_str::<Value>(&decoded)
-        .map_err(|error| format!("AI Hook 原始 JSON 无效：{error}"))?;
+    let source = serde_json::from_str::<Value>(&decoded).map_err(|error| {
+        AppError::new("error.payload.rawJsonInvalid").param("detail", error.to_string())
+    })?;
     let source = source
         .as_object()
-        .ok_or_else(|| "AI Hook 原始 JSON 的根节点必须是对象".to_owned())?;
+        .ok_or_else(|| AppError::new("error.payload.rawJsonRootNotObject"))?;
     let body_event = string_field(source, &["hook_event_name", "type"]);
     if body_event
         .as_deref()
         .is_some_and(|event| event.trim() != configured_event)
     {
-        return Err("AI Hook 原始事件与配置事件不一致".to_owned());
+        return Err(AppError::new("error.payload.eventMismatch"));
     }
     Ok(MinimalHookPayload {
         hook_event_name: configured_event.to_owned(),
@@ -67,7 +70,7 @@ pub fn minimize_native_hook_payload(
 // Hook 宿主在 Windows 上可能给 UTF-8 JSON 添加 BOM，也可能通过原生文本管道
 // 输出 UTF-16LE/BE。统一在业务解析边界去掉 BOM 并转成 Rust UTF-8 字符串，避免
 // serde_json 把 BOM 当成 JSON 的第一个非法字符。
-fn decode_native_json(native_json: &[u8]) -> Result<String, String> {
+fn decode_native_json(native_json: &[u8]) -> Result<String, AppError> {
     // 只有 BOM 能声明 UTF-16；无 BOM 输入仍严格按 UTF-8 处理，避免
     // 猜测编码把损坏的原始数据误解为可接受的 JSON。
     let (encoding, bom_len) = Encoding::for_bom(native_json).unwrap_or((UTF_8, 0));
@@ -76,9 +79,9 @@ fn decode_native_json(native_json: &[u8]) -> Result<String, String> {
         .map(std::borrow::Cow::into_owned)
         .ok_or_else(|| {
             if encoding == UTF_8 {
-                "AI Hook 原始 JSON 不是有效 UTF-8".to_owned()
+                AppError::new("error.payload.invalidUtf8")
             } else {
-                "AI Hook 原始 JSON 不是有效 UTF-16".to_owned()
+                AppError::new("error.payload.invalidUtf16")
             }
         })
 }
@@ -194,16 +197,16 @@ mod tests {
     #[test]
     fn malformed_utf16_bom_input_is_rejected_without_panicking() {
         let error = minimize_native_hook_payload(&[0xFF, 0xFE, b'{'], "stop").unwrap_err();
-        assert!(error.contains("UTF-16"));
+        assert_eq!(error.code, "error.payload.invalidUtf16");
 
         // 单独的高代理项也必须严格拒绝，不能替换为 U+FFFD。
         let error = minimize_native_hook_payload(&[0xFF, 0xFE, 0x00, 0xD8], "stop").unwrap_err();
-        assert!(error.contains("UTF-16"));
+        assert_eq!(error.code, "error.payload.invalidUtf16");
     }
 
     #[test]
     fn native_hook_payload_does_not_guess_a_non_utf8_encoding_without_a_bom() {
         let error = minimize_native_hook_payload(&[0xFF, b'{', b'}'], "stop").unwrap_err();
-        assert!(error.contains("UTF-8"));
+        assert_eq!(error.code, "error.payload.invalidUtf8");
     }
 }

@@ -5,7 +5,6 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -78,6 +77,45 @@ function commandSucceeds(command, args, env = process.env) {
   return !result.error && result.status === 0;
 }
 
+function commandOutput(command, args, env = process.env) {
+  const result = spawnSync(command, args, {
+    cwd: projectRoot,
+    encoding: "utf8",
+    env,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    process.stdout.write(result.stdout ?? "");
+    process.stderr.write(result.stderr ?? "");
+    throw new Error(`${command} 退出，状态码 ${result.status}`);
+  }
+  return `${result.stdout ?? ""}${result.stderr ?? ""}`;
+}
+
+function verifyMacBinaryArchitecture(binary, target, env) {
+  const architectures = new Set(
+    commandOutput("lipo", ["-archs", binary], env).trim().split(/\s+/).filter(Boolean),
+  );
+  const expected = target === "universal-apple-darwin"
+    ? new Set(["arm64", "x86_64"])
+    : new Set([target.startsWith("aarch64") ? "arm64" : "x86_64"]);
+  if (
+    architectures.size !== expected.size ||
+    [...expected].some((architecture) => !architectures.has(architecture))
+  ) {
+    throw new Error(
+      `macOS 二进制架构错误：期望 ${[...expected].join(", ")}，实际 ${[...architectures].join(", ")}`,
+    );
+  }
+}
+
+function verifyWindowsBinaryArchitecture(binary, env) {
+  const header = commandOutput("llvm-readobj", ["--file-header", binary], env);
+  if (!header.includes("Arch: x86_64") || !header.includes("IMAGE_FILE_MACHINE_AMD64")) {
+    throw new Error(`Windows 应用二进制不是 x86_64 MSVC PE：${binary}`);
+  }
+}
+
 function notarizeAndVerifyMacArtifact(artifact, env) {
   if (!commandSucceeds("xcrun", ["stapler", "validate", artifact], env)) {
     const profile = process.env.AIMONITOR_NOTARY_PROFILE ?? "AIMonitorNotary";
@@ -113,31 +151,20 @@ function notarizeAndVerifyMacArtifact(artifact, env) {
   );
 }
 
-function filesBelow(directory, extension) {
-  if (!existsSync(directory)) return [];
-  const files = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const entryPath = join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...filesBelow(entryPath, extension));
-    if (entry.isFile() && entry.name.toLowerCase().endsWith(extension)) files.push(entryPath);
+function expectedArtifact(path) {
+  if (!existsSync(path) || !statSync(path).isFile()) {
+    throw new Error(`没有找到当前版本的构建产物：${path}`);
   }
-  return files;
-}
-
-function newestArtifact(directory, extension) {
-  const candidates = filesBelow(directory, extension)
-    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
-  if (candidates.length === 0) {
-    throw new Error(`没有在 ${directory} 找到 ${extension} 构建产物`);
-  }
-  return candidates[0];
+  return path;
 }
 
 function buildMac() {
   if (platform() !== "darwin") {
     throw new Error("macOS DMG 必须在 macOS 主机上构建");
   }
-  const target = process.env.AIMONITOR_MAC_TARGET ?? "universal-apple-darwin";
+  const target = requestedPlatform === "all"
+    ? "universal-apple-darwin"
+    : process.env.AIMONITOR_MAC_TARGET ?? "universal-apple-darwin";
   const supportedTargets = new Set([
     "universal-apple-darwin",
     "aarch64-apple-darwin",
@@ -156,9 +183,26 @@ function buildMac() {
     CARGO_TARGET_DIR: projectCargoTargetDir,
   };
   run("pnpm", ["tauri", "build", "--target", target, "--ci"], env);
-  const source = newestArtifact(
-    join(tauriRoot, "target", target, "release", "bundle", "dmg"),
-    ".dmg",
+  verifyMacBinaryArchitecture(
+    join(tauriRoot, "target", target, "release", mainBinaryName),
+    target,
+    env,
+  );
+  const tauriArchitecture = target === "universal-apple-darwin"
+    ? "universal"
+    : target.startsWith("aarch64")
+      ? "aarch64"
+      : "x64";
+  const source = expectedArtifact(
+    join(
+      tauriRoot,
+      "target",
+      target,
+      "release",
+      "bundle",
+      "dmg",
+      `${productName}_${version}_${tauriArchitecture}.dmg`,
+    ),
   );
   run("codesign", ["--verify", "--strict", "--verbose=2", source], env);
   notarizeAndVerifyMacArtifact(source, env);
@@ -189,7 +233,7 @@ function buildWindows() {
     PATH: [...llvmPaths, process.env.PATH].filter(Boolean).join(":"),
     XWIN_CACHE_DIR: process.env.XWIN_CACHE_DIR ?? join(projectRoot, ".xwin-cache"),
   };
-  for (const command of ["cargo-xwin", "makensis", "llvm-rc"]) {
+  for (const command of ["cargo-xwin", "makensis", "llvm-rc", "llvm-readobj"]) {
     if (!commandExists(command, env)) {
       throw new Error(`Windows 交叉构建缺少命令：${command}`);
     }
@@ -197,12 +241,36 @@ function buildWindows() {
   run("rustup", ["target", "add", target], env);
   run(
     "pnpm",
-    ["tauri", "build", "--runner", "cargo-xwin", "--target", target, "--ci", "--no-sign"],
+    [
+      "tauri",
+      "build",
+      "--runner",
+      "cargo-xwin",
+      "--target",
+      target,
+      "--ci",
+      "--no-sign",
+    ],
     env,
   );
-  const source = newestArtifact(
-    join(tauriRoot, "target", target, "release", "bundle", "nsis"),
-    ".exe",
+  const applicationBinary = join(
+    tauriRoot,
+    "target",
+    target,
+    "release",
+    `${mainBinaryName}.exe`,
+  );
+  verifyWindowsBinaryArchitecture(applicationBinary, env);
+  const source = expectedArtifact(
+    join(
+      tauriRoot,
+      "target",
+      target,
+      "release",
+      "bundle",
+      "nsis",
+      `${productName}_${version}_x64-setup.exe`,
+    ),
   );
   return {
     source,

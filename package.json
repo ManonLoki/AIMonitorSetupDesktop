@@ -22,20 +22,24 @@
     "build:mac": "node scripts/build-release.mjs mac",
     "build:win": "node scripts/build-release.mjs win",
     "build:release": "node scripts/build-release.mjs all",
+    "release:desktop": "node scripts/build-release.mjs all",
     "tauri": "tauri"
   },
   "dependencies": {
     "@mantine/core": "^9.4.2",
     "@mantine/hooks": "^9.4.2",
+    "@tabler/icons-react": "^3.46.0",
     "@tanstack/react-query": "^5.101.4",
     "@tanstack/react-router": "^1.170.18",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.2",
     "@tauri-apps/plugin-opener": "2.5.4",
     "gsap": "^3.15.0",
+    "i18next": "^26.3.6",
     "jotai": "^2.20.2",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-i18next": "^17.0.11"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",

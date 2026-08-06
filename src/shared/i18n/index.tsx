@@ -1,12 +1,14 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { useEffect } from "react";
 import type { PropsWithChildren } from "react";
 import { useAtom } from "jotai";
+import { useTranslation } from "react-i18next";
 import {
   languagePreferenceAtom,
   type LanguagePreference,
 } from "../state/ui";
-import { enMessages, type TranslationKey } from "./en";
-import { zhCNMessages } from "./zh-CN";
+import type { TranslationKey } from "./en";
+import i18next from "./i18next";
+import { RustCommandError } from "../tauri/invoke-command";
 
 export type ResolvedLanguage = "zh-CN" | "en";
 type Variables = Record<string, string | number>;
@@ -27,17 +29,23 @@ export function resolveLanguage(
   return systemLanguage();
 }
 
-function translate(
-  language: ResolvedLanguage,
-  key: TranslationKey,
-  variables?: Variables,
-): string {
-  const messages = language === "zh-CN" ? zhCNMessages : enMessages;
-  return Object.entries(variables ?? {}).reduce(
-    (message, [name, value]) =>
-      message.split(`{{${name}}}`).join(String(value)),
-    messages[key] as string,
-  );
+export function I18nProvider({ children }: PropsWithChildren) {
+  const [preference] = useAtom(languagePreferenceAtom);
+
+  useEffect(() => {
+    const applyResolvedLanguage = () => {
+      const resolved = resolveLanguage(preference);
+      void i18next.changeLanguage(resolved);
+      document.documentElement.lang = resolved;
+    };
+    applyResolvedLanguage();
+    if (preference === "system") {
+      window.addEventListener("languagechange", applyResolvedLanguage);
+      return () => window.removeEventListener("languagechange", applyResolvedLanguage);
+    }
+  }, [preference]);
+
+  return <>{children}</>;
 }
 
 interface I18nValue {
@@ -47,40 +55,24 @@ interface I18nValue {
   t: (key: TranslationKey, variables?: Variables) => string;
 }
 
-const I18nContext = createContext<I18nValue | null>(null);
-
-export function I18nProvider({ children }: PropsWithChildren) {
+export function useI18n(): I18nValue {
   const [preference, setPreference] = useAtom(languagePreferenceAtom);
-  const [language, setLanguage] = useState(() => resolveLanguage(preference));
+  const { t } = useTranslation();
 
-  useEffect(() => {
-    const update = () => setLanguage(resolveLanguage(preference));
-    update();
-    if (preference === "system") {
-      window.addEventListener("languagechange", update);
-      return () => window.removeEventListener("languagechange", update);
-    }
-  }, [preference]);
-
-  useEffect(() => {
-    document.documentElement.lang = language;
-  }, [language]);
-
-  const value = useMemo<I18nValue>(
-    () => ({
-      language,
-      preference,
-      setPreference,
-      t: (key, variables) => translate(language, key, variables),
-    }),
-    [language, preference, setPreference],
-  );
-
-  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
+  return {
+    language: resolveLanguage(preference),
+    preference,
+    setPreference,
+    t: (key, variables) => t(key, variables),
+  };
 }
 
-export function useI18n(): I18nValue {
-  const value = useContext(I18nContext);
-  if (!value) throw new Error("useI18n must be used within I18nProvider");
-  return value;
+// 统一的错误展示辅助：Rust 命令失败时抛出的 RustCommandError 按当前界面语言
+// 翻译；其余错误（网络层、JS 运行时异常等）直接使用其自身 message。
+export function describeError(error: unknown, t: I18nValue["t"]): string {
+  if (error instanceof RustCommandError) {
+    return t(error.code as TranslationKey, error.params);
+  }
+  if (error instanceof Error) return error.message;
+  return String(error);
 }

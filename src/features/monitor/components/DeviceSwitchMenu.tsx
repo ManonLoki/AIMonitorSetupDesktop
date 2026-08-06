@@ -2,7 +2,7 @@ import { ActionIcon, Group, Loader, Menu, Stack, Text } from "@mantine/core";
 import { useMonitorConnection } from "../hooks/useMonitorConnection";
 import { useConnectDevice } from "../hooks/useConnectDevice";
 import { LineIcon } from "../../../shared/ui/LineIcon";
-import { useI18n } from "../../../shared/i18n";
+import { describeError, useI18n } from "../../../shared/i18n";
 
 // collapsed 为 true 时使用侧边栏收起态的图标按钮样式，否则展示完整的设备信息条
 interface DeviceSwitchMenuProps {
@@ -56,7 +56,7 @@ export function DeviceSwitchMenu({ collapsed = false }: DeviceSwitchMenuProps) {
       {/* 切换设备失败时，在展开态下展示错误提示 */}
       {connect.isError && !collapsed && (
         <Text size="xs" c="red" px={4}>
-          {t("device.switchFailed", { message: connect.error.message })}
+          {t("device.switchFailed", { message: describeError(connect.error, t) })}
         </Text>
       )}
       <Menu shadow="md" width={220} position="top-start" withinPortal>

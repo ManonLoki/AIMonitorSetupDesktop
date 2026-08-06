@@ -1,6 +1,6 @@
 # 技术栈与版本
 
-最后核对：2026-08-01。JavaScript 版本来自 npm registry，Rust crate
+最后核对：2026-08-06。JavaScript 版本来自 npm registry，Rust crate
 版本来自 crates.io；`pnpm-lock.yaml` 和 `src-tauri/Cargo.lock` 是可复现构建的
 最终依据。
 
@@ -24,7 +24,8 @@
 | 路由 | TanStack Router | 1.170.18 | 页面、导航、URL 状态 |
 | 异步状态 | TanStack Query | 5.101.4 | Rust command 的生命周期、缓存和失效 |
 | 客户端状态 | Jotai | 2.20.2 | 主题、面板开关等纯 UI 状态 |
-| 界面国际化 | 内建类型化资源 | 仓库源码 | 中英文资源、变量插值、系统语言解析与设置页切换；不引入额外运行时依赖 |
+| 图标 | `@tabler/icons-react` | 3.46.0 | `shared/ui/LineIcon` 把图标名映射到 Tabler 组件，调用方仍只传 `name`/`size` |
+| 界面国际化 | `react-i18next` / `i18next` | 17.0.11 / 26.3.6 | 中英文资源仍以类型化 `TranslationKey` 字典维护（`shared/i18n/en.ts`、`zh-CN.ts`），`i18next` 负责运行时插值与语言切换；Rust 命令失败时返回 `{ code, params }` 结构化错误，同一份字典负责翻译，Rust 侧不拼接任何面向用户的文案 |
 | 原生通信 | `@tauri-apps/api` | 2.11.1 | 类型化 `invoke` 调用 |
 | 原生目录选择 | `@tauri-apps/plugin-dialog` | 2.7.2 | 仅用于选择 Hooks 配置目录，路径保存与校验仍由 Rust 完成 |
 | 系统外链 | `@tauri-apps/plugin-opener` | 2.5.4 | 仅允许设置页项目地址通过系统默认浏览器打开 |
@@ -33,6 +34,8 @@
 
 | 用途 | 选择 | 当前锁定版本 | 使用边界 |
 | --- | --- | --- | --- |
+| 结构化日志 | tracing / tracing-subscriber / tracing-appender | 0.1.44 / 0.3.23 / 0.2.5 | `application::logging` 在 Tauri `setup` 的第一步初始化：按天滚动写入 `app_data_dir/logs`，debug 构建额外输出到标准错误；`WorkerGuard` 交给 Tauri 状态管理持有以保证退出前刷盘。日志级别由 `RUST_LOG` 环境变量控制，未设置时默认为 `info` |
+| 错误处理 | anyhow / thiserror | 1.0.104 / 2.0.19 | 应用/领域层内部错误统一用 thiserror 定义带 `#[source]` 的错误枚举（如 `ConfigIoError`、`RelayValidationError`），仅在跨越 Tauri 命令边界前转换为 `AppError`；不跨越该边界的编排代码（如命令型 Hook relay 子进程 `hook_relay.rs`）使用 `anyhow::Result` 与 `.context(..)` 传播错误链。`AppError`（`domain/error.rs`）保持不变：它是前端 i18n 契约的可序列化 `{ code, params }` 结构，不属于内部错误传播机制 |
 | 远端 HTTP | reqwest | 0.12.28 | 仅由 Rust application 层访问 AIMonitor 设备接口；本机/LAN 客户端关闭系统代理、重定向和库内隐式重试，Hook 启动竞态只使用显式固定重试契约 |
 | 命令行解析 | Clap | 4.6.4 | 仅用于解析并校验轻量 Hook relay 的内部命令行参数；桌面 GUI 启动参数不进入 Clap |
 | 本机 Hook HTTP listener | Axum / Tokio | 0.8.9 / 1.53.1 | Axum 只提供本机 Hook POST 路由与请求体限制；listener 复用 Tauri 的 Tokio runtime，并仅绑定环回地址 |
@@ -60,6 +63,13 @@ macOS 都显示 `AIMonitor`，不会退回 Cargo 包名 `ai-monitor-setup`。
 发布文件使用独立且固定的 `AIMonitorSetup` 前缀，不改变应用和 Hook relay 的
 `AIMonitor` 运行时身份；macOS、Windows 与校验文件的命名模板和
 AIMonitorDesktop 保持一致。
+
+桌面发布工具链不进入应用运行时依赖：macOS 使用系统 `codesign`、Xcode
+`notarytool`/`stapler` 与 Gatekeeper；Windows x64 在 macOS 上使用
+`cargo-xwin`、LLVM 与 NSIS。Windows 发布按项目策略明确使用 `--no-sign`，不要求
+Authenticode 证书、签名密码、Tauri `signCommand` 或 `osslsigncode`；未签名安装器
+是预期发布产物，不是降级 fallback。发布脚本仍在复制前用 `llvm-readobj` 验证
+应用 EXE 为 x86_64 MSVC PE，并为两个平台生成统一 SHA-256 校验清单。
 
 本机 Hook 接口使用 Axum 路由并通过 Tokio `TcpListener` 提供服务，仅绑定
 `127.0.0.1:10240`；listener 复用 Tauri 的 Tokio runtime，协议面只覆盖短连接

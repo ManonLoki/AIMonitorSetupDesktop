@@ -16,7 +16,7 @@ import type { DiscoveredMonitorDevice } from "../api/monitor";
 import { monitorDevicesQuery } from "../queries/monitor";
 import { useConnectDevice } from "../hooks/useConnectDevice";
 import { LineIcon } from "../../../shared/ui/LineIcon";
-import { useI18n } from "../../../shared/i18n";
+import { describeError, useI18n } from "../../../shared/i18n";
 
 // 根据设备信息推导出面板展示所需的分组标题、徽标文案与徽标颜色
 function deviceStatus(device: DiscoveredMonitorDevice | undefined, t: ReturnType<typeof useI18n>["t"]) {
@@ -141,7 +141,7 @@ export function DeviceConnectPanel() {
           searchable
           allowDeselect={false}
           size="md"
-          error={snapshot.error?.message}
+          error={snapshot.error ? describeError(snapshot.error, t) : undefined}
         />
       )}
 
@@ -187,7 +187,7 @@ export function DeviceConnectPanel() {
       )}
       {/* 连接或测试过程中出现的错误信息 */}
       {(connect.error || test.error) && (
-        <Alert color="red">{(connect.error ?? test.error)?.message}</Alert>
+        <Alert color="red">{describeError(connect.error ?? test.error, t)}</Alert>
       )}
 
       {/* 操作按钮组：重新扫描设备、测试连接、正式连接设备 */}

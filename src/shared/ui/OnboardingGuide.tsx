@@ -1,11 +1,10 @@
 import {
   ActionIcon,
-  Badge,
   Button,
   Group,
   Paper,
-  Progress,
   Stack,
+  Stepper,
   Text,
   ThemeIcon,
   Title,
@@ -105,12 +104,7 @@ export function OnboardingGuide() {
               <LineIcon name="guide" size={20} />
             </ThemeIcon>
             <div>
-              <Group gap="xs">
-                <Title order={4}>{t("onboarding.title")}</Title>
-                <Badge variant="light" color="violet">
-                  {step + 1} / {steps.length}
-                </Badge>
-              </Group>
+              <Title order={4}>{t("onboarding.title")}</Title>
               <Text size="xs" c="dimmed" mt={2}>
                 {t("onboarding.description")}
               </Text>
@@ -128,30 +122,24 @@ export function OnboardingGuide() {
           </Tooltip>
         </Group>
 
-        <Progress value={((step + 1) / steps.length) * 100} size="xs" />
-
-        <div>
-          <Text fw={700} size="sm">
-            {t("onboarding.step", { current: step + 1, title: current.title })}
-          </Text>
-          <Stack gap={5} mt="xs">
-            {current.items.map((item, index) => (
-              <Group key={item.text} gap="xs" align="flex-start" wrap="nowrap">
-                <Badge
-                  size="xs"
-                  circle
-                  variant="light"
-                  color={item.tone === "muted" ? "gray" : "violet"}
-                >
-                  {index + 1}
-                </Badge>
-                <Text size="xs" lh={1.45}>
-                  {item.text}
-                </Text>
-              </Group>
-            ))}
-          </Stack>
-        </div>
+        <Stepper active={step} onStepClick={setStep} size="xs" iconSize={22}>
+          {steps.map((item) => (
+            <Stepper.Step key={item.title} label={item.title}>
+              <Stack gap={5} mt="xs">
+                {item.items.map((entry) => (
+                  <Text
+                    key={entry.text}
+                    size="xs"
+                    c={entry.tone === "muted" ? "dimmed" : undefined}
+                    lh={1.45}
+                  >
+                    {entry.text}
+                  </Text>
+                ))}
+              </Stack>
+            </Stepper.Step>
+          ))}
+        </Stepper>
 
         {current.route && current.routeLabel ? (
           <Button

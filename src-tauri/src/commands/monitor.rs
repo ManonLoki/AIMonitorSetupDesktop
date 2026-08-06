@@ -12,6 +12,7 @@ use crate::{
     application::monitor::{
         ConnectionStatus, ImageUpload, MonitorDeviceSnapshot, MonitorService, RemoteImageGallery,
     },
+    domain::AppError,
     // 引入领域层的 AI 配置档案、AI 工具类型、发现到的设备、hook 配置位置及写入结果、监控设置等类型
     domain::monitor::{
         AiProfileDraft, AiProfileDraftSet, AiTool, DiscoveredMonitorDevice, HookConfigLocation,
@@ -28,7 +29,9 @@ pub fn get_monitor_capabilities() -> MonitorCapabilities {
 // 声明这是一个可被前端通过 invoke 调用的 Tauri 命令
 #[tauri::command]
 // 获取当前监控配置
-pub fn get_monitor_settings(service: State<'_, MonitorService>) -> Result<MonitorSettings, String> {
+pub fn get_monitor_settings(
+    service: State<'_, MonitorService>,
+) -> Result<MonitorSettings, AppError> {
     // 委托给监控服务读取当前设置
     service.settings()
 }
@@ -41,7 +44,7 @@ pub fn select_monitor_device(
     service: State<'_, MonitorService>,
     // 前端传入的、要选择的设备信息
     device: DiscoveredMonitorDevice,
-) -> Result<MonitorDeviceSnapshot, String> {
+) -> Result<MonitorDeviceSnapshot, AppError> {
     // 委托给监控服务处理设备选择，并返回同一版本的设备业务快照
     service.select_device_snapshot(&device)
 }
@@ -54,7 +57,7 @@ pub fn save_monitor_username(
     service: State<'_, MonitorService>,
     // 前端传入的新用户名
     username: String,
-) -> Result<MonitorSettings, String> {
+) -> Result<MonitorSettings, AppError> {
     // 委托给监控服务保存用户名，并返回更新后的设置
     service.save_username(&username)
 }
@@ -67,7 +70,7 @@ pub fn save_discovery_interval(
     service: State<'_, MonitorService>,
     // 前端传入的间隔分钟数
     minutes: u64,
-) -> Result<MonitorSettings, String> {
+) -> Result<MonitorSettings, AppError> {
     // 委托给监控服务保存发现间隔，并返回更新后的设置
     service.save_discovery_interval(minutes)
 }
@@ -77,7 +80,7 @@ pub fn save_discovery_interval(
 pub fn save_enabled_ai_tools(
     service: State<'_, MonitorService>,
     tools: Vec<AiTool>,
-) -> Result<MonitorSettings, String> {
+) -> Result<MonitorSettings, AppError> {
     service.save_enabled_ai_tools(&tools)
 }
 
@@ -89,7 +92,7 @@ pub async fn discover_monitor_devices(
     app: AppHandle,
     // Tauri 托管状态中取出的监控服务实例
     service: State<'_, MonitorService>,
-) -> Result<MonitorDeviceSnapshot, String> {
+) -> Result<MonitorDeviceSnapshot, AppError> {
     // 完整发现、自动选择与原子快照构造均由应用服务编排。
     service.refresh_online_devices(&app).await
 }
@@ -102,7 +105,7 @@ pub async fn check_monitor_connection(
     service: State<'_, MonitorService>,
     // 可选的目标设备基础 URL，为空则使用当前已选设备
     base_url: Option<String>,
-) -> Result<ConnectionStatus, String> {
+) -> Result<ConnectionStatus, AppError> {
     // 委托给监控服务异步检查连接状态
     service.check_connection(base_url.as_deref()).await
 }
@@ -115,7 +118,7 @@ pub async fn list_remote_images(
     service: State<'_, MonitorService>,
     // 查询发起时的设备并发令牌；选择变化时 Rust 拒绝返回其他设备的数据
     expected_device_id: String,
-) -> Result<RemoteImageGallery, String> {
+) -> Result<RemoteImageGallery, AppError> {
     // 委托给监控服务异步获取远程图片列表
     service.images(&expected_device_id).await
 }
@@ -129,7 +132,7 @@ pub async fn upload_remote_images(
     expected_device_id: String,
     // 前端传入的待上传图片数据列表
     images: Vec<ImageUpload>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, AppError> {
     // 委托给监控服务异步执行上传，返回上传结果（如文件名列表）
     service.upload_images(&expected_device_id, images).await
 }
@@ -143,7 +146,7 @@ pub async fn delete_remote_image(
     expected_device_id: String,
     // 前端传入的待删除文件名
     filename: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     // 委托给监控服务异步执行删除
     service.delete_image(&expected_device_id, &filename).await
 }
@@ -151,7 +154,7 @@ pub async fn delete_remote_image(
 // 声明这是一个可被前端通过 invoke 调用的 Tauri 命令
 #[tauri::command]
 // 列出当前设备全部 AI 工具的可编辑 Profile 草稿
-pub fn list_ai_profiles(service: State<'_, MonitorService>) -> Result<AiProfileDraftSet, String> {
+pub fn list_ai_profiles(service: State<'_, MonitorService>) -> Result<AiProfileDraftSet, AppError> {
     // 已保存值和未保存默认值均由 Rust 应用服务合并生成
     service.profile_drafts()
 }
@@ -162,7 +165,7 @@ pub fn list_ai_profiles(service: State<'_, MonitorService>) -> Result<AiProfileD
 pub fn list_hook_config_locations(
     // Tauri 托管状态中取出的监控服务实例
     service: State<'_, MonitorService>,
-) -> Result<Vec<HookConfigLocation>, String> {
+) -> Result<Vec<HookConfigLocation>, AppError> {
     // 委托给监控服务获取 hook 配置位置列表
     service.hook_config_locations()
 }
@@ -177,7 +180,7 @@ pub fn save_hook_config_directory(
     tool: AiTool,
     // 前端传入的配置目录路径
     directory: String,
-) -> Result<HookConfigLocation, String> {
+) -> Result<HookConfigLocation, AppError> {
     // 委托给监控服务保存该工具的 hook 配置目录，并返回更新后的位置信息
     service.save_hook_config_directory(tool, &directory)
 }
@@ -192,7 +195,7 @@ pub fn save_ai_profile(
     expected_device_id: String,
     // 前端传入的待保存草稿，设备 ID 由 Rust 绑定到当前设备
     profile: AiProfileDraft,
-) -> Result<AiProfileDraft, String> {
+) -> Result<AiProfileDraft, AppError> {
     // 委托给监控服务校验、持久化并返回规范化后的草稿
     service.save_profile_draft(&expected_device_id, profile)
 }
@@ -205,7 +208,7 @@ pub fn write_hook_config(
     service: State<'_, MonitorService>,
     // 前端指定的目标 AI 工具类型
     tool: AiTool,
-) -> Result<HookConfigWriteResult, String> {
+) -> Result<HookConfigWriteResult, AppError> {
     // 委托给监控服务执行 hook 配置文件写入，并返回写入结果
     service.write_hook_config(tool)
 }

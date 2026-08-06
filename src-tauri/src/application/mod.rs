@@ -1,4 +1,6 @@
 pub mod hook_relay;
+// 声明并导出 logging 子模块（基于 tracing 的日志初始化，写入滚动日志文件）
+pub mod logging;
 // 声明并导出 monitor 子模块（监控设备相关的应用服务逻辑）
 pub mod monitor;
 // 声明并导出局域网 HTTP 客户端加固策略（重试/重定向/代理）子模块

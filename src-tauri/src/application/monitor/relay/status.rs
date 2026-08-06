@@ -2,6 +2,8 @@
 // 写入 `HookRelayStatus`，供前端工作台查询展示。
 use std::sync::{Arc, RwLock};
 
+use tracing::{debug, warn};
+
 use crate::{
     application::monitor::{HookRelayLastEvent, HookRelayStatus},
     domain::monitor::{AiTool, HookTransition},
@@ -42,6 +44,11 @@ pub(super) fn record_hook_results_with_accounting(
     errors: &[String],
     counts_as_hook: bool,
 ) {
+    if errors.is_empty() {
+        debug!(?tool, hook_type, forwarded, "hook 事件已转发");
+    } else {
+        warn!(?tool, hook_type, ?errors, "hook 事件转发存在失败");
+    }
     if let Ok(mut current) = status.write() {
         if counts_as_hook {
             begin_hook_completion(&mut current);
@@ -72,6 +79,7 @@ pub(super) fn record_suppressed_hook(
     tool: AiTool,
     hook_type: &str,
 ) {
+    debug!(?tool, hook_type, "hook 事件被抑制");
     if let Ok(mut current) = status.write() {
         begin_hook_completion(&mut current);
         current.suppressed_count += 1;
@@ -93,6 +101,7 @@ pub(super) fn record_partial_suppression(status: &Arc<RwLock<HookRelayStatus>>) 
 
 // 记录一次中继层面的失败（如监听启动失败、请求解析失败等，与具体转发无关）。
 pub(crate) fn record_relay_failure(status: &Arc<RwLock<HookRelayStatus>>, error: String) {
+    warn!(%error, "hook 中继层失败");
     if let Ok(mut current) = status.write() {
         current.failed_count += 1;
         current.last_error = error;

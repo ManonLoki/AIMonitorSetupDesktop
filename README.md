@@ -159,6 +159,10 @@ Never commit the certificate, its private key, the App Store Connect API key, th
 `.p8` file, or the Issuer ID. Set `AIMONITOR_NOTARY_PROFILE` before building if
 you use a different keychain profile name.
 
+Windows Authenticode signing is intentionally not required for this project.
+Windows releases use the explicit Tauri `--no-sign` flag; no Windows certificate,
+signing password, custom `signCommand`, or `osslsigncode` installation is needed.
+
 ### Building a release
 
 1. Update the version in `package.json`, `src-tauri/Cargo.toml`, and
@@ -176,11 +180,11 @@ you use a different keychain profile name.
    # macOS universal binary (Apple Silicon + Intel)
    pnpm run build:mac
 
-   # Windows x64 through cargo-xwin on macOS/Linux
+   # Intentionally unsigned Windows x64 through cargo-xwin on macOS/Linux
    pnpm run build:win
 
-   # Build macOS universal and Windows x64 in sequence
-   pnpm run build:release
+   # Canonical release: signed/notarized macOS + unsigned Windows x64
+   pnpm release:desktop
    ```
 
    To build a single macOS architecture, override the default target:
@@ -192,9 +196,12 @@ you use a different keychain profile name.
 
 4. After a successful build, inspect `publish/`:
 
-   - `AIMonitorSetup-macOS-<architecture>-v<version>.dmg`
+   - `AIMonitorSetup-macOS-universal-v<version>.dmg`
    - `AIMonitorSetup-Windows-x64-v<version>-setup.exe`
    - `AIMonitorSetup-SHA256SUMS.txt`
+
+   A standalone `build:mac` with `AIMONITOR_MAC_TARGET` uses `arm64` or `x64`
+   instead of `universal` in its published DMG filename.
 
 The release script clears and repopulates `publish/` only after every requested
 platform succeeds, so it does not publish partial output. The automated macOS
@@ -202,20 +209,22 @@ flow is: Tauri build and signing → DMG signature validation → Apple notariza
 and wait for `Accepted` → staple the ticket → Gatekeeper validation → copy the
 installer.
 
-The Windows x64 installer is built through `cargo-xwin` and NSIS with `--no-sign`;
-it does not have an Authenticode signature. Windows signing and macOS Developer
-ID signing/notarization are independent processes.
+The Windows x64 installer is intentionally built through `cargo-xwin` and NSIS
+with `--no-sign`; it does not have an Authenticode signature. The release script
+still verifies that the packaged application binary is an x86_64 MSVC PE before
+copying the installer. Windows signing and macOS Developer ID
+signing/notarization are independent policies.
 
 ### Post-release validation
 
 Replace the version in each filename with the actual release version:
 
 ```bash
-xcrun stapler validate "publish/AIMonitorSetup-macOS-<architecture>-v<version>.dmg"
+xcrun stapler validate "publish/AIMonitorSetup-macOS-universal-v<version>.dmg"
 spctl --assess --verbose=2 --type open \
   --context context:primary-signature \
-  "publish/AIMonitorSetup-macOS-<architecture>-v<version>.dmg"
-shasum -a 256 -c publish/AIMonitorSetup-SHA256SUMS.txt
+  "publish/AIMonitorSetup-macOS-universal-v<version>.dmg"
+(cd publish && shasum -a 256 -c AIMonitorSetup-SHA256SUMS.txt)
 ```
 
 `stapler validate` must succeed, and `spctl` must report `accepted` and
@@ -224,10 +233,11 @@ another Mac and on a Windows machine.
 
 ### Moving to a new machine or rotating keys
 
-A new build machine needs both the Developer ID certificate with its private key
-and the App Store Connect `.p8` key. After importing the signing certificate,
-run `notarytool store-credentials` again. Revoke the old API key in App Store
-Connect only after the new setup can build and notarize successfully.
+A new build machine needs the Developer ID certificate with its private key and
+the App Store Connect `.p8` key. After importing the macOS signing certificate,
+run `notarytool store-credentials` again. Revoke the old API key only after the
+new setup can build and notarize macOS successfully. Windows requires no signing
+key.
 
 ### Troubleshooting
 
@@ -239,8 +249,8 @@ Connect only after the new setup can build and notarize successfully.
 - Notarization returns `Invalid`: obtain the Submission ID from the build output,
   then run
   `xcrun notarytool log <SUBMISSION_ID> --keychain-profile AIMonitorNotary`.
-- Windows build tools missing: confirm that `cargo-xwin`, `makensis`, and LLVM
-  are installed and that `llvm-rc` is on `PATH`.
+- Windows build prerequisites missing: confirm that `cargo-xwin`, `makensis`,
+  and LLVM are installed; `llvm-rc` and `llvm-readobj` must be on `PATH`.
 - Gatekeeper blocks the DMG: do not bypass the warning and publish it. Confirm
   that `stapler validate` succeeds and `spctl` reports
   `Notarized Developer ID`.

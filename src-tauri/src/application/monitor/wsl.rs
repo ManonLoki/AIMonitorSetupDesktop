@@ -8,6 +8,8 @@ use std::{
     process::{Command, Stdio},
 };
 
+use crate::domain::AppError;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct WslDirectory {
     distribution: String,
@@ -60,22 +62,25 @@ impl WslDirectory {
     }
 
     #[cfg(target_os = "windows")]
-    pub(super) fn translate_windows_executable(&self, executable: &Path) -> Result<String, String> {
+    pub(super) fn translate_windows_executable(
+        &self,
+        executable: &Path,
+    ) -> Result<String, AppError> {
         let executable = executable
             .to_str()
-            .ok_or_else(|| "AIMonitor 可执行文件路径不是有效 Unicode".to_owned())?;
+            .ok_or_else(|| AppError::new("error.wsl.executablePathNotUnicode"))?;
         let wslpath_input = wslpath_input(executable);
         let output = run_wsl(
             &self.distribution,
             ["wslpath", "-u", wslpath_input.as_str()],
         )?;
-        let translated = String::from_utf8(output)
-            .map_err(|error| format!("WSL 返回了无效的路径编码：{error}"))?;
+        let translated = String::from_utf8(output).map_err(|error| {
+            AppError::new("error.wsl.invalidPathEncoding").param("detail", error.to_string())
+        })?;
         let translated = translated.trim();
         if translated.is_empty() || !translated.starts_with('/') {
-            return Err(format!(
-                "WSL 无法转换 AIMonitor 可执行文件路径：{executable}"
-            ));
+            return Err(AppError::new("error.wsl.executableTranslationFailed")
+                .param("executable", executable));
         }
         Ok(translated.to_owned())
     }
@@ -84,9 +89,9 @@ impl WslDirectory {
     pub(super) fn translate_windows_executable(
         &self,
         _executable: &Path,
-    ) -> Result<String, String> {
+    ) -> Result<String, AppError> {
         let _ = self;
-        Err("WSL Hooks 配置只支持 Windows 宿主".to_owned())
+        Err(AppError::new("error.wsl.windowsHostOnly"))
     }
 }
 
@@ -104,7 +109,7 @@ impl WslFile {
     }
 
     #[cfg(target_os = "windows")]
-    pub(super) fn read_optional(&self) -> Result<Option<String>, String> {
+    pub(super) fn read_optional(&self) -> Result<Option<String>, AppError> {
         let output = Command::new("wsl.exe")
             .args([
                 "-d",
@@ -117,9 +122,9 @@ impl WslFile {
             .output()
             .map_err(|error| wsl_launch_error(&self.distribution, &error))?;
         if output.status.success() {
-            return String::from_utf8(output.stdout)
-                .map(Some)
-                .map_err(|error| format!("WSL Hooks 配置不是有效 UTF-8：{error}"));
+            return String::from_utf8(output.stdout).map(Some).map_err(|error| {
+                AppError::new("error.wsl.configNotUtf8").param("detail", error.to_string())
+            });
         }
 
         let existence = Command::new("wsl.exe")
@@ -141,25 +146,28 @@ impl WslFile {
         }
         Err(wsl_command_error(
             &self.distribution,
-            "读取 Hooks 配置",
+            "error.wsl.actionReadConfig",
             &output.stderr,
         ))
     }
 
     #[cfg(not(target_os = "windows"))]
-    pub(super) fn read_optional(&self) -> Result<Option<String>, String> {
+    pub(super) fn read_optional(&self) -> Result<Option<String>, AppError> {
         let _ = self;
-        Err("WSL Hooks 配置只支持 Windows 宿主".to_owned())
+        Err(AppError::new("error.wsl.windowsHostOnly"))
     }
 
     #[cfg(target_os = "windows")]
-    pub(super) fn write_atomic(&self, content: &str) -> Result<(), String> {
+    pub(super) fn write_atomic(&self, content: &str) -> Result<(), AppError> {
         let parent = self
             .linux_path
             .rsplit_once('/')
             .map(|(parent, _)| parent)
             .filter(|parent| !parent.is_empty())
-            .ok_or_else(|| format!("无法确定 WSL 配置目录：{}", self.linux_path))?;
+            .ok_or_else(|| {
+                AppError::new("error.wsl.cannotDetermineDirectory")
+                    .param("path", self.linux_path.clone())
+            })?;
         run_wsl(&self.distribution, ["mkdir", "-p", "--", parent])?;
 
         let temporary_path = format!("{}.aimonitor.tmp", self.linux_path);
@@ -173,16 +181,18 @@ impl WslFile {
         child
             .stdin
             .take()
-            .ok_or_else(|| "无法打开 WSL 配置写入通道".to_owned())?
+            .ok_or_else(|| AppError::new("error.wsl.cannotOpenWriteChannel"))?
             .write_all(content.as_bytes())
-            .map_err(|error| format!("无法向 WSL 写入临时 Hooks 配置：{error}"))?;
-        let output = child
-            .wait_with_output()
-            .map_err(|error| format!("无法等待 WSL Hooks 配置写入：{error}"))?;
+            .map_err(|error| {
+                AppError::new("error.wsl.writeTempFailed").param("detail", error.to_string())
+            })?;
+        let output = child.wait_with_output().map_err(|error| {
+            AppError::new("error.wsl.waitForWriteFailed").param("detail", error.to_string())
+        })?;
         if !output.status.success() {
             return Err(wsl_command_error(
                 &self.distribution,
-                "写入临时 Hooks 配置",
+                "error.wsl.actionWriteTempConfig",
                 &output.stderr,
             ));
         }
@@ -198,9 +208,9 @@ impl WslFile {
     }
 
     #[cfg(not(target_os = "windows"))]
-    pub(super) fn write_atomic(&self, _content: &str) -> Result<(), String> {
+    pub(super) fn write_atomic(&self, _content: &str) -> Result<(), AppError> {
         let _ = self;
-        Err("WSL Hooks 配置只支持 Windows 宿主".to_owned())
+        Err(AppError::new("error.wsl.windowsHostOnly"))
     }
 }
 
@@ -210,7 +220,7 @@ fn wsl_test_reports_missing(status_code: Option<i32>) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn run_wsl<const N: usize>(distribution: &str, command: [&str; N]) -> Result<Vec<u8>, String> {
+fn run_wsl<const N: usize>(distribution: &str, command: [&str; N]) -> Result<Vec<u8>, AppError> {
     let output = Command::new("wsl.exe")
         .args(["-d", distribution, "--"])
         .args(command)
@@ -219,7 +229,7 @@ fn run_wsl<const N: usize>(distribution: &str, command: [&str; N]) -> Result<Vec
     if !output.status.success() {
         return Err(wsl_command_error(
             distribution,
-            "执行 WSL 文件操作",
+            "error.wsl.actionExecuteFileOp",
             &output.stderr,
         ));
     }
@@ -227,19 +237,18 @@ fn run_wsl<const N: usize>(distribution: &str, command: [&str; N]) -> Result<Vec
 }
 
 #[cfg(target_os = "windows")]
-fn wsl_launch_error(distribution: &str, error: &std::io::Error) -> String {
-    format!("无法启动 WSL 发行版 {distribution}：{error}")
+fn wsl_launch_error(distribution: &str, error: &std::io::Error) -> AppError {
+    AppError::new("error.wsl.launchFailed")
+        .param("distribution", distribution)
+        .param("detail", error.to_string())
 }
 
 #[cfg(target_os = "windows")]
-fn wsl_command_error(distribution: &str, action: &str, stderr: &[u8]) -> String {
-    let detail = String::from_utf8_lossy(stderr);
-    let detail = detail.trim();
-    if detail.is_empty() {
-        format!("{action}失败（WSL 发行版：{distribution}）")
-    } else {
-        format!("{action}失败（WSL 发行版：{distribution}）：{detail}")
-    }
+fn wsl_command_error(distribution: &str, action_code: &str, stderr: &[u8]) -> AppError {
+    let detail = String::from_utf8_lossy(stderr).trim().to_owned();
+    AppError::new(action_code)
+        .param("distribution", distribution)
+        .param("detail", detail)
 }
 
 #[cfg(test)]

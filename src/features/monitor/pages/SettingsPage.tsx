@@ -42,7 +42,7 @@ import {
   onboardingOpenAtom,
 } from "../../../shared/state/ui";
 import { LineIcon } from "../../../shared/ui/LineIcon";
-import { useI18n } from "../../../shared/i18n";
+import { describeError, useI18n } from "../../../shared/i18n";
 import type { LanguagePreference } from "../../../shared/state/ui";
 
 const AUTHOR = "ManonLoki";
@@ -133,7 +133,7 @@ export function SettingsPage() {
   return (
     <Stack gap="sm" className="settings-page">
       {/* 汇总错误提示 */}
-      {error && <Alert color="red">{error.message}</Alert>}
+      {error && <Alert color="red">{describeError(error, t)}</Alert>}
 
       {/* AI 客户端多选卡片：勾选后同步调整监控管理与 Hooks 管理的可见选项卡 */}
       <Card

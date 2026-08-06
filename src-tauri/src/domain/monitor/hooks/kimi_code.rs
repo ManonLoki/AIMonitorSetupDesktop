@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::{HookEvent, HookEventKind, HookProtocol, ManagedCommands, managed_hook_marker};
+use crate::domain::AppError;
 use crate::domain::monitor::{AiTool, HookBehavior, HookConfigPreview, HookWriteOutcome};
 
 pub(super) static KIMI_CODE: KimiCodeProtocol = KimiCodeProtocol;
@@ -102,7 +103,7 @@ impl HookProtocol for KimiCodeProtocol {
         handler
     }
 
-    fn render_config(&self, hooks: Map<String, Value>) -> Result<String, String> {
+    fn render_config(&self, hooks: Map<String, Value>) -> Result<String, AppError> {
         let marker = managed_hook_marker(self.tool());
         let mut serialized_hooks = Vec::with_capacity(self.events().len());
 
@@ -110,11 +111,15 @@ impl HookProtocol for KimiCodeProtocol {
             let handler = hooks
                 .get(event.name)
                 .and_then(Value::as_object)
-                .ok_or_else(|| format!("生成的 {} Hook 缺少处理器", event.name))?;
+                .ok_or_else(|| {
+                    AppError::new("error.hooks.kimiMissingHandler").param("event", event.name)
+                })?;
             let command = handler
                 .get("command")
                 .and_then(Value::as_str)
-                .ok_or_else(|| format!("生成的 {} Hook 缺少 command", event.name))?;
+                .ok_or_else(|| {
+                    AppError::new("error.hooks.kimiMissingCommand").param("event", event.name)
+                })?;
             serialized_hooks.push(KimiHook {
                 event: event.name.to_owned(),
                 matcher: handler
@@ -128,7 +133,9 @@ impl HookProtocol for KimiCodeProtocol {
         let serialized = toml::to_string(&KimiConfig {
             hooks: serialized_hooks,
         })
-        .map_err(|error| format!("无法序列化 Kimi Code Hooks 配置：{error}"))?;
+        .map_err(|error| {
+            AppError::new("error.hooks.kimiSerializeFailed").param("detail", error.to_string())
+        })?;
         let mut content = format!("# {marker} begin\n{serialized}");
         if !content.ends_with('\n') {
             content.push('\n');
@@ -147,7 +154,7 @@ impl HookProtocol for KimiCodeProtocol {
         &self,
         existing_content: Option<&str>,
         generated: &HookConfigPreview,
-    ) -> Result<String, String> {
+    ) -> Result<String, AppError> {
         let mut merged = remove_managed_block(existing_content.unwrap_or(""), self.tool())?;
         if !merged.is_empty() {
             if !merged.ends_with('\n') {
@@ -167,7 +174,7 @@ impl HookProtocol for KimiCodeProtocol {
     }
 }
 
-fn remove_managed_block(content: &str, tool: AiTool) -> Result<String, String> {
+fn remove_managed_block(content: &str, tool: AiTool) -> Result<String, AppError> {
     let marker = managed_hook_marker(tool);
     let begin = format!("# {marker} begin");
     let end = format!("# {marker} end");
@@ -178,7 +185,7 @@ fn remove_managed_block(content: &str, tool: AiTool) -> Result<String, String> {
         return Ok(content.to_owned());
     }
     if begins.len() != 1 || ends.len() != 1 || begins[0].0 >= ends[0].0 {
-        return Err("现有 Kimi Code 配置中的 AIMonitor 托管区块边界不完整或重复".to_owned());
+        return Err(AppError::new("error.hooks.kimiManagedBlockCorrupted"));
     }
 
     let mut stripped = String::with_capacity(content.len());

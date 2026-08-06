@@ -12,6 +12,7 @@ use crate::application::{
     monitor::MonitorService,
     runtime::{RuntimeOverview, runtime_overview, set_autostart},
 };
+use crate::domain::AppError;
 
 // 声明这是一个可被前端通过 invoke 调用的 Tauri 命令
 #[tauri::command]
@@ -21,7 +22,7 @@ pub fn get_runtime_overview(
     app: AppHandle,
     // Tauri 托管状态中取出的监控服务实例
     monitor: State<'_, MonitorService>,
-) -> Result<RuntimeOverview, String> {
+) -> Result<RuntimeOverview, AppError> {
     // 转发给应用层函数完成具体逻辑
     runtime_overview(&app, &monitor)
 }
@@ -36,7 +37,7 @@ pub fn update_autostart(
     monitor: State<'_, MonitorService>,
     // 前端传入的开机自启开关目标状态
     enabled: bool,
-) -> Result<RuntimeOverview, String> {
+) -> Result<RuntimeOverview, AppError> {
     // 先调用应用层函数设置开机自启状态，失败则直接向上传播错误
     set_autostart(&app, enabled)?;
     // 设置成功后重新获取最新的运行时概览并返回

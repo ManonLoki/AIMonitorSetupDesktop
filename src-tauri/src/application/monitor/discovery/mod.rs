@@ -17,6 +17,7 @@ use super::{
     DEFAULT_DEVICE_API_PATH, DISCOVERY_MISSES_BEFORE_REMOVAL, UDP_DISCOVERY_PORT,
     UDP_DISCOVERY_REQUEST, UDP_DISCOVERY_TIMEOUT, UDP_RESPONSE_MAX_BYTES,
 };
+use crate::domain::AppError;
 use crate::domain::monitor::{DiscoveredMonitorDevice, DiscoverySource, normalize_base_url_parts};
 
 // 两轮 UDP 探测报文之间的发送间隔，给偶发丢包留出重试窗口。
@@ -81,16 +82,18 @@ pub(super) fn candidate_url_priority(base_url: &str) -> u8 {
 }
 
 // 通过 UDP 广播方式发现设备：先枚举本机所有可用网卡的广播目标，再逐个发送探测报文。
-pub(super) fn discover_udp_candidates() -> Result<Vec<DiscoveryCandidate>, String> {
+pub(super) fn discover_udp_candidates() -> Result<Vec<DiscoveryCandidate>, AppError> {
     let targets = udp_broadcast_targets()?;
     discover_udp_on_targets(&targets, UDP_DISCOVERY_PORT, UDP_DISCOVERY_TIMEOUT)
 }
 
 // 枚举本机网卡，计算出每个可用网卡对应的 UDP 广播目标地址。
-fn udp_broadcast_targets() -> Result<Vec<UdpBroadcastTarget>, String> {
+fn udp_broadcast_targets() -> Result<Vec<UdpBroadcastTarget>, AppError> {
     // 获取本机所有网卡地址信息。
-    let interfaces =
-        if_addrs::get_if_addrs().map_err(|error| format!("无法枚举本机网卡：{error}"))?;
+    let interfaces = if_addrs::get_if_addrs().map_err(|error| {
+        AppError::new("error.discovery.enumerateInterfacesFailed")
+            .param("detail", error.to_string())
+    })?;
     let mut targets = interfaces
         .into_iter()
         // 只保留处于 Up 或状态未知（部分平台不会上报明确状态）的网卡，
@@ -141,7 +144,7 @@ fn discover_udp_on_targets(
     targets: &[UdpBroadcastTarget],
     discovery_port: u16,
     timeout: Duration,
-) -> Result<Vec<DiscoveryCandidate>, String> {
+) -> Result<Vec<DiscoveryCandidate>, AppError> {
     // 为每个广播目标准备一个 UDP socket，同时记录绑定失败的错误信息。
     let mut sockets = Vec::with_capacity(targets.len());
     let mut bind_errors = Vec::new();
@@ -168,10 +171,8 @@ fn discover_udp_on_targets(
 
     // 所有网卡都绑定失败时直接返回错误，携带每个网卡的失败原因。
     if sockets.is_empty() {
-        return Err(format!(
-            "无法在任何 IPv4 网卡上创建 UDP socket：{}",
-            bind_errors.join("；")
-        ));
+        return Err(AppError::new("error.discovery.udpSocketBindFailed")
+            .param("detail", bind_errors.join("; ")));
     }
 
     // 发送两轮探测报文，提高在丢包网络下的命中率。

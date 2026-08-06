@@ -103,7 +103,7 @@ fn manual_selection_rejects_offline_devices_and_uses_the_online_route() {
     let error = service
         .select_device_snapshot(&device("offline", "Offline", 30))
         .unwrap_err();
-    assert_eq!(error, "目标 AIMonitor 设备已离线，请刷新设备列表");
+    assert_eq!(error.code, "error.discovery.selectedDeviceOffline");
     assert_eq!(service.device_snapshot_state.lock().unwrap().revision, 1);
 
     drop(service);

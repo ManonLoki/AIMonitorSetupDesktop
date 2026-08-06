@@ -4,6 +4,7 @@ use std::sync::MutexGuard;
 
 use super::super::{DeviceSnapshotState, discovery::stabilize_discovered_devices};
 use super::{MonitorDeviceSnapshot, MonitorService};
+use crate::domain::AppError;
 use crate::domain::monitor::{
     DiscoveredMonitorDevice, MonitorDeviceRoute, MonitorSettings, validate_device_route,
 };
@@ -13,15 +14,15 @@ impl MonitorService {
     /// `online_devices` 的组合读不会被发现提交或手动切换打断。
     pub(in crate::application::monitor) fn lock_device_snapshot_transaction(
         &self,
-    ) -> Result<MutexGuard<'_, DeviceSnapshotState>, String> {
+    ) -> Result<MutexGuard<'_, DeviceSnapshotState>, AppError> {
         self.device_snapshot_state
             .lock()
-            .map_err(|_| "设备快照事务锁已损坏".to_owned())
+            .map_err(|_| AppError::new("error.internal.lockPoisoned"))
     }
 
     /// 为一次完整发现分配启动世代。网络探测在事务锁外运行；提交时
     /// 若已有更新世代启动，该较旧结果会被丢弃。
-    pub(super) fn begin_online_device_refresh(&self) -> Result<u64, String> {
+    pub(super) fn begin_online_device_refresh(&self) -> Result<u64, AppError> {
         let mut state = self.lock_device_snapshot_transaction()?;
         state.latest_refresh_generation = state.latest_refresh_generation.saturating_add(1);
         Ok(state.latest_refresh_generation)
@@ -33,7 +34,7 @@ impl MonitorService {
         &self,
         refresh_generation: u64,
         devices: Vec<DiscoveredMonitorDevice>,
-    ) -> Result<(MonitorDeviceSnapshot, bool), String> {
+    ) -> Result<(MonitorDeviceSnapshot, bool), AppError> {
         let mut state = self.lock_device_snapshot_transaction()?;
         if refresh_generation != state.latest_refresh_generation {
             return Ok((self.current_device_snapshot_locked(state.revision)?, false));
@@ -42,11 +43,11 @@ impl MonitorService {
             let mut missed_scans = self
                 .discovery_missed_scans
                 .lock()
-                .map_err(|_| "设备发现去抖锁已损坏".to_owned())?;
+                .map_err(|_| AppError::new("error.internal.lockPoisoned"))?;
             let previous = self
                 .online_devices
                 .read()
-                .map_err(|_| "在线设备读取锁已损坏".to_owned())?
+                .map_err(|_| AppError::new("error.internal.lockPoisoned"))?
                 .clone();
             stabilize_discovered_devices(&previous, devices, &mut missed_scans)
         };
@@ -64,7 +65,7 @@ impl MonitorService {
     fn select_first_available_device_if_needed_locked(
         &self,
         devices: &[DiscoveredMonitorDevice],
-    ) -> Result<bool, String> {
+    ) -> Result<bool, AppError> {
         let Some(next) = devices.first() else {
             return Ok(false);
         };
@@ -79,11 +80,11 @@ impl MonitorService {
     fn replace_online_devices_locked(
         &self,
         devices: &[DiscoveredMonitorDevice],
-    ) -> Result<bool, String> {
+    ) -> Result<bool, AppError> {
         let mut current = self
             .online_devices
             .write()
-            .map_err(|_| "在线设备写入锁已损坏".to_owned())?;
+            .map_err(|_| AppError::new("error.internal.lockPoisoned"))?;
         if current.as_slice() == devices {
             return Ok(false);
         }
@@ -97,7 +98,7 @@ impl MonitorService {
     pub fn select_device(
         &self,
         device: &DiscoveredMonitorDevice,
-    ) -> Result<MonitorSettings, String> {
+    ) -> Result<MonitorSettings, AppError> {
         let mut state = self.lock_device_snapshot_transaction()?;
         let (settings, changed) = self.select_device_locked(device)?;
         if changed {
@@ -110,12 +111,12 @@ impl MonitorService {
     pub fn select_device_snapshot(
         &self,
         device: &DiscoveredMonitorDevice,
-    ) -> Result<MonitorDeviceSnapshot, String> {
+    ) -> Result<MonitorDeviceSnapshot, AppError> {
         let mut state = self.lock_device_snapshot_transaction()?;
         let devices = self
             .online_devices
             .read()
-            .map_err(|_| "在线设备读取锁已损坏".to_owned())?
+            .map_err(|_| AppError::new("error.internal.lockPoisoned"))?
             .clone();
         // 输入 DTO 可能来自旧的前端缓存；只取其稳定 ID，名称和地址必须
         // 使用同一事务中的最新在线记录。已离线设备不允许被迟到选择复活。
@@ -123,7 +124,7 @@ impl MonitorService {
             .iter()
             .find(|online| online.id == device.id)
             .cloned()
-            .ok_or_else(|| "目标 AIMonitor 设备已离线，请刷新设备列表".to_owned())?;
+            .ok_or_else(|| AppError::new("error.discovery.selectedDeviceOffline"))?;
         let (settings, changed) = self.select_device_locked(&online_device)?;
         if changed {
             self.advance_device_snapshot_revision_locked(&mut state);
@@ -138,11 +139,11 @@ impl MonitorService {
     fn current_device_snapshot_locked(
         &self,
         revision: u64,
-    ) -> Result<MonitorDeviceSnapshot, String> {
+    ) -> Result<MonitorDeviceSnapshot, AppError> {
         let devices = self
             .online_devices
             .read()
-            .map_err(|_| "在线设备读取锁已损坏".to_owned())?
+            .map_err(|_| AppError::new("error.internal.lockPoisoned"))?
             .clone();
         Ok(MonitorDeviceSnapshot::from_parts(
             revision,
@@ -162,12 +163,12 @@ impl MonitorService {
     fn select_device_locked(
         &self,
         device: &DiscoveredMonitorDevice,
-    ) -> Result<(MonitorSettings, bool), String> {
+    ) -> Result<(MonitorSettings, bool), AppError> {
         let route = validate_device_route(device)?;
         let mut data = self
             .data
             .write()
-            .map_err(|_| "配置写入锁已损坏".to_owned())?;
+            .map_err(|_| AppError::new("error.internal.lockPoisoned"))?;
         let settings_unchanged = data.settings.base_url == route.base_url
             && data.settings.device_id == route.device_id
             && data.settings.device_name == route.device_name;

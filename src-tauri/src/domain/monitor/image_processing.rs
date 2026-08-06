@@ -1,3 +1,5 @@
+use crate::domain::AppError;
+
 /// 长边超过该像素数的上传图片会被等比缩小到该尺寸以内。
 pub const MAX_UPLOAD_IMAGE_EDGE: u32 = 800;
 // 重新编码 JPEG 时使用的固定质量参数（0-100，值越大质量越高、体积越大）。
@@ -21,13 +23,14 @@ pub fn process_image_upload(
     filename: &str,
     bytes: &[u8],
     mime_type: &str,
-) -> Result<ProcessedUploadImage, String> {
+) -> Result<ProcessedUploadImage, AppError> {
     use super::image_policy::UploadImageFormat;
 
     match super::upload_image_format(mime_type) {
         Some(UploadImageFormat::Gif) => {
-            image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
-                .map_err(|error| format!("图片解码失败：{error}"))?;
+            image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).map_err(|error| {
+                AppError::new("error.image.decodeFailed").param("detail", error.to_string())
+            })?;
             Ok(ProcessedUploadImage {
                 filename: filename.to_owned(),
                 mime_type: "image/gif",
@@ -48,7 +51,7 @@ pub fn process_image_upload(
         Some(UploadImageFormat::Bmp) => {
             process_static_upload(filename, bytes, image::ImageFormat::Bmp, "image/png", true)
         }
-        None => Err("不支持的图片类型".to_owned()),
+        None => Err(AppError::new("error.image.unsupportedType")),
     }
 }
 
@@ -60,7 +63,7 @@ fn process_static_upload(
     source_format: image::ImageFormat,
     output_mime_type: &'static str,
     convert_to_png: bool,
-) -> Result<ProcessedUploadImage, String> {
+) -> Result<ProcessedUploadImage, AppError> {
     let output_format = if convert_to_png {
         image::ImageFormat::Png
     } else {
@@ -68,8 +71,9 @@ fn process_static_upload(
     };
 
     // 按声明的格式解码图片；解码失败说明数据损坏或格式不匹配。
-    let decoded = image::load_from_memory_with_format(bytes, source_format)
-        .map_err(|error| format!("图片解码失败：{error}"))?;
+    let decoded = image::load_from_memory_with_format(bytes, source_format).map_err(|error| {
+        AppError::new("error.image.decodeFailed").param("detail", error.to_string())
+    })?;
     // 任一边超过上限就需要缩放。
     let needs_resize =
         decoded.width() > MAX_UPLOAD_IMAGE_EDGE || decoded.height() > MAX_UPLOAD_IMAGE_EDGE;
@@ -93,9 +97,9 @@ fn process_static_upload(
                 &mut output,
                 UPLOAD_JPEG_QUALITY,
             );
-            image
-                .write_with_encoder(encoder)
-                .map_err(|error| format!("图片压缩失败：{error}"))?;
+            image.write_with_encoder(encoder).map_err(|error| {
+                AppError::new("error.image.encodeFailed").param("detail", error.to_string())
+            })?;
         }
         image::ImageFormat::Png => {
             // PNG 使用最高压缩级别 + 自适应滤波器，尽量减小体积。
@@ -104,9 +108,9 @@ fn process_static_upload(
                 image::codecs::png::CompressionType::Best,
                 image::codecs::png::FilterType::Adaptive,
             );
-            image
-                .write_with_encoder(encoder)
-                .map_err(|error| format!("图片压缩失败：{error}"))?;
+            image.write_with_encoder(encoder).map_err(|error| {
+                AppError::new("error.image.encodeFailed").param("detail", error.to_string())
+            })?;
         }
         // output_format 在调用方已被限定为 Jpeg 或 Png 之一。
         _ => unreachable!("输出格式只能是 Jpeg 或 Png"),
@@ -132,11 +136,13 @@ fn process_static_upload(
 
 // WebP 需要单独处理：静态图直接走通用缩放/转码路径；动图设备端不支持，
 // 转成动图 GIF 保留动画效果（GIF 是设备原生支持的动图格式）。
-fn process_webp_upload(filename: &str, bytes: &[u8]) -> Result<ProcessedUploadImage, String> {
+fn process_webp_upload(filename: &str, bytes: &[u8]) -> Result<ProcessedUploadImage, AppError> {
     use image::AnimationDecoder as _;
 
-    let decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))
-        .map_err(|error| format!("图片解码失败：{error}"))?;
+    let decoder =
+        image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).map_err(|error| {
+            AppError::new("error.image.decodeFailed").param("detail", error.to_string())
+        })?;
     if !decoder.has_animation() {
         return process_static_upload(filename, bytes, image::ImageFormat::WebP, "image/png", true);
     }
@@ -169,7 +175,9 @@ fn process_webp_upload(filename: &str, bytes: &[u8]) -> Result<ProcessedUploadIm
             Ok(image::Frame::from_parts(resized, 0, 0, delay))
         })
         .collect::<image::ImageResult<Vec<_>>>()
-        .map_err(|error| format!("图片解码失败：{error}"))?;
+        .map_err(|error| {
+            AppError::new("error.image.decodeFailed").param("detail", error.to_string())
+        })?;
 
     let mut output = Vec::new();
     {
@@ -177,7 +185,9 @@ fn process_webp_upload(filename: &str, bytes: &[u8]) -> Result<ProcessedUploadIm
         encoder
             .set_repeat(repeat)
             .and_then(|()| encoder.encode_frames(frames))
-            .map_err(|error| format!("WebP 动图转 GIF 失败：{error}"))?;
+            .map_err(|error| {
+                AppError::new("error.image.webpToGifFailed").param("detail", error.to_string())
+            })?;
     }
     Ok(ProcessedUploadImage {
         filename: replace_image_extension(filename, "gif"),
